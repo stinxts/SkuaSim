@@ -155,14 +155,12 @@ public sealed class SimulationSession : IDisposable
         set
         {
             var normalized = NormalizeSpeed(value);
-            SimClock? clock;
             lock (_stateGate)
             {
                 _speedMultiplier = normalized;
-                clock = _clock;
+                if (_clock != null)
+                    _clock.SpeedMultiplier = normalized;
             }
-            if (clock != null)
-                clock.SpeedMultiplier = normalized;
         }
     }
 
@@ -180,7 +178,6 @@ public sealed class SimulationSession : IDisposable
 
     public void Pause()
     {
-        SimClock? clock;
         bool stateChanged = false;
         SimulationState newState;
         lock (_stateGate)
@@ -188,23 +185,24 @@ public sealed class SimulationSession : IDisposable
             if (_state is SimulationState.Completed or SimulationState.Stopping)
                 return;
             _pausedRequested = true;
-            clock = _clock;
-            if (clock != null && _state == SimulationState.Running)
+            if (_clock != null)
             {
-                _state = SimulationState.Paused;
-                stateChanged = true;
+                _clock.Pause();
+                if (_state == SimulationState.Running)
+                {
+                    _state = SimulationState.Paused;
+                    stateChanged = true;
+                }
             }
             newState = _state;
         }
 
-        clock?.Pause();
         if (stateChanged)
             StateChanged?.Invoke(newState);
     }
 
     public void Resume()
     {
-        SimClock? clock;
         bool stateChanged = false;
         SimulationState newState;
         lock (_stateGate)
@@ -212,16 +210,18 @@ public sealed class SimulationSession : IDisposable
             if (_state is SimulationState.Completed or SimulationState.Stopping)
                 return;
             _pausedRequested = false;
-            clock = _clock;
-            if (clock != null && _state == SimulationState.Paused)
+            if (_clock != null)
             {
-                _state = SimulationState.Running;
-                stateChanged = true;
+                _clock.Resume();
+                if (_state == SimulationState.Paused)
+                {
+                    _state = SimulationState.Running;
+                    stateChanged = true;
+                }
             }
             newState = _state;
         }
 
-        clock?.Resume();
         if (stateChanged)
             StateChanged?.Invoke(newState);
     }

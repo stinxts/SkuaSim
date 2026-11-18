@@ -59,7 +59,7 @@ public sealed class SimulationRunner
 
         var loadContext = new SimScriptLoadContext();
         var instProp = typeof(IScriptInterface).GetProperty(nameof(IScriptInterface.Instance), BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-        var setDummyBot = false;
+        object? dummyBot = null;
 
         try
         {
@@ -83,8 +83,8 @@ public sealed class SimulationRunner
                 {
                     LoadedScriptPath = scriptFullPath
                 };
-                instProp.SetValue(null, BuildBotProxy(dummyCtx));
-                setDummyBot = true;
+                dummyBot = BuildBotProxy(dummyCtx);
+                instProp.SetValue(null, dummyBot);
             }
 
             var (scriptType, _) = mainInfo.Value;
@@ -100,9 +100,10 @@ public sealed class SimulationRunner
                 var name = opt.Name ?? "";
                 if (string.IsNullOrWhiteSpace(name))
                     continue;
-                var category = !string.IsNullOrWhiteSpace(opt.Category)
+                var category = !string.IsNullOrWhiteSpace(opt.Category) &&
+                               (isPrimary || !string.Equals(opt.Category, "Options", StringComparison.OrdinalIgnoreCase))
                     ? opt.Category
-                    : (isPrimary ? "Default" : memberName);
+                    : (isPrimary ? "Options" : memberName);
                 if (!seen.Add($"{category}|{name}"))
                     continue;
 
@@ -129,8 +130,8 @@ public sealed class SimulationRunner
         }
         finally
         {
-            if (setDummyBot)
-                instProp?.SetValue(null, null);
+            if (dummyBot != null && instProp != null && ReferenceEquals(instProp.GetValue(null), dummyBot))
+                instProp.SetValue(null, null);
             try { loadContext.Unload(); } catch { }
         }
     }

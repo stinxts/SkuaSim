@@ -195,6 +195,8 @@ public sealed class SimClock : SkuaSim.Runtime.ISimTimeSource
             }
             Monitor.PulseAll(_pauseGate);
         }
+        lock (_gate)
+            Monitor.PulseAll(_gate);
     }
 
     public void WaitIfPaused()

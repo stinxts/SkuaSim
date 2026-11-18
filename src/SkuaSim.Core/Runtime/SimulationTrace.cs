@@ -159,7 +159,7 @@ public sealed class SimulationTrace : IDisposable
             }
 
             var firstSeq = _liveHistory.Peek().Seq;
-            droppedEntries = afterSeq > 0 && afterSeq + 1 < firstSeq;
+            droppedEntries = afterSeq + 1 < firstSeq;
 
             var batch = new List<IndexedTraceEntry>(Math.Min(limit, _liveHistory.Count));
             var lastReturned = afterSeq;
