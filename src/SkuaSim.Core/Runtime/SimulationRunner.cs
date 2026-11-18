@@ -278,6 +278,7 @@ public sealed class SimulationRunner
             IsBackground = true
         };
 
+        session.MarkExecutionStarted(clock);
         scriptThread.Start();
 
         var maxRealMs = (long)(Math.Max(1.0, scenario.Limits.MaxRealSeconds) * 1000);
@@ -294,7 +295,7 @@ public sealed class SimulationRunner
             if (clock.IsPaused)
                 continue;
 
-            var activeRealMs = Math.Max(0, session.TotalRealElapsedMs - clock.TotalPausedMs);
+            var activeRealMs = session.ActiveExecutionRealMs(clock);
             if (activeRealMs >= maxRealMs)
             {
                 ctx.RequestStop($"real-time limit reached ({scenario.Limits.MaxRealSeconds:F1}s)");

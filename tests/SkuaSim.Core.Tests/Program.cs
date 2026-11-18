@@ -31,6 +31,8 @@ internal static class CoreTests
             TestCompileAndInspectScript(runner, tempDir);
             TestSessionPauseResumeAndLiveSnapshot(runner, tempDir);
             TestSpeedPacingAndStopWhilePaused(runner, tempDir);
+            TestXpLevelProgression(runner, tempDir);
+            TestMaxRealSecondsExcludesCompile(installation, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -377,6 +379,128 @@ internal static class CoreTests
         Assert(stopReport.Outcome == SimulationOutcome.LimitReached, $"Expected LimitReached on user stop, got {stopReport.Outcome}");
         Assert(stopReport.StopReason == "cancelled while paused", $"Unexpected StopReason: {stopReport.StopReason}");
         Console.WriteLine($"   OK: Paced 8x took {pacedReport.RealDuration.TotalMilliseconds:F0}ms real for {pacedReport.VirtualDuration.TotalMilliseconds:F0}ms virtual; Stop-while-paused unwound in {stopSw.ElapsedMilliseconds}ms");
+    }
+
+    private static void TestXpLevelProgression(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("6. Testing XP -> Level progression, MaxHealth scaling & Lv 100 cap...");
+        var levelScript = Path.Combine(tempDir, "LevelingBot.cs");
+        File.WriteAllText(levelScript, """
+        using Skua.Core.Interfaces;
+
+        public class LevelingBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Map.Join("xpfield", "r1", "Left");
+                while (!bot.ShouldExit && bot.Player.Level < 4)
+                {
+                    bot.Kill.Monster("*");
+                }
+                bot.Log($"Reached Lv {bot.Player.Level} (XP {bot.Player.XP}/{bot.Player.RequiredXP})");
+            }
+        }
+        """);
+
+        Scenario BuildScenario(int startLevel, int maxHp) => new()
+        {
+            Name = "XP Progression Test",
+            Seed = 99,
+            Player = new PlayerSetup
+            {
+                Username = "LevelTester",
+                Level = startLevel,
+                MaxHealth = maxHp,
+                Class = "Mage",
+                DamagePerSecond = 2_000
+            },
+            Maps = new Dictionary<string, MapSetup>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["xpfield"] = new MapSetup
+                {
+                    Cells = new List<string> { "Enter", "r1" },
+                    Monsters = new List<MonsterSetup>
+                    {
+                        new() { Name = "Training Slime", Cell = "r1", MaxHP = 400, Level = 5 }
+                    }
+                }
+            },
+            Limits = new LimitsSetup
+            {
+                MaxVirtualMinutes = 10,
+                MaxRealSeconds = 20
+            }
+        };
+
+        var r1 = runner.Run(new SimulationRunOptions { ScriptPath = levelScript, Scenario = BuildScenario(1, 350) });
+        Assert(r1.Outcome == SimulationOutcome.Completed, $"Expected Completed, got {r1.Outcome} ({r1.ExceptionText ?? r1.StopReason})");
+        Assert(r1.FinalState.Level >= 4, $"Expected Level >= 4, got {r1.FinalState.Level}");
+        Assert(r1.FinalState.MaxHealth == 350 + 35 * (r1.FinalState.Level - 1), $"Expected MaxHealth scaling on level-up, got {r1.FinalState.MaxHealth}");
+
+        // Verify Lv 100 cap does not overflow or exceed 100
+        var capScript = Path.Combine(tempDir, "CapBot.cs");
+        File.WriteAllText(capScript, """
+        using Skua.Core.Interfaces;
+
+        public class CapBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Map.Join("xpfield", "r1", "Left");
+                bot.Kill.Monster("*");
+                bot.Kill.Monster("*");
+                var ratio = (double)bot.Player.XP / bot.Player.RequiredXP;
+                bot.Log($"Lv {bot.Player.Level}, ratio={ratio}");
+            }
+        }
+        """);
+
+        var rCap = runner.Run(new SimulationRunOptions { ScriptPath = capScript, Scenario = BuildScenario(100, 10_000) });
+        Assert(rCap.Outcome == SimulationOutcome.Completed, $"Expected Completed for cap check, got {rCap.Outcome}");
+        Assert(rCap.FinalState.Level == 100 && rCap.FinalState.MaxHealth == 10_000, $"Expected Level=100 & MaxHealth=10000 at cap, got Lv {rCap.FinalState.Level} HP {rCap.FinalState.MaxHealth}");
+        Console.WriteLine($"   OK: Leveled Lv 1 -> Lv {r1.FinalState.Level} in {r1.Kills} kills (MaxHP {r1.FinalState.MaxHealth}); cap at Lv 100 safe");
+    }
+
+    private static void TestMaxRealSecondsExcludesCompile(SkuaInstallation installation, string tempDir)
+    {
+        Console.WriteLine("7. Testing MaxRealSeconds excludes cold Roslyn compile duration...");
+        var coldRunner = new SimulationRunner(installation);
+        var coreScript = Path.Combine(tempDir, "ColdCompileBot.cs");
+        File.WriteAllText(coreScript, """
+        //cs_include Scripts/CoreBots.cs
+        using Skua.Core.Interfaces;
+
+        public class ColdCompileBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Sleep(250);
+                bot.Log("execution completed after cold compile");
+            }
+        }
+        """);
+
+        var shortLimitScenario = new Scenario
+        {
+            Name = "Short Execution Real Limit",
+            Seed = 11,
+            Limits = new LimitsSetup
+            {
+                MaxRealSeconds = 1.5,
+                MaxVirtualMinutes = 5,
+                StallRealSeconds = 10
+            }
+        };
+
+        var report = coldRunner.Run(new SimulationRunOptions
+        {
+            ScriptPath = coreScript,
+            Scenario = shortLimitScenario
+        });
+
+        Assert(report.CompileDuration > TimeSpan.FromSeconds(1.5), $"Expected cold compile > 1.5s to verify isolation, got {report.CompileDuration.TotalSeconds:F2}s");
+        Assert(report.Outcome == SimulationOutcome.Completed, $"Expected Completed despite compile ({report.CompileDuration.TotalSeconds:F2}s) > MaxRealSeconds (1.5s), got {report.Outcome} ({report.StopReason ?? report.ExceptionText})");
+        Console.WriteLine($"   OK: Cold compile took {report.CompileDuration.TotalSeconds:F2}s (> 1.5s limit), script still executed and completed cleanly");
     }
 
     private static bool SpinWaitUntil(Func<bool> predicate, TimeSpan timeout)

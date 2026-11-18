@@ -32,7 +32,7 @@ public sealed class PlayerApi : ApiBase
     public string Guild => World.Guild;
     public int ID => 1;
     public int XP => World.XP;
-    public int RequiredXP => Math.Max(1, World.Level * 1000);
+    public int RequiredXP => World.RequiredXP;
     public int AccessLevel { get => World.AccessLevel; set => World.AccessLevel = value; }
     public string Cell => World.Cell;
     public string Pad => World.Pad;

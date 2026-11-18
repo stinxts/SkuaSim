@@ -66,6 +66,7 @@ public sealed record WantedItem(ItemInfo Info, int Quantity);
 /// </summary>
 public sealed class SimWorld
 {
+    public const int MaxLevel = 100;
     private const int CombatTickMs = 1000;
     private static readonly FieldInfo? QuestReqsField = typeof(Quest).GetField("_reqs", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? QuestReqCacheField = typeof(Quest).GetField("_reqCache", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -108,8 +109,9 @@ public sealed class SimWorld
     public bool IsMember { get; set; }
     public int AccessLevel { get; set; }
     public string Guild { get; set; }
-    public int MaxHealth { get; }
+    public int MaxHealth { get; private set; }
     public int Health { get; set; }
+    public int RequiredXP => RequiredXpForLevel(Level);
     public int ClassRank { get; set; }
     public bool LoggedIn { get; set; }
     public bool Kicked { get; set; }
@@ -1028,7 +1030,10 @@ public sealed class SimWorld
         monster.HP = 0;
         Kills++;
         KillsByMonster[monster.Name] = KillsByMonster.GetValueOrDefault(monster.Name) + 1;
-        Trace.World($"Defeated {monster.Name} (MapID {monster.MapID}) in {monster.Cell}.");
+
+        var monsterXp = CalculateMonsterXp(monster);
+        GainExperience(monsterXp);
+        Trace.World($"Defeated {monster.Name} (MapID {monster.MapID}) in {monster.Cell} (+{monsterXp} xp).");
 
         var respawnMs = Math.Max(1, Rules.MonsterRespawnSeconds) * 1000L;
         var map = Map;
@@ -1065,6 +1070,46 @@ public sealed class SimWorld
                     JumpInternal(SpawnCell, SpawnPad, raiseEvents: true);
             }
         });
+    }
+
+    public static int RequiredXpForLevel(int level)
+    {
+        var lvl = Math.Clamp(level, 1, MaxLevel);
+        return (int)Math.Min(int.MaxValue, (long)lvl * lvl * 25 + lvl * 100);
+    }
+
+    private int CalculateMonsterXp(SimMonster monster)
+    {
+        var effectiveLevel = monster.Level > 0 ? monster.Level : Math.Max(1, Level);
+        return Math.Max(25, effectiveLevel * 25 + 25);
+    }
+
+    private void GainExperience(int amount)
+    {
+        if (amount <= 0)
+            return;
+        if (Level >= MaxLevel)
+        {
+            Level = MaxLevel;
+            XP = 0;
+            return;
+        }
+
+        long pool = (long)XP + amount;
+        while (Level < MaxLevel)
+        {
+            var needed = RequiredXpForLevel(Level);
+            if (pool < needed)
+                break;
+            pool -= needed;
+            Level++;
+            MaxHealth += 35;
+            if (Alive)
+                Health = MaxHealth;
+            Trace.World($"Level up! Reached Lv. {Level} (MaxHP {MaxHealth}).");
+        }
+
+        XP = Level >= MaxLevel ? 0 : (int)Math.Min(int.MaxValue, pool);
     }
 
     public void Rest()
@@ -1439,7 +1484,7 @@ public sealed class SimWorld
             }
 
             Gold += q.Gold;
-            XP += q.XP;
+            GainExperience(q.XP);
             if (q.Slot >= 0)
                 SlotProgress[q.Slot] = Math.Max(SlotProgress.GetValueOrDefault(q.Slot), q.Value);
             if (q.Once || q.Slot >= 0)

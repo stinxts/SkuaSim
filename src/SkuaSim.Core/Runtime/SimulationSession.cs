@@ -80,6 +80,8 @@ public sealed class SimulationSession : IDisposable
     private SimContext? _ctx;
     private SimulationTrace? _trace;
     private SimulationReport? _report;
+    private Stopwatch? _executionSw;
+    private long _pausedAtExecutionStartMs;
     private TimeSpan _finalActiveRealTime;
     private TimeSpan _finalPausedTime;
     private bool _disposed;
@@ -417,6 +419,31 @@ public sealed class SimulationSession : IDisposable
         }
 
         StateChanged?.Invoke(newState);
+    }
+
+    internal void MarkExecutionStarted(SimClock clock)
+    {
+        lock (_stateGate)
+        {
+            _pausedAtExecutionStartMs = clock.TotalPausedMs;
+            _executionSw = Stopwatch.StartNew();
+        }
+    }
+
+    internal long ActiveExecutionRealMs(SimClock clock)
+    {
+        Stopwatch? execSw;
+        long pausedBaseline;
+        lock (_stateGate)
+        {
+            execSw = _executionSw;
+            pausedBaseline = _pausedAtExecutionStartMs;
+        }
+        if (execSw == null)
+            return 0;
+
+        var pausedDuringExecution = Math.Max(0, clock.TotalPausedMs - pausedBaseline);
+        return Math.Max(0, execSw.ElapsedMilliseconds - pausedDuringExecution);
     }
 
     internal TimeSpan CurrentActiveRealDuration(SimClock? clock)
