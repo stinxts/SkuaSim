@@ -1,0 +1,130 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:SkuaSim.UI.ViewModels"
+             xmlns:models="using:SkuaSim.UI.Models"
+             x:Class="SkuaSim.UI.Views.ExecutionToolbarView"
+             x:DataType="vm:MainViewModel">
+
+    <Border Classes="Card">
+        <StackPanel Spacing="8">
+            <!-- Warning banner when Skua/VibeSkua is not auto-detected -->
+            <Border Classes="WarningCard" IsVisible="{Binding !IsSkuaConfigured}">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="Skua / VibeSkua Installation Required" FontWeight="SemiBold" Foreground="#FBBF24" />
+                        <TextBlock Text="{Binding SkuaSetupWarning}" TextWrapping="Wrap" FontSize="12" Foreground="#FDE68A" />
+                    </StackPanel>
+                    <Button Grid.Column="1" Content="Select Skua Folder..." Command="{Binding BrowseSkuaFolderCommand}" VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <!-- Row 1: Script selection and quick search -->
+            <Grid ColumnDefinitions="Auto,*,Auto,240,Auto,Auto" ColumnSpacing="8">
+                <TextBlock Text="Script (.cs):" VerticalAlignment="Center" Classes="MetricLabel" />
+                <TextBox Grid.Column="1"
+                         Text="{Binding ScriptPathText}"
+                         PlaceholderText="Path to any Skua .cs script..."
+                         VerticalAlignment="Center" />
+                <Button Grid.Column="2" Content="Browse..." Command="{Binding BrowseScriptCommand}" />
+
+                <StackPanel Grid.Column="3" Orientation="Vertical" Spacing="2">
+                    <TextBox Text="{Binding ScriptSearchText}"
+                             PlaceholderText="Filter Scripts\ folder..."
+                             FontSize="11"
+                             Padding="6,4" />
+                    <ComboBox ItemsSource="{Binding FilteredScripts}"
+                              SelectedItem="{Binding SelectedScript}"
+                              HorizontalAlignment="Stretch"
+                              PlaceholderText="Quick pick from Scripts\...">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="models:ScriptEntry">
+                                <TextBlock Text="{Binding DisplayName}" FontSize="12" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                </StackPanel>
+
+                <Button Grid.Column="4" Content="Refresh" Command="{Binding RefreshWorkspaceCommand}" ToolTip.Tip="Rescan Scripts\ and scenarios\" />
+                <Button Grid.Column="5" Content="Skua Dir..." Command="{Binding BrowseSkuaFolderCommand}" ToolTip.Tip="{Binding ClientFlavorText}" />
+            </Grid>
+
+            <!-- Row 2: Scenario, Seed, Speed, and Execution Buttons -->
+            <Grid ColumnDefinitions="Auto,220,*,Auto,Auto,76,Auto,135,Auto,Auto,Auto,Auto" ColumnSpacing="8">
+                <TextBlock Text="Scenario:" VerticalAlignment="Center" Classes="MetricLabel" />
+                <ComboBox Grid.Column="1"
+                          ItemsSource="{Binding AvailableScenarios}"
+                          SelectedItem="{Binding SelectedScenario}"
+                          HorizontalAlignment="Stretch">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate x:DataType="models:ScenarioEntry">
+                            <TextBlock Text="{Binding DisplayName}" FontSize="12" />
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+
+                <TextBox Grid.Column="2"
+                         Text="{Binding ScenarioPathText}"
+                         PlaceholderText="(optional scenario .json path)"
+                         VerticalAlignment="Center" />
+                <Button Grid.Column="3" Content="Browse..." Command="{Binding BrowseScenarioCommand}" />
+
+                <TextBlock Grid.Column="4" Text="Seed:" VerticalAlignment="Center" Classes="MetricLabel" Margin="4,0,0,0" />
+                <TextBox Grid.Column="5" Text="{Binding SeedText}" HorizontalContentAlignment="Center" VerticalAlignment="Center" />
+
+                <TextBlock Grid.Column="6" Text="Speed:" VerticalAlignment="Center" Classes="MetricLabel" Margin="4,0,0,0" />
+                <ComboBox Grid.Column="7"
+                          ItemsSource="{Binding SpeedPresets}"
+                          SelectedItem="{Binding SelectedSpeed}"
+                          HorizontalAlignment="Stretch">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate x:DataType="models:SpeedPreset">
+                            <TextBlock Text="{Binding Label}" FontSize="12" />
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+
+                <Button Grid.Column="8" Content="Compile" Command="{Binding CompileCommand}" Padding="12,6" />
+                <Button Grid.Column="9" Classes="Primary" Content="Run" Command="{Binding RunCommand}" Padding="16,6" />
+                <Button Grid.Column="10" Content="{Binding PauseResumeLabel}" Command="{Binding PauseResumeCommand}" Padding="12,6" />
+                <Button Grid.Column="11" Classes="Danger" Content="Stop" Command="{Binding StopCommand}" Padding="12,6" />
+            </Grid>
+
+            <!-- Row 3: Live Telemetry Bar -->
+            <Border Classes="SubCard" Padding="8,6">
+                <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="18">
+                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <TextBlock Text="Status:" Classes="MetricLabel" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding StatusText}" FontWeight="SemiBold" Foreground="#38BDF8" VerticalAlignment="Center" />
+                        <TextBlock Text="|" Foreground="#334155" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding ClientFlavorText}" Classes="MetricLabel" VerticalAlignment="Center" MaxWidth="320" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                        <TextBlock Text="Virtual:" Classes="MetricLabel" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding VirtualClockText}" FontFamily="Consolas, monospace" FontWeight="SemiBold" Foreground="#4ADE80" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                        <TextBlock Text="Real:" Classes="MetricLabel" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding RealTimeText}" FontFamily="Consolas, monospace" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                        <TextBlock Text="Paused:" Classes="MetricLabel" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding PausedTimeText}" FontFamily="Consolas, monospace" Foreground="#FBBF24" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                        <TextBlock Text="APIs:" Classes="MetricLabel" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding ApiCallsText}" FontFamily="Consolas, monospace" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="5" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center" MaxWidth="260">
+                        <TextBlock Text="Last:" Classes="MetricLabel" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding LastApiCallText}" FontFamily="Consolas, monospace" Foreground="#CBD5E1" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </StackPanel>
+    </Border>
+</UserControl>

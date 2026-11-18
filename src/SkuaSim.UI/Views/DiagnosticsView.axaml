@@ -1,0 +1,140 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:SkuaSim.UI.ViewModels"
+             xmlns:models="using:SkuaSim.UI.Models"
+             x:Class="SkuaSim.UI.Views.DiagnosticsView"
+             x:DataType="vm:DiagnosticsViewModel">
+
+    <Border Classes="Card" Padding="6">
+        <TabControl SelectedIndex="{Binding SelectedTabIndex}">
+            <!-- Tab 0: Live Script Logs -->
+            <TabItem Header="{Binding LogsTabHeader}">
+                <Grid RowDefinitions="Auto,*" RowSpacing="6" Margin="0,6,0,0">
+                    <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
+                        <TextBox Grid.Column="0" Text="{Binding LogFilter}" PlaceholderText="Filter script logs..." />
+                        <CheckBox Grid.Column="1" Content="Auto-scroll" IsChecked="{Binding AutoScrollLogs}" VerticalAlignment="Center" />
+                        <Button Grid.Column="2" Content="Clear Logs" Command="{Binding ClearLogsCommand}" />
+                    </Grid>
+
+                    <Border Grid.Row="1" Classes="SubCard" Padding="4">
+                        <ListBox x:Name="LogsListBox"
+                                 ItemsSource="{Binding FilteredLogs}"
+                                 Background="Transparent"
+                                 BorderThickness="0">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate x:DataType="models:LogRowItem">
+                                    <TextBlock Text="{Binding FormattedLine}"
+                                               FontFamily="Consolas, monospace"
+                                               FontSize="12"
+                                               Foreground="#E2E8F0"
+                                               TextWrapping="Wrap" />
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </Border>
+                </Grid>
+            </TabItem>
+
+            <!-- Tab 1: Errors & Diagnostics -->
+            <TabItem Header="{Binding ErrorsTabHeader}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,6,0,0">
+                    <StackPanel Spacing="8">
+                        <!-- Fatal Error / Compile Error Highlight Card -->
+                        <Border Classes="ErrorCard" IsVisible="{Binding HasFatalError}">
+                            <StackPanel Spacing="6">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                    <TextBlock Text="{Binding FatalErrorTitle}" FontWeight="Bold" FontSize="13" Foreground="#FCA5A5" VerticalAlignment="Center" />
+                                    <Button Grid.Column="1" Content="Copy Error" Command="{Binding CopyErrorCommand}" Padding="10,4" />
+                                </Grid>
+
+                                <ItemsControl ItemsSource="{Binding CompileErrors}" IsVisible="{Binding HasCompileErrors}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="models:CompileErrorRowItem">
+                                            <Border Background="#1F1014" CornerRadius="4" Padding="6,4" Margin="0,2">
+                                                <Grid ColumnDefinitions="230,*" ColumnSpacing="10">
+                                                    <TextBlock Grid.Column="0" Text="{Binding LocationText}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#F87171" />
+                                                    <TextBlock Grid.Column="1" Text="{Binding Message}" FontSize="12" TextWrapping="Wrap" Foreground="#FEE2E2" />
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <TextBox Text="{Binding FatalErrorDetails}"
+                                         IsReadOnly="True"
+                                         AcceptsReturn="True"
+                                         FontFamily="Consolas, monospace"
+                                         FontSize="11"
+                                         MaxHeight="160"
+                                         Background="#190B0E"
+                                         Foreground="#FECACA"
+                                         IsVisible="{Binding !HasCompileErrors}" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 3-Column Diagnostics Breakdown -->
+                        <Grid ColumnDefinitions="*,*,*" ColumnSpacing="8">
+                            <!-- Synthesized Data -->
+                            <Border Grid.Column="0" Classes="SubCard">
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Synthesized Data (Missing from DB)" Classes="SectionTitle" Foreground="#FBBF24" />
+                                    <ItemsControl ItemsSource="{Binding SynthesizedItems}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="models:DiagnosticRowItem">
+                                                <Border Background="#161D28" CornerRadius="4" Padding="6,4" Margin="0,2">
+                                                    <StackPanel Spacing="2">
+                                                        <Grid ColumnDefinitions="*,Auto">
+                                                            <TextBlock Text="{Binding Title}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#FDE68A" TextTrimming="CharacterEllipsis" />
+                                                            <TextBlock Grid.Column="1" Text="{Binding CountText}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#94A3B8" />
+                                                        </Grid>
+                                                        <TextBlock Text="{Binding Detail}" FontSize="11" TextWrapping="Wrap" Foreground="#CBD5E1" />
+                                                    </StackPanel>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock Text="None — all encountered data came from scenario/DB." Classes="MetricLabel" IsVisible="{Binding !SynthesizedItems.Count}" />
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Warnings -->
+                            <Border Grid.Column="1" Classes="SubCard">
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Simulator Warnings" Classes="SectionTitle" Foreground="#FB923C" />
+                                    <ItemsControl ItemsSource="{Binding Warnings}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="models:LogRowItem">
+                                                <Border Background="#161D28" CornerRadius="4" Padding="6,4" Margin="0,2">
+                                                    <TextBlock Text="{Binding FormattedLine}" FontFamily="Consolas, monospace" FontSize="11" TextWrapping="Wrap" Foreground="#FED7AA" />
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock Text="No warnings." Classes="MetricLabel" IsVisible="{Binding !Warnings.Count}" />
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Unimplemented APIs -->
+                            <Border Grid.Column="2" Classes="SubCard">
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Unimplemented APIs Touched" Classes="SectionTitle" />
+                                    <ItemsControl ItemsSource="{Binding UnimplementedCalls}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="models:DiagnosticRowItem">
+                                                <Grid ColumnDefinitions="*,Auto" Margin="0,2">
+                                                    <TextBlock Text="{Binding Title}" FontFamily="Consolas, monospace" FontSize="11" TextTrimming="CharacterEllipsis" Foreground="#CBD5E1" />
+                                                    <TextBlock Grid.Column="1" Text="{Binding CountText}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#94A3B8" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock Text="No unimplemented members hit." Classes="MetricLabel" IsVisible="{Binding !UnimplementedCalls.Count}" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+    </Border>
+</UserControl>

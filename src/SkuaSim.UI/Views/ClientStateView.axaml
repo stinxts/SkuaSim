@@ -1,0 +1,238 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:SkuaSim.UI.ViewModels"
+             xmlns:models="using:SkuaSim.UI.Models"
+             x:Class="SkuaSim.UI.Views.ClientStateView"
+             x:DataType="vm:ClientStateViewModel">
+
+    <Grid ColumnDefinitions="390,*" ColumnSpacing="10">
+        <!-- Left Column: Live Client ("Skua without Flash") -->
+        <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="10">
+                <!-- Location & Target Card -->
+                <Border Classes="Card">
+                    <StackPanel Spacing="6">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Text="Map &amp; Location" Classes="SectionTitle" />
+                            <TextBlock Grid.Column="1" Text="{Binding MapSource}" Classes="MetricLabel" />
+                        </Grid>
+                        <TextBlock Text="{Binding MapBanner}" FontSize="17" FontWeight="Bold" Foreground="#F8FAFC" />
+                        <TextBlock Text="{Binding CellPadText}" FontSize="12" Foreground="#CBD5E1" />
+                        <Border Classes="SubCard" Margin="0,2,0,0">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <TextBlock Text="Target:" Classes="MetricLabel" VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding TargetText}" FontSize="12" FontWeight="SemiBold" Foreground="#FCA5A5" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <!-- Player Card -->
+                <Border Classes="Card">
+                    <StackPanel Spacing="8">
+                        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding Username}" FontSize="15" FontWeight="Bold" />
+                                <TextBlock Text="{Binding LevelText}" FontSize="13" Foreground="#38BDF8" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Grid.Column="1" Text="{Binding PlayerStatusBadge}" FontSize="11" FontWeight="SemiBold" Foreground="#4ADE80" VerticalAlignment="Center" />
+                        </Grid>
+
+                        <StackPanel Spacing="3">
+                            <Grid ColumnDefinitions="Auto,*">
+                                <TextBlock Text="HP" Classes="MetricLabel" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="{Binding HpText}" HorizontalAlignment="Right" FontSize="11" FontFamily="Consolas, monospace" />
+                            </Grid>
+                            <ProgressBar Minimum="0" Maximum="{Binding MaxHealth}" Value="{Binding Health}" Height="10" Foreground="#22C55E" Background="#0F172A" />
+                        </StackPanel>
+
+                        <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" RowSpacing="6" ColumnSpacing="10">
+                            <StackPanel Grid.Row="0" Grid.Column="0">
+                                <TextBlock Text="Class" Classes="MetricLabel" />
+                                <TextBlock Text="{Binding EquippedClass}" Classes="MetricValue" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{Binding ClassRankText}" FontSize="11" Foreground="#94A3B8" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="0" Grid.Column="1">
+                                <TextBlock Text="Currency" Classes="MetricLabel" />
+                                <TextBlock Text="{Binding GoldText}" FontSize="13" FontWeight="SemiBold" Foreground="#FACC15" />
+                                <TextBlock Text="{Binding CoinsText}" FontSize="11" Foreground="#38BDF8" />
+                            </StackPanel>
+                        </Grid>
+
+                        <Border Classes="SubCard">
+                            <Grid ColumnDefinitions="*,*,*">
+                                <StackPanel Grid.Column="0" HorizontalAlignment="Center">
+                                    <TextBlock Text="Kills" Classes="MetricLabel" HorizontalAlignment="Center" />
+                                    <TextBlock Text="{Binding Kills}" Classes="MetricValue" HorizontalAlignment="Center" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                                    <TextBlock Text="Deaths" Classes="MetricLabel" HorizontalAlignment="Center" />
+                                    <TextBlock Text="{Binding Deaths}" Classes="MetricValue" HorizontalAlignment="Center" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" HorizontalAlignment="Center">
+                                    <TextBlock Text="Drops Picked" Classes="MetricLabel" HorizontalAlignment="Center" />
+                                    <TextBlock Text="{Binding DropsPicked}" Classes="MetricValue" HorizontalAlignment="Center" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <!-- Monsters in Cell Card -->
+                <Border Classes="Card">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{Binding CellMonstersHeader}" Classes="SectionTitle" />
+                        <ItemsControl ItemsSource="{Binding CellMonsters}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="models:MonsterRowItem">
+                                    <Border Classes="SubCard" Margin="0,0,0,6">
+                                        <StackPanel Spacing="4">
+                                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="12" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Grid.Column="1" Text="{Binding Badges}" FontSize="11" Foreground="#F59E0B" />
+                                            </Grid>
+                                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                <ProgressBar Minimum="0" Maximum="100" Value="{Binding HpPercent}" Height="7" Foreground="#EF4444" Background="#0F172A" VerticalAlignment="Center" />
+                                                <TextBlock Grid.Column="1" Text="{Binding HpText}" FontSize="11" FontFamily="Consolas, monospace" Foreground="#CBD5E1" />
+                                            </Grid>
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock Text="No monsters in current cell." Classes="MetricLabel" IsVisible="{Binding !CellMonsters.Count}" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Pending Drops Card -->
+                <Border Classes="Card">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{Binding PendingDropsHeader}" Classes="SectionTitle" />
+                        <ItemsControl ItemsSource="{Binding PendingDrops}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="models:ItemRowItem">
+                                    <Grid ColumnDefinitions="*,Auto" Margin="0,2">
+                                        <TextBlock Text="{Binding Name}" FontSize="12" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="1" Text="{Binding QuantityText}" FontSize="12" FontFamily="Consolas, monospace" Foreground="#4ADE80" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock Text="Drop stack is empty." Classes="MetricLabel" IsVisible="{Binding !PendingDrops.Count}" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Right Column: Containers, Quests, Factions, Maps -->
+        <Border Grid.Column="1" Classes="Card" Padding="6">
+            <TabControl>
+                <!-- Inventory -->
+                <TabItem Header="{Binding InventoryHeader}">
+                    <Grid RowDefinitions="Auto,*" RowSpacing="6" Margin="0,6,0,0">
+                        <TextBox Grid.Row="0" Text="{Binding InventoryFilter}" PlaceholderText="Filter inventory by name or ID..." />
+                        <ListBox Grid.Row="1" ItemsSource="{Binding FilteredInventory}" Background="Transparent" BorderThickness="0">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate x:DataType="models:ItemRowItem">
+                                    <Grid ColumnDefinitions="70,*,Auto,Auto" ColumnSpacing="10">
+                                        <TextBlock Grid.Column="0" Text="{Binding Id}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="2" Text="EQUIPPED" FontSize="10" FontWeight="Bold" Foreground="#4ADE80" IsVisible="{Binding Equipped}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="3" Text="{Binding QuantityText}" FontFamily="Consolas, monospace" FontSize="12" Foreground="#E2E8F0" VerticalAlignment="Center" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </Grid>
+                </TabItem>
+
+                <!-- Bank -->
+                <TabItem Header="{Binding BankHeader}">
+                    <ListBox ItemsSource="{Binding BankItems}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="models:ItemRowItem">
+                                <Grid ColumnDefinitions="70,*,Auto" ColumnSpacing="10">
+                                    <TextBlock Grid.Column="0" Text="{Binding Id}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="2" Text="{Binding QuantityText}" FontFamily="Consolas, monospace" FontSize="12" VerticalAlignment="Center" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </TabItem>
+
+                <!-- Temp Inv -->
+                <TabItem Header="{Binding TempHeader}">
+                    <ListBox ItemsSource="{Binding TempInventoryItems}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="models:ItemRowItem">
+                                <Grid ColumnDefinitions="70,*,Auto" ColumnSpacing="10">
+                                    <TextBlock Grid.Column="0" Text="{Binding Id}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="2" Text="{Binding QuantityText}" FontFamily="Consolas, monospace" FontSize="12" VerticalAlignment="Center" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </TabItem>
+
+                <!-- House -->
+                <TabItem Header="{Binding HouseHeader}">
+                    <ListBox ItemsSource="{Binding HouseItems}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="models:ItemRowItem">
+                                <Grid ColumnDefinitions="70,*,Auto" ColumnSpacing="10">
+                                    <TextBlock Grid.Column="0" Text="{Binding Id}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="2" Text="{Binding QuantityText}" FontFamily="Consolas, monospace" FontSize="12" VerticalAlignment="Center" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </TabItem>
+
+                <!-- Quests -->
+                <TabItem Header="{Binding QuestsHeader}">
+                    <ListBox ItemsSource="{Binding Quests}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="models:QuestRowItem">
+                                <Grid ColumnDefinitions="68,*,130,90" ColumnSpacing="10">
+                                    <TextBlock Grid.Column="0" Text="{Binding Id, StringFormat='#{0}'}" FontFamily="Consolas, monospace" FontSize="12" Foreground="#94A3B8" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="2" Text="{Binding StatusText}" FontSize="11" FontWeight="SemiBold" Foreground="#38BDF8" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="3" Text="{Binding TurnInsText}" FontFamily="Consolas, monospace" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </TabItem>
+
+                <!-- Factions -->
+                <TabItem Header="{Binding FactionsHeader}">
+                    <ListBox ItemsSource="{Binding Factions}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="models:FactionRowItem">
+                                <Grid ColumnDefinitions="*,90,Auto" ColumnSpacing="10">
+                                    <TextBlock Grid.Column="0" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding RankText}" FontSize="12" FontWeight="SemiBold" Foreground="#FACC15" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="2" Text="{Binding RepText}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#CBD5E1" VerticalAlignment="Center" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </TabItem>
+
+                <!-- Maps Visited -->
+                <TabItem Header="{Binding MapsHeader}">
+                    <ListBox ItemsSource="{Binding MapsVisited}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="x:String">
+                                <TextBlock Text="{Binding .}" FontFamily="Consolas, monospace" FontSize="12" />
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </TabItem>
+            </TabControl>
+        </Border>
+    </Grid>
+</UserControl>

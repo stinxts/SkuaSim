@@ -1,0 +1,33 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:SkuaSim.UI.ViewModels"
+        xmlns:views="using:SkuaSim.UI.Views"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="1360" d:DesignHeight="860"
+        Width="1360" Height="860"
+        MinWidth="1024" MinHeight="680"
+        x:Class="SkuaSim.UI.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Icon="/Assets/avalonia-logo.ico"
+        Title="SkuaSim — Offline Skua Script Simulator">
+
+    <Design.DataContext>
+        <vm:MainViewModel />
+    </Design.DataContext>
+
+    <Grid RowDefinitions="Auto,*,5,240" Margin="10" RowSpacing="8">
+        <views:ExecutionToolbarView Grid.Row="0" />
+
+        <views:ClientStateView Grid.Row="1" DataContext="{Binding ClientState}" />
+
+        <GridSplitter Grid.Row="2"
+                      ResizeDirection="Rows"
+                      Height="5"
+                      Background="#263242"
+                      CornerRadius="2"
+                      HorizontalAlignment="Stretch" />
+
+        <views:DiagnosticsView Grid.Row="3" DataContext="{Binding Diagnostics}" />
+    </Grid>
+</Window>
