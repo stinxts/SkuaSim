@@ -1,0 +1,23 @@
+# Build artifacts
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.pdb
+*.cache
+
+# Packaged plugin/CLI binaries (publish via GitHub Releases)
+dist/
+
+# Live collector database, backups, and local test reports/traces
+data/*
+!data/baseline/
+*.bak
+*.tmp
+*_report.md
+*_trace.jsonl
+
+# OS / Editor junk
+Thumbs.db
+.DS_Store

@@ -1,0 +1,1746 @@
+using System.Reflection;
+using Skua.Core.Models.Factions;
+using Skua.Core.Models.Items;
+using Skua.Core.Models.Monsters;
+using Skua.Core.Models.Players;
+using Skua.Core.Models.Quests;
+using Skua.Core.Models.Shops;
+using SkuaSim.Collector.Models;
+using SkuaSim.Core.Data;
+using SkuaSim.Core.Runtime;
+using SkuaSim.Core.Scenarios;
+
+namespace SkuaSim.Core.World;
+
+public sealed class SimMonster
+{
+    public int MapID { get; init; }
+    public int MonID { get; init; }
+    public string Name { get; init; } = "";
+    public string Cell { get; init; } = "Enter";
+    public int MaxHP { get; init; }
+    public int HP { get; set; }
+    public int Level { get; init; }
+    public string Race { get; init; } = "None";
+    public string FileName { get; init; } = "";
+    public CapturedMonster? Data { get; init; }
+    public MonsterSetup? Setup { get; init; }
+    public bool Synthesized { get; init; }
+    public long NextAttackMs { get; set; }
+    public bool Alive => HP > 0;
+
+    public Monster ToModel() => new()
+    {
+        Name = Name,
+        ID = MonID,
+        Race = Race,
+        Cell = Cell,
+        MapID = MapID,
+        HP = HP,
+        MaxHP = MaxHP,
+        State = Alive ? 1 : 0,
+        FileName = FileName
+    };
+}
+
+public sealed class SimMap
+{
+    public string Name { get; init; } = "";
+    public string FileName { get; set; } = "";
+    public List<string> Cells { get; } = new();
+    public Dictionary<string, List<string>> Pads { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<SimMonster> Monsters { get; } = new();
+    public bool Captured { get; set; }
+    public bool FromScenario { get; set; }
+    public CapturedMap? Data { get; set; }
+    public MapSetup? Setup { get; set; }
+    public bool Synthesized => !Captured && !FromScenario;
+}
+
+public sealed record WantedItem(ItemInfo Info, int Quantity);
+
+/// <summary>
+/// In-memory game state and mechanics. Every public method is thread-safe (guarded by <see cref="Sync"/>).
+/// Data comes, in priority order, from the scenario, the collector database and QuestData.json; anything else is
+/// synthesized and recorded in the trace so the report shows which results depend on invented data.
+/// </summary>
+public sealed class SimWorld
+{
+    private const int CombatTickMs = 1000;
+    private static readonly FieldInfo? QuestReqsField = typeof(Quest).GetField("_reqs", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? QuestReqCacheField = typeof(Quest).GetField("_reqCache", BindingFlags.Instance | BindingFlags.NonPublic);
+
+    private readonly SimContext _ctx;
+    private readonly Dictionary<string, (long Time, int Quantity, bool FromTemp, bool FromInventory)> _recentQueries = new(StringComparer.OrdinalIgnoreCase);
+    private int _nextCharItemId = 10_000;
+    private bool _combatTickerActive;
+    private bool _dropTickerActive;
+    private bool _questTickerActive;
+
+    public SimWorld(SimContext ctx)
+    {
+        _ctx = ctx;
+        var p = ctx.Scenario.Player;
+        Username = p.Username;
+        Level = p.Level;
+        Gold = p.Gold;
+        Coins = p.Coins;
+        IsMember = p.IsMember;
+        AccessLevel = p.AccessLevel;
+        Guild = p.Guild;
+        MaxHealth = Math.Max(1, p.MaxHealth);
+        Health = MaxHealth;
+        ClassRank = p.ClassRank;
+        LoggedIn = ctx.Scenario.Location.LoggedIn;
+    }
+
+    public object Sync { get; } = new();
+    private long Now => _ctx.Clock.NowMs;
+    private SimulationTrace Trace => _ctx.Trace;
+    private WorldSetup Rules => _ctx.Scenario.World;
+
+    // ---------------------------------------------------------------- Player
+    public string Username { get; }
+    public int Level { get; set; }
+    public int XP { get; set; }
+    public long Gold { get; set; }
+    public int Coins { get; set; }
+    public bool IsMember { get; set; }
+    public int AccessLevel { get; set; }
+    public string Guild { get; set; }
+    public int MaxHealth { get; }
+    public int Health { get; set; }
+    public int ClassRank { get; set; }
+    public bool LoggedIn { get; set; }
+    public bool Kicked { get; set; }
+    public long DeadUntilMs { get; private set; } = -1;
+    public long InCombatUntilMs { get; private set; }
+    public bool Alive => DeadUntilMs < 0;
+    public bool InCombat => Alive && (Now < InCombatUntilMs || (Target?.Alive ?? false));
+    public int State => !Alive ? 0 : InCombat ? 2 : 1;
+    public SimMonster? Target { get; private set; }
+    public int PositionX { get; set; } = 480;
+    public int PositionY { get; set; } = 320;
+
+    // ---------------------------------------------------------------- Location
+    public SimMap? Map { get; private set; }
+    public string MapName { get; private set; } = "";
+    public int RoomNumber { get; private set; }
+    public string Cell { get; private set; } = "Enter";
+    public string Pad { get; private set; } = "Spawn";
+    public string LastMap { get; set; } = "";
+    public bool MapLoaded { get; private set; }
+    public string SpawnCell { get; private set; } = "Enter";
+    public string SpawnPad { get; private set; } = "Spawn";
+    public HashSet<string> MapsVisited { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> SynthesizedMapsVisited { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    // ---------------------------------------------------------------- Items
+    public List<InventoryItem> Inventory { get; } = new();
+    public List<InventoryItem> Bank { get; } = new();
+    public List<InventoryItem> House { get; } = new();
+    public List<ItemBase> TempInventory { get; } = new();
+    public List<ItemBase> DropStack { get; } = new();
+    public HashSet<int> Favorites { get; } = new();
+    public bool BankLoaded { get; set; }
+
+    // ---------------------------------------------------------------- Drops
+    public HashSet<string> PickupNames { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<int> PickupIds { get; } = new();
+    public bool DropsEnabled { get; private set; }
+    public bool RejectElse { get; set; }
+    public int DropInterval { get; set; } = 1000;
+
+    // ---------------------------------------------------------------- Quests
+    public Dictionary<int, Quest> LoadedQuests { get; } = new();
+    public HashSet<int> ActiveQuests { get; } = new();
+    public HashSet<int> CompletedQuests { get; } = new();
+    public HashSet<int> DailiesCompleted { get; } = new();
+    public Dictionary<int, int> SlotProgress { get; } = new();
+    public Dictionary<int, int> RegisteredQuests { get; } = new();
+    public int RegisterCompleteInterval { get; set; } = 2000;
+
+    // ---------------------------------------------------------------- Shops / factions
+    public ShopInfo? CurrentShop { get; private set; }
+    public List<ShopInfo> ShopCache { get; } = new();
+    public List<Faction> Factions { get; } = new();
+
+    // ---------------------------------------------------------------- Stats
+    public int Kills { get; set; }
+    public int Deaths { get; set; }
+    public int DropsPicked { get; set; }
+    public int QuestsAcceptedCount { get; set; }
+    public int QuestsCompletedCount { get; set; }
+    public int Relogins { get; set; }
+    public Dictionary<string, int> KillsByMonster { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, int> DropsByItem { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<int, int> QuestTurnIns { get; } = new();
+
+    // ================================================================ Initialization
+
+    public void InitializeFromScenario()
+    {
+        var s = _ctx.Scenario;
+        lock (Sync)
+        {
+            foreach (var item in s.Inventory)
+                AddScenarioItem(Inventory, item);
+            foreach (var item in s.Bank)
+                AddScenarioItem(Bank, item);
+            foreach (var item in s.House)
+                AddScenarioItem(House, item);
+            foreach (var item in s.TempInventory)
+            {
+                var info = ResolveItem(item.Name, item.Id, true, item.Category);
+                info.Temp = true;
+                TempInventory.Add(NewItemBase(info, item.Quantity));
+            }
+
+            if (!string.IsNullOrWhiteSpace(s.Player.Class) && !Inventory.Any(i => Eq(i.Name, s.Player.Class)))
+                AddScenarioItem(Inventory, new ItemSetup { Name = s.Player.Class, Category = "Class", Equipped = true });
+            if (!string.IsNullOrWhiteSpace(s.Player.Class))
+            {
+                var cls = Inventory.First(i => Eq(i.Name, s.Player.Class));
+                EquipInternal(cls, log: false);
+            }
+            if (!Inventory.Any(i => i.Equipped && i.CategoryString == "Class"))
+            {
+                AddScenarioItem(Inventory, new ItemSetup { Name = "Warrior", Category = "Class", Equipped = true });
+                Trace.Synthesize("scenario:class", "No class in the scenario: a default 'Warrior' class was equipped.");
+            }
+
+            foreach (var id in s.Quests.Completed)
+            {
+                CompletedQuests.Add(id);
+                var q = _ctx.Catalog.FindQuest(id);
+                if (q != null && q.Slot >= 0)
+                    SlotProgress[q.Slot] = Math.Max(SlotProgress.GetValueOrDefault(q.Slot), q.Value);
+            }
+            foreach (var (slot, value) in s.Quests.SlotProgress)
+            {
+                if (int.TryParse(slot, out var slotId))
+                    SlotProgress[slotId] = Math.Max(SlotProgress.GetValueOrDefault(slotId), value);
+            }
+            foreach (var id in s.Quests.DailiesCompleted)
+                DailiesCompleted.Add(id);
+            foreach (var id in s.Quests.Active)
+            {
+                if (GetOrLoadQuest(id) != null)
+                    ActiveQuests.Add(id);
+            }
+
+            foreach (var f in s.Factions)
+            {
+                Factions.Add(new Faction
+                {
+                    ID = f.Id ?? Math.Abs(f.Name.GetHashCode() % 1000),
+                    Name = f.Name,
+                    Rank = f.Rank,
+                    TotalRep = f.TotalRep ?? RepForRank(f.Rank),
+                    Rep = 0,
+                    RequiredRep = RepForRank(f.Rank + 1) - RepForRank(f.Rank)
+                });
+            }
+        }
+
+        if (LoggedIn)
+            Join(s.Location.Map, s.Location.Cell, s.Location.Pad, ignoreCheck: true, raiseEvents: false, delay: false);
+    }
+
+    private static int RepForRank(int rank) => rank <= 1 ? 0 : (int)Math.Pow(rank, 3) * 100 + 900;
+
+    private void AddScenarioItem(List<InventoryItem> container, ItemSetup setup)
+    {
+        var info = ResolveItem(setup.Name, setup.Id, setup.Temp, setup.Category);
+        if (setup.MaxStack.HasValue)
+            info.MaxStack = setup.MaxStack.Value;
+        if (setup.Coins.HasValue)
+            info.Coins = setup.Coins.Value;
+        if (setup.Member.HasValue)
+            info.Upgrade = setup.Member.Value;
+        var item = NewInventoryItem(info, setup.Quantity);
+        container.Add(item);
+        if (setup.Equipped && container == Inventory)
+            EquipInternal(item, log: false);
+    }
+
+    // ================================================================ Items
+
+    /// <summary>
+    /// Finds item metadata by name or ID; invents it (flagged) if neither the collector nor QuestData knows the item.
+    /// </summary>
+    public ItemInfo ResolveItem(string? name, int? id = null, bool? tempHint = null, string? category = null)
+    {
+        var info = (id is > 0 ? _ctx.Catalog.FindItem(id.Value) : null) ?? _ctx.Catalog.FindItem(name);
+        if (info != null)
+        {
+            if (!string.IsNullOrWhiteSpace(category))
+                return new ItemInfo { ID = info.ID, Name = info.Name, MaxStack = info.MaxStack, Temp = tempHint ?? info.Temp, Category = category, Coins = info.Coins, Upgrade = info.Upgrade, Source = info.Source };
+            return info;
+        }
+
+        var finalName = string.IsNullOrWhiteSpace(name) ? $"Item #{id}" : name.Trim();
+        var finalId = id is > 0 ? id.Value : SynthesizedItemId(finalName);
+        var synthesized = new ItemInfo
+        {
+            ID = finalId,
+            Name = finalName,
+            MaxStack = category is "Class" or "Armor" or "Helm" or "Cape" or "Pet" ? 1 : 1000,
+            Temp = tempHint ?? false,
+            Category = category ?? "Item",
+            Source = DataSource.Synthesized
+        };
+        Trace.Synthesize($"item:{finalName.ToLowerInvariant()}", $"Item '{finalName}' (ID {finalId}) is unknown to the collector and QuestData: metadata invented (temp={synthesized.Temp}, max stack={synthesized.MaxStack}).");
+        return synthesized;
+    }
+
+    private int SynthesizedItemId(string name)
+    {
+        var hash = 0;
+        foreach (var c in name.ToLowerInvariant())
+            hash = unchecked(hash * 31 + c);
+        var id = 9_000_000 + Math.Abs(hash % 900_000);
+        while (_ctx.Catalog.FindItem(id) is { } other && !Eq(other.Name, name))
+            id++;
+        return id;
+    }
+
+    public InventoryItem NewInventoryItem(ItemInfo info, int quantity) => new()
+    {
+        ID = info.ID,
+        Name = info.Name,
+        Quantity = Math.Clamp(quantity, 1, Math.Max(1, info.MaxStack)),
+        MaxStack = Math.Max(1, info.MaxStack),
+        CategoryString = info.Category,
+        Coins = info.Coins,
+        Upgrade = info.Upgrade,
+        Temp = info.Temp,
+        CharItemID = _nextCharItemId++,
+        Description = "",
+        ItemGroup = "None",
+        Level = 1
+    };
+
+    public static ItemBase NewItemBase(ItemInfo info, int quantity) => new()
+    {
+        ID = info.ID,
+        Name = info.Name,
+        Quantity = Math.Max(1, quantity),
+        MaxStack = Math.Max(1, info.MaxStack),
+        CategoryString = info.Category,
+        Coins = info.Coins,
+        Upgrade = info.Upgrade,
+        Temp = info.Temp,
+        Description = "",
+        ItemGroup = "None"
+    };
+
+    private static ItemInfo InfoOf(ItemBase item) => new()
+    {
+        ID = item.ID,
+        Name = item.Name ?? $"Item #{item.ID}",
+        MaxStack = Math.Max(1, item.MaxStack),
+        Temp = item.Temp,
+        Category = item.CategoryString ?? "Item",
+        Coins = item.Coins,
+        Upgrade = item.Upgrade,
+        Source = DataSource.QuestData
+    };
+
+    public static bool Eq(string? a, string? b) =>
+        string.Equals(a?.Trim(), b?.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    public static bool Matches(ItemBase item, string? name, int? id) =>
+        id is > 0 ? item.ID == id : Eq(item.Name, name);
+
+    public int Quantity(IEnumerable<ItemBase> container, string? name, int? id = null)
+    {
+        lock (Sync)
+            return container.Where(i => Matches(i, name, id)).Sum(i => i.Quantity);
+    }
+
+    /// <summary>
+    /// Remembers which items the script checks (Contains/GetQuantity). The item a kill loop keeps checking is the item
+    /// being farmed, which is how drops are synthesized when the collector has no data.
+    /// </summary>
+    public void NoteItemQuery(string? name, int? id, int quantity, bool fromTemp)
+    {
+        var key = id is > 0 ? "#" + id : name?.Trim();
+        if (string.IsNullOrEmpty(key) || quantity <= 0)
+            return;
+        lock (Sync)
+        {
+            _recentQueries.TryGetValue(key, out var prev);
+            _recentQueries[key] = (Now, Math.Max(quantity, prev.Time > Now - 20_000 ? prev.Quantity : 0), fromTemp || prev.FromTemp, !fromTemp || prev.FromInventory);
+        }
+    }
+
+    /// <summary>Items the script is currently trying to obtain and does not have enough of yet.</summary>
+    public List<WantedItem> CurrentlyFarmedItems()
+    {
+        lock (Sync)
+        {
+            var result = new List<WantedItem>();
+            var addedIds = new HashSet<int>();
+
+            // 1. Active quest requirements are always primary farm targets.
+            foreach (var qid in ActiveQuests)
+            {
+                if (!LoadedQuests.TryGetValue(qid, out var quest))
+                    continue;
+                foreach (var req in quest.Requirements)
+                {
+                    var info = _ctx.Catalog.FindItem(req.ID) ?? InfoOf(req);
+                    var have = Quantity(req.Temp ? TempInventory : Inventory, req.Name, req.ID);
+                    if (have < req.Quantity && addedIds.Add(info.ID))
+                        result.Add(new WantedItem(info, req.Quantity));
+                }
+            }
+
+            if (result.Count > 0)
+                return result;
+
+            // 2. When no active quest needs items, fall back to direct drop items queried on the current map.
+            foreach (var (key, q) in _recentQueries)
+            {
+                if (Now - q.Time > 8_000)
+                    continue;
+                int? id = key.StartsWith('#') && int.TryParse(key[1..], out var parsed) ? parsed : null;
+                var name = id.HasValue ? null : key;
+                var known = (id.HasValue ? _ctx.Catalog.FindItem(id.Value) : null) ?? _ctx.Catalog.FindItem(name);
+
+                var isPickupRegistered = (name != null && PickupNames.Contains(name))
+                                         || (id.HasValue && PickupIds.Contains(id.Value))
+                                         || (known != null && (PickupNames.Contains(known.Name) || PickupIds.Contains(known.ID)));
+
+                if (!q.FromTemp && !isPickupRegistered)
+                    continue;
+
+                var info = known ?? ResolveItem(name, id, !q.FromInventory);
+                if (string.Equals(info.Category, "Class", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var have = Quantity(info.Temp ? TempInventory : Inventory, info.Name, info.ID);
+                if (have < q.Quantity && have < info.MaxStack && addedIds.Add(info.ID))
+                    result.Add(new WantedItem(info, q.Quantity));
+            }
+
+            return result;
+        }
+    }
+
+    public bool AddToInventory(ItemInfo info, int quantity, string reason)
+    {
+        if (quantity <= 0)
+            quantity = 1;
+        lock (Sync)
+        {
+            if (info.Temp)
+            {
+                AddTemp(info, quantity);
+                return true;
+            }
+
+            var existing = Inventory.FirstOrDefault(i => i.ID == info.ID);
+            if (existing != null)
+            {
+                if (existing.Quantity >= existing.MaxStack)
+                {
+                    Trace.World($"{info.Name} is at max stack ({existing.MaxStack}); {reason} gave nothing.");
+                    return false;
+                }
+                existing.Quantity = Math.Min(existing.MaxStack, existing.Quantity + quantity);
+                Trace.World($"+{quantity} {info.Name} ({reason}) -> {existing.Quantity}");
+                return true;
+            }
+
+            if (Inventory.Count >= _ctx.Scenario.Player.InventorySlots)
+            {
+                Trace.Warn($"Inventory full ({Inventory.Count}/{_ctx.Scenario.Player.InventorySlots}): could not add {info.Name} ({reason}).");
+                return false;
+            }
+
+            var item = NewInventoryItem(info, quantity);
+            Inventory.Add(item);
+            Trace.World($"+{item.Quantity} {info.Name} ({reason}) -> {item.Quantity}");
+            return true;
+        }
+    }
+
+    public void AddTemp(ItemInfo info, int quantity)
+    {
+        lock (Sync)
+        {
+            var existing = TempInventory.FirstOrDefault(i => i.ID == info.ID);
+            if (existing != null)
+                existing.Quantity = Math.Min(Math.Max(existing.MaxStack, 1), existing.Quantity + quantity);
+            else
+                TempInventory.Add(NewItemBase(info, Math.Min(quantity, Math.Max(1, info.MaxStack))));
+        }
+    }
+
+    public bool RemoveItem(string? name, int? id, int quantity, bool temp, string reason)
+    {
+        lock (Sync)
+        {
+            if (temp)
+            {
+                var t = TempInventory.FirstOrDefault(i => Matches(i, name, id));
+                if (t == null || t.Quantity < quantity)
+                    return false;
+                t.Quantity -= quantity;
+                if (t.Quantity <= 0)
+                    TempInventory.Remove(t);
+                return true;
+            }
+
+            var inv = Inventory.FirstOrDefault(i => Matches(i, name, id));
+            if (inv == null || inv.Quantity < quantity)
+                return false;
+            inv.Quantity -= quantity;
+            if (inv.Quantity <= 0)
+            {
+                Inventory.Remove(inv);
+                if (inv.Equipped)
+                    Trace.World($"{inv.Name} was equipped and is now gone.");
+            }
+            Trace.World($"-{quantity} {inv.Name} ({reason})");
+            return true;
+        }
+    }
+
+    // ================================================================ Equipment
+
+    public static string EquipGroup(string? category) => (category ?? "").Trim() switch
+    {
+        "Class" => "class",
+        "Armor" => "armor",
+        "Helm" => "helm",
+        "Cape" => "cape",
+        "Pet" => "pet",
+        "Amulet" or "Necklace" => "amulet",
+        "Sword" or "Axe" or "Dagger" or "Gun" or "HandGun" or "Rifle" or "Bow" or "Mace" or "Gauntlet" or "Polearm" or "Staff" or "Wand" or "Whip" => "weapon",
+        "Item" => "consumable",
+        var other => other.ToLowerInvariant()
+    };
+
+    public bool Equip(int id)
+    {
+        lock (Sync)
+        {
+            var item = Inventory.FirstOrDefault(i => i.ID == id);
+            if (item == null)
+            {
+                Trace.World($"Equip failed: item #{id} is not in the inventory.");
+                return false;
+            }
+            EquipInternal(item, log: true);
+            return true;
+        }
+    }
+
+    private void EquipInternal(InventoryItem item, bool log)
+    {
+        var group = EquipGroup(item.CategoryString);
+        foreach (var other in Inventory.Where(i => i.Equipped && i != item && EquipGroup(i.CategoryString) == group))
+            other.Equipped = false;
+        item.Equipped = true;
+        if (log)
+            Trace.World($"Equipped {item.Name} ({item.CategoryString}).");
+    }
+
+    public InventoryItem? CurrentClass
+    {
+        get { lock (Sync) return Inventory.FirstOrDefault(i => i.Equipped && i.CategoryString == "Class"); }
+    }
+
+    // ================================================================ Bank
+
+    public bool ToBank(int id)
+    {
+        lock (Sync)
+        {
+            var inv = Inventory.FirstOrDefault(i => i.ID == id);
+            if (inv == null)
+                return false;
+            if (inv.Equipped)
+            {
+                Trace.World($"Cannot bank {inv.Name}: it is equipped.");
+                return false;
+            }
+            var existing = Bank.FirstOrDefault(i => i.ID == id);
+            if (existing == null && Bank.Count >= _ctx.Scenario.Player.BankSlots)
+            {
+                Trace.Warn($"Bank full: could not bank {inv.Name}.");
+                return false;
+            }
+            Inventory.Remove(inv);
+            if (existing != null)
+                existing.Quantity = Math.Min(existing.MaxStack, existing.Quantity + inv.Quantity);
+            else
+                Bank.Add(inv);
+            Trace.World($"Banked {inv.Name} x{inv.Quantity}.");
+            return true;
+        }
+    }
+
+    public bool ToInventory(int id)
+    {
+        lock (Sync)
+        {
+            var bank = Bank.FirstOrDefault(i => i.ID == id);
+            if (bank == null)
+                return false;
+            var existing = Inventory.FirstOrDefault(i => i.ID == id);
+            if (existing == null && Inventory.Count >= _ctx.Scenario.Player.InventorySlots)
+            {
+                Trace.Warn($"Inventory full: could not unbank {bank.Name}.");
+                return false;
+            }
+            Bank.Remove(bank);
+            if (existing != null)
+                existing.Quantity = Math.Min(existing.MaxStack, existing.Quantity + bank.Quantity);
+            else
+                Inventory.Add(bank);
+            Trace.World($"Unbanked {bank.Name} x{bank.Quantity}.");
+            return true;
+        }
+    }
+
+    // ================================================================ Maps
+
+    public static (string Name, int? Room) ParseMapRequest(string request)
+    {
+        var trimmed = (request ?? "").Trim().ToLowerInvariant();
+        var dash = trimmed.IndexOf('-');
+        if (dash <= 0)
+            return (trimmed, null);
+        var name = trimmed[..dash];
+        var roomText = trimmed[(dash + 1)..];
+        if (int.TryParse(roomText, out var room))
+            return (name, room);
+        if (double.TryParse(roomText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var big))
+            return (name, (int)Math.Min(big, 999_999));
+        return (name, null);
+    }
+
+    public void Join(string mapRequest, string? cell, string? pad, bool ignoreCheck, bool raiseEvents = true, bool delay = true)
+    {
+        var (name, room) = ParseMapRequest(mapRequest);
+        if (string.IsNullOrEmpty(name))
+            return;
+        cell = string.IsNullOrWhiteSpace(cell) ? "Enter" : cell;
+        pad = string.IsNullOrWhiteSpace(pad) ? "Spawn" : pad;
+
+        lock (Sync)
+        {
+            if (!ignoreCheck && MapLoaded && Eq(MapName, name) && (room == null || room == RoomNumber))
+            {
+                if (!Eq(Cell, cell))
+                    JumpInternal(cell, pad, raiseEvents);
+                return;
+            }
+            MapLoaded = false;
+            Target = null;
+        }
+
+        if (delay && Rules.JoinDelayMs > 0)
+            _ctx.Clock.Sleep(Rules.JoinDelayMs);
+
+        string finalCell, finalPad;
+        lock (Sync)
+        {
+            if (!string.IsNullOrEmpty(MapName))
+                LastMap = MapName;
+            _recentQueries.Clear();
+            Map = BuildMap(name);
+            MapName = name;
+            RoomNumber = room ?? _ctx.Rng.Next(1, 30_000);
+            finalCell = Map.Cells.FirstOrDefault(c => Eq(c, cell)) ?? cell;
+            if (Map.Synthesized)
+            {
+                if (!Map.Cells.Contains(finalCell, StringComparer.OrdinalIgnoreCase))
+                    Map.Cells.Add(finalCell);
+                EnsureSynthesizedMonsterInCell(Map, finalCell);
+            }
+            else if (!Map.Cells.Contains(finalCell, StringComparer.OrdinalIgnoreCase))
+            {
+                finalCell = "Enter";
+            }
+            finalPad = pad;
+            Cell = finalCell;
+            Pad = finalPad;
+            SpawnCell = finalCell;
+            SpawnPad = finalPad;
+            MapLoaded = true;
+            MapsVisited.Add(name);
+            if (Map.Synthesized)
+                SynthesizedMapsVisited.Add(name);
+            Trace.World($"Joined {name}-{RoomNumber} at {finalCell}/{finalPad} ({DescribeMapSource(Map)}, {Map.Monsters.Count} monsters, {Map.Cells.Count} cells)");
+        }
+
+        if (raiseEvents)
+        {
+            _ctx.RaiseEvent("MapChanged", name);
+            _ctx.RaiseEvent("CellChanged", name, finalCell, finalPad);
+        }
+    }
+
+    private static string DescribeMapSource(SimMap map) =>
+        map.Captured ? (map.FromScenario ? "captured + scenario" : "captured data") : map.FromScenario ? "scenario" : "NO DATA - synthesized";
+
+    private SimMap BuildMap(string name)
+    {
+        var map = new SimMap { Name = name };
+        var data = _ctx.Catalog.FindMap(name);
+        _ctx.Scenario.Maps.TryGetValue(name, out var setup);
+
+        if (data != null)
+        {
+            map.Captured = true;
+            map.Data = data;
+            map.FileName = data.FileName;
+            foreach (var (cellName, pads) in data.Cells.OrderBy(c => Eq(c.Key, "Enter") ? 0 : 1))
+            {
+                map.Cells.Add(cellName);
+                map.Pads[cellName] = pads.ToList();
+            }
+            foreach (var spawn in data.Monsters.Values.OrderBy(s => s.MapID))
+            {
+                var captured = _ctx.Catalog.FindMonster(spawn.MonsterID, spawn.Name);
+                var maxHp = spawn.MaxHP > 0 ? spawn.MaxHP : captured?.MaxHP ?? 0;
+                var level = spawn.Level > 0 ? spawn.Level : captured?.Level ?? 0;
+                if (maxHp <= 0)
+                {
+                    maxHp = GenericHp(level);
+                    Trace.Synthesize($"monsterhp:{spawn.Name.ToLowerInvariant()}", $"Monster '{spawn.Name}' has no captured HP: using {maxHp}.");
+                }
+                map.Monsters.Add(new SimMonster
+                {
+                    MapID = spawn.MapID,
+                    MonID = spawn.MonsterID,
+                    Name = spawn.Name,
+                    Cell = string.IsNullOrWhiteSpace(spawn.Cell) ? "Enter" : spawn.Cell,
+                    MaxHP = maxHp,
+                    HP = maxHp,
+                    Level = level,
+                    Race = string.IsNullOrWhiteSpace(spawn.Race) ? captured?.Race ?? "None" : spawn.Race,
+                    FileName = spawn.FileName,
+                    Data = captured
+                });
+            }
+        }
+
+        if (setup != null)
+        {
+            map.FromScenario = true;
+            map.Setup = setup;
+            foreach (var c in setup.Cells ?? new List<string>())
+            {
+                if (!map.Cells.Contains(c, StringComparer.OrdinalIgnoreCase))
+                    map.Cells.Add(c);
+            }
+            var nextMapId = map.Monsters.Count == 0 ? 1 : map.Monsters.Max(m => m.MapID) + 1;
+            foreach (var ms in setup.Monsters)
+            {
+                if (!map.Cells.Contains(ms.Cell, StringComparer.OrdinalIgnoreCase))
+                    map.Cells.Add(ms.Cell);
+                var captured = _ctx.Catalog.FindMonster(ms.Id ?? 0, ms.Name);
+                var level = ms.Level ?? captured?.Level ?? 50;
+                var hp = ms.MaxHP ?? (captured?.MaxHP > 0 ? captured.MaxHP : GenericHp(level));
+                for (var i = 0; i < Math.Max(1, ms.Count); i++)
+                {
+                    map.Monsters.Add(new SimMonster
+                    {
+                        MapID = nextMapId++,
+                        MonID = ms.Id ?? captured?.ID ?? 90_000 + Math.Abs(ms.Name.GetHashCode() % 9_999),
+                        Name = ms.Name,
+                        Cell = ms.Cell,
+                        MaxHP = hp,
+                        HP = hp,
+                        Level = level,
+                        Race = captured?.Race ?? "None",
+                        Data = captured,
+                        Setup = ms
+                    });
+                }
+            }
+        }
+
+        if (!map.Cells.Contains("Enter", StringComparer.OrdinalIgnoreCase))
+            map.Cells.Insert(0, "Enter");
+
+        if (map.Synthesized)
+        {
+            Trace.Synthesize($"map:{name}", $"Map '{name}' has no captured data: cells and monsters are synthesized. Run the collector on this map or describe it in the scenario 'maps' section.");
+            if (_ctx.ScriptMonsterHints.TryGetValue(name, out var hints))
+            {
+                var nextMapId = 1;
+                foreach (var (cell, monName) in hints)
+                {
+                    if (!map.Cells.Contains(cell, StringComparer.OrdinalIgnoreCase))
+                        map.Cells.Add(cell);
+                    var captured = _ctx.Catalog.FindMonster(0, monName);
+                    var level = captured?.Level > 0 ? captured.Level : 40;
+                    var hp = captured?.MaxHP > 0 ? captured.MaxHP : GenericHp(level);
+                    map.Monsters.Add(new SimMonster
+                    {
+                        MapID = nextMapId,
+                        MonID = captured?.ID > 0 ? captured.ID : 95_000 + nextMapId,
+                        Name = monName,
+                        Cell = cell,
+                        MaxHP = hp,
+                        HP = hp,
+                        Level = level,
+                        Race = captured?.Race ?? "None",
+                        Data = captured,
+                        Synthesized = true
+                    });
+                    nextMapId++;
+                }
+            }
+            EnsureSynthesizedMonsterInCell(map, "Enter");
+        }
+
+        return map;
+    }
+
+    private void EnsureSynthesizedMonsterInCell(SimMap map, string cell)
+    {
+        if (!map.Synthesized || string.IsNullOrWhiteSpace(cell))
+            return;
+        if (map.Monsters.Any(m => Eq(m.Cell, cell)))
+            return;
+
+        var nextMapId = map.Monsters.Count == 0 ? 1 : map.Monsters.Max(m => m.MapID) + 1;
+        var hp = GenericHp(30);
+        map.Monsters.Add(new SimMonster
+        {
+            MapID = nextMapId,
+            MonID = 99_000 + nextMapId,
+            Name = $"Synthesized Monster ({cell})",
+            Cell = cell,
+            MaxHP = hp,
+            HP = hp,
+            Level = 30,
+            Race = "None",
+            Synthesized = true
+        });
+    }
+
+    private int GenericHp(int level) => Math.Max(1000, Math.Max(1, level) * Rules.GenericMonsterHpPerLevel);
+
+    public bool Jump(string cell, string pad, bool autoCorrect)
+    {
+        lock (Sync)
+            return JumpInternal(cell, pad, raiseEvents: true, autoCorrect);
+    }
+
+    private bool JumpInternal(string cell, string? pad, bool raiseEvents, bool autoCorrect = true)
+    {
+        if (Map == null || string.IsNullOrWhiteSpace(cell))
+            return false;
+        var known = Map.Cells.FirstOrDefault(c => Eq(c, cell));
+        if (known == null)
+        {
+            if (Map.Synthesized || Map.FromScenario)
+            {
+                Map.Cells.Add(cell);
+                known = cell;
+            }
+            else
+            {
+                Trace.Warn($"Jump to cell '{cell}' which was never captured on map '{MapName}' (known cells: {string.Join(", ", Map.Cells.Take(12))}).");
+                known = cell;
+            }
+        }
+        if (Map.Synthesized)
+            EnsureSynthesizedMonsterInCell(Map, known);
+
+        var changed = !Eq(Cell, known);
+        Cell = known;
+        Pad = string.IsNullOrWhiteSpace(pad) ? "Spawn" : pad;
+        if (changed && Target != null && !Eq(Target.Cell, Cell))
+            Target = null;
+        if (raiseEvents)
+            _ctx.RaiseEvent("CellChanged", MapName, Cell, Pad);
+        return true;
+    }
+
+    public void SetSpawnPoint(string? cell, string? pad)
+    {
+        lock (Sync)
+        {
+            SpawnCell = string.IsNullOrWhiteSpace(cell) ? Cell : cell;
+            SpawnPad = string.IsNullOrWhiteSpace(pad) ? Pad : pad;
+        }
+    }
+
+    // ================================================================ Monsters
+
+    public static bool NameMatches(string monsterName, string? query) =>
+        query == null || query == "*" || Eq(monsterName, query);
+
+    public List<SimMonster> AllMonsters()
+    {
+        lock (Sync)
+            return Map?.Monsters.ToList() ?? new List<SimMonster>();
+    }
+
+    public List<SimMonster> MonstersInCell(string? cell = null)
+    {
+        lock (Sync)
+        {
+            var c = cell ?? Cell;
+            return Map?.Monsters.Where(m => Eq(m.Cell, c)).ToList() ?? new List<SimMonster>();
+        }
+    }
+
+    public SimMonster? FindMonster(string? name, int? mapId = null, bool currentCellOnly = true, bool aliveOnly = true)
+    {
+        lock (Sync)
+        {
+            if (Map == null)
+                return null;
+            IEnumerable<SimMonster> q = Map.Monsters;
+            if (currentCellOnly)
+                q = q.Where(m => Eq(m.Cell, Cell));
+            if (aliveOnly)
+                q = q.Where(m => m.Alive);
+            return mapId is > 0
+                ? q.FirstOrDefault(m => m.MapID == mapId)
+                : q.FirstOrDefault(m => NameMatches(m.Name, name));
+        }
+    }
+
+    // ================================================================ Combat
+
+    public bool Attack(SimMonster? monster)
+    {
+        lock (Sync)
+        {
+            if (!Alive || !LoggedIn || monster == null || !monster.Alive || !Eq(monster.Cell, Cell))
+                return false;
+            if (Target != monster)
+                Trace.Info($"Attacking {monster.Name} (MapID {monster.MapID}, HP {monster.HP}/{monster.MaxHP})");
+            Target = monster;
+            InCombatUntilMs = Now + 2000;
+            if (!_combatTickerActive)
+            {
+                _combatTickerActive = true;
+                _ctx.Clock.Scheduler.ScheduleRecurring(Now + CombatTickMs, CombatTickMs, "combat", CombatTick);
+            }
+            return true;
+        }
+    }
+
+    public void SelectTarget(SimMonster? monster)
+    {
+        lock (Sync)
+            Target = monster;
+    }
+
+    public void ClearTarget()
+    {
+        lock (Sync)
+            Target = null;
+    }
+
+    public void ExitCombat()
+    {
+        lock (Sync)
+        {
+            Target = null;
+            InCombatUntilMs = Now;
+        }
+    }
+
+    private bool CombatTick()
+    {
+        lock (Sync)
+        {
+            var target = Target;
+            if (!Alive || target == null || !target.Alive || !Eq(target.Cell, Cell))
+            {
+                if (target != null && !target.Alive)
+                    Target = null;
+                _combatTickerActive = false;
+                return false;
+            }
+
+            var dps = Math.Max(1, _ctx.Scenario.Player.DamagePerSecond);
+            var damage = (int)(dps * (0.85 + _ctx.Rng.NextDouble() * 0.3));
+            target.HP = Math.Max(0, target.HP - damage);
+            InCombatUntilMs = Now + 2000;
+
+            MonsterRetaliates(target);
+
+            if (target.HP <= 0)
+            {
+                Target = null;
+                _combatTickerActive = false;
+                OnMonsterDeath(target);
+                return false;
+            }
+
+            if (!Alive)
+            {
+                _combatTickerActive = false;
+                return false;
+            }
+            return true;
+        }
+    }
+
+    private void MonsterRetaliates(SimMonster monster)
+    {
+        if (_ctx.Scenario.Player.Invulnerable)
+            return;
+
+        var combat = monster.Data?.Combat;
+        int avgDamage, interval;
+        if (combat != null && combat.Hits + combat.Crits > 0)
+        {
+            avgDamage = (int)Math.Max(1, combat.AverageDamage);
+            interval = combat.AverageAttackIntervalMs > 0 ? (int)combat.AverageAttackIntervalMs : 2000;
+        }
+        else
+        {
+            avgDamage = Math.Max(20, Math.Max(1, monster.Level) * 8);
+            interval = 2000;
+            Trace.Synthesize($"combat:{monster.Name.ToLowerInvariant()}", $"Monster '{monster.Name}' has no captured combat data: assuming {avgDamage} damage every {interval} ms.");
+        }
+
+        if (Now >= monster.NextAttackMs)
+        {
+            var dealt = (int)(avgDamage * (0.8 + _ctx.Rng.NextDouble() * 0.4));
+            Health -= dealt;
+            monster.NextAttackMs = Now + interval;
+        }
+
+        Health = Math.Min(MaxHealth, Health + (int)(MaxHealth * _ctx.Scenario.Player.RegenPercentPerSecond / 100.0));
+        if (Health <= 0)
+            OnPlayerDeath(monster);
+    }
+
+    private void OnMonsterDeath(SimMonster monster)
+    {
+        monster.HP = 0;
+        Kills++;
+        KillsByMonster[monster.Name] = KillsByMonster.GetValueOrDefault(monster.Name) + 1;
+        Trace.World($"Defeated {monster.Name} (MapID {monster.MapID}) in {monster.Cell}.");
+
+        var respawnMs = Math.Max(1, Rules.MonsterRespawnSeconds) * 1000L;
+        var map = Map;
+        _ctx.Clock.Scheduler.Schedule(Now + respawnMs, "respawn:" + monster.Name, () =>
+        {
+            lock (Sync)
+            {
+                if (Map == map)
+                    monster.HP = monster.MaxHP;
+            }
+        });
+
+        _ctx.RaiseEvent("MonsterKilled", monster.MapID);
+        RollDrops(monster);
+    }
+
+    private void OnPlayerDeath(SimMonster killer)
+    {
+        Health = 0;
+        Target = null;
+        Deaths++;
+        DeadUntilMs = Now + Math.Max(1, Rules.PlayerRespawnSeconds) * 1000L;
+        Trace.World($"Player died (killed by {killer.Name} in {Cell}). Respawning in {Rules.PlayerRespawnSeconds}s.");
+        _ctx.RaiseEvent("PlayerDeath");
+
+        _ctx.Clock.Scheduler.Schedule(DeadUntilMs, "player-respawn", () =>
+        {
+            lock (Sync)
+            {
+                DeadUntilMs = -1;
+                Health = MaxHealth;
+                Trace.World($"Player respawned at {SpawnCell}/{SpawnPad}.");
+                if (!Eq(Cell, SpawnCell))
+                    JumpInternal(SpawnCell, SpawnPad, raiseEvents: true);
+            }
+        });
+    }
+
+    public void Rest()
+    {
+        lock (Sync)
+        {
+            if (Alive)
+                Health = MaxHealth;
+        }
+    }
+
+    // ================================================================ Drops
+
+    private void RollDrops(SimMonster monster)
+    {
+        var dropped = new HashSet<int>();
+
+        if (monster.Setup?.Drops is { Count: > 0 } scenarioDrops)
+        {
+            foreach (var (itemName, chance) in scenarioDrops)
+            {
+                var info = ResolveItem(itemName);
+                if (_ctx.Rng.NextDouble() < chance)
+                {
+                    GiveDrop(info, 1, "scenario drop");
+                    dropped.Add(info.ID);
+                }
+            }
+        }
+
+        if (monster.Data != null)
+        {
+            foreach (var drop in monster.Data.Drops.Values)
+            {
+                if (dropped.Contains(drop.ItemID))
+                    continue;
+                var chance = drop.EligibleKills > 0 ? drop.EstimatedDropChance : drop.DropEvents > 0 ? 1.0 : 0.0;
+                if (_ctx.Rng.NextDouble() >= chance)
+                    continue;
+                var info = _ctx.Catalog.FindItem(drop.ItemID) ?? new ItemInfo { ID = drop.ItemID, Name = drop.ItemName, Temp = drop.Temp, MaxStack = 1000, Source = DataSource.Captured };
+                var qty = drop.DropEvents > 0 ? Math.Max(1, (int)Math.Round((double)drop.TotalQuantity / drop.DropEvents)) : 1;
+                GiveDrop(info, qty, "captured drop");
+                dropped.Add(drop.ItemID);
+            }
+        }
+
+        if (!Rules.SynthesizeDrops)
+            return;
+
+        foreach (var wanted in CurrentlyFarmedItems())
+        {
+            var id = wanted.Info.ID;
+            if (dropped.Contains(id))
+                continue;
+            if (monster.Data?.Drops.ContainsKey(id) == true)
+                continue;
+            if (monster.Setup?.Drops.ContainsKey(wanted.Info.Name) == true)
+                continue;
+            var sources = _ctx.Catalog.DropSources(id);
+            if (sources.Count > 0 && !sources.Any(s => s.ID == monster.MonID || Eq(s.Name, monster.Name)))
+            {
+                Trace.Synthesize($"nodrop:{monster.Name.ToLowerInvariant()}:{id}",
+                    $"'{wanted.Info.Name}' was captured dropping from {string.Join(", ", sources.Select(s => s.Name).Distinct().Take(3))}, not from '{monster.Name}': no drop synthesized.");
+                continue;
+            }
+
+            var chance = Math.Clamp(Rules.GenericDropChance, 0, 1);
+            Trace.Synthesize($"drop:{monster.Name.ToLowerInvariant()}:{id}",
+                $"'{wanted.Info.Name}' drops from '{monster.Name}' with an invented {chance:P0} chance (no captured drop data).");
+            if (_ctx.Rng.NextDouble() < chance)
+            {
+                GiveDrop(wanted.Info, 1, "synthesized drop");
+                dropped.Add(id);
+            }
+        }
+    }
+
+    private void GiveDrop(ItemInfo info, int quantity, string source)
+    {
+        DropsByItem[info.Name] = DropsByItem.GetValueOrDefault(info.Name) + quantity;
+        if (info.Temp)
+        {
+            AddTemp(info, quantity);
+            var now = TempInventory.FirstOrDefault(i => i.ID == info.ID)?.Quantity ?? quantity;
+            Trace.World($"Drop (temp): {info.Name} x{quantity} -> {now} [{source}]");
+            _ctx.RaiseEvent("ItemDropped", NewItemBase(info, quantity), true, now);
+            return;
+        }
+
+        var stacked = DropStack.FirstOrDefault(d => d.ID == info.ID);
+        if (stacked != null)
+            stacked.Quantity += quantity;
+        else
+            DropStack.Add(NewItemBase(info, quantity));
+        Trace.World($"Drop: {info.Name} x{quantity} waiting for pickup [{source}]");
+        _ctx.RaiseEvent("ItemDropped", NewItemBase(info, quantity), false, quantity);
+
+        if (_ctx.GetBotOption("AcceptAllDrops", false))
+            Pickup(info.Name, info.ID);
+    }
+
+    public bool Pickup(string? name, int? id)
+    {
+        lock (Sync)
+        {
+            var drop = DropStack.FirstOrDefault(d => Matches(d, name, id));
+            if (drop == null)
+                return false;
+            if (!AddToInventory(InfoOf(drop), drop.Quantity, "pickup"))
+                return false;
+            DropStack.Remove(drop);
+            DropsPicked++;
+            return true;
+        }
+    }
+
+    public void Reject(string? name, int? id)
+    {
+        lock (Sync)
+        {
+            var drop = DropStack.FirstOrDefault(d => Matches(d, name, id));
+            if (drop != null)
+            {
+                DropStack.Remove(drop);
+                Trace.World($"Rejected drop {drop.Name}.");
+            }
+        }
+    }
+
+    public void StartDrops()
+    {
+        lock (Sync)
+        {
+            DropsEnabled = true;
+            if (_dropTickerActive)
+                return;
+            _dropTickerActive = true;
+            _ctx.Clock.Scheduler.ScheduleRecurring(Now + DropInterval, Math.Max(100, DropInterval), "drops", DropTick);
+        }
+    }
+
+    public void StopDrops()
+    {
+        lock (Sync)
+            DropsEnabled = false;
+    }
+
+    private bool DropTick()
+    {
+        lock (Sync)
+        {
+            if (!DropsEnabled)
+            {
+                _dropTickerActive = false;
+                return false;
+            }
+            foreach (var drop in DropStack.ToList())
+            {
+                if (PickupNames.Contains(drop.Name) || PickupIds.Contains(drop.ID))
+                    Pickup(drop.Name, drop.ID);
+                else if (RejectElse)
+                    Reject(drop.Name, drop.ID);
+            }
+            return true;
+        }
+    }
+
+    // ================================================================ Map items
+
+    public void GetMapItem(int mapItemId, int quantity)
+    {
+        lock (Sync)
+        {
+            quantity = Math.Max(1, quantity);
+            if (Map?.Setup?.MapItems.TryGetValue(mapItemId.ToString(), out var scenarioItem) == true)
+            {
+                AddToInventory(ResolveItem(scenarioItem), quantity, $"map item {mapItemId}");
+                return;
+            }
+
+            if (Map?.Data?.MapItems.TryGetValue(mapItemId, out var captured) == true && captured.GrantedItemIDs.Count > 0)
+            {
+                foreach (var itemId in captured.GrantedItemIDs)
+                    AddToInventory(ResolveItem(null, itemId), quantity, $"map item {mapItemId}");
+                return;
+            }
+
+            var wanted = CurrentlyFarmedItems().FirstOrDefault();
+            if (wanted != null)
+            {
+                Trace.Synthesize($"mapitem:{MapName}:{mapItemId}", $"Map item {mapItemId} on '{MapName}' has no captured data: assumed to give '{wanted.Info.Name}' (the item the script is looking for).");
+                AddToInventory(wanted.Info, quantity, $"map item {mapItemId}");
+                return;
+            }
+
+            Trace.Warn($"GetMapItem({mapItemId}) on '{MapName}': unknown map item and no item being farmed; nothing was given.");
+        }
+    }
+
+    // ================================================================ Quests
+
+    public Quest? GetOrLoadQuest(int id)
+    {
+        lock (Sync)
+        {
+            if (LoadedQuests.TryGetValue(id, out var loaded))
+                return loaded;
+
+            var data = _ctx.Catalog.FindQuest(id);
+            Quest quest;
+            if (data != null)
+            {
+                quest = new Quest
+                {
+                    ID = data.ID,
+                    Name = data.Name,
+                    Slot = data.Slot,
+                    Value = data.Value,
+                    Once = data.Once,
+                    Field = data.Field,
+                    Index = data.Index,
+                    Upgrade = data.Upgrade,
+                    Level = data.Level,
+                    RequiredClassID = data.RequiredClassID,
+                    RequiredClassPoints = data.RequiredClassPoints,
+                    RequiredFactionId = data.RequiredFactionId,
+                    RequiredFactionRep = data.RequiredFactionRep,
+                    Gold = data.Gold,
+                    XP = data.XP,
+                    AcceptRequirements = data.AcceptRequirements?.ToList() ?? new List<ItemBase>(),
+                    Rewards = data.Rewards?.ToList() ?? new List<ItemBase>(),
+                    SimpleRewards = data.SimpleRewards?.ToList() ?? new List<SimpleReward>(),
+                    Description = "",
+                    EndText = ""
+                };
+                SetRequirements(quest, data.Requirements?.ToList() ?? new List<ItemBase>());
+            }
+            else
+            {
+                quest = new Quest
+                {
+                    ID = id,
+                    Name = $"Quest #{id}",
+                    Slot = -1,
+                    AcceptRequirements = new List<ItemBase>(),
+                    Rewards = new List<ItemBase>(),
+                    SimpleRewards = new List<SimpleReward>(),
+                    Description = "",
+                    EndText = ""
+                };
+                SetRequirements(quest, new List<ItemBase>());
+                Trace.Synthesize($"quest:{id}", $"Quest {id} is not in QuestData.json: simulated with no requirements and no rewards.");
+            }
+
+            LoadedQuests[id] = quest;
+            return quest;
+        }
+    }
+
+    private static void SetRequirements(Quest quest, List<ItemBase> requirements)
+    {
+        QuestReqsField?.SetValue(quest, requirements);
+        QuestReqCacheField?.SetValue(quest, requirements);
+    }
+
+    public bool IsUnlocked(Quest q)
+    {
+        lock (Sync)
+            return q.Slot < 0 || SlotProgress.GetValueOrDefault(q.Slot) >= q.Value - 1;
+    }
+
+    public bool HasBeenCompleted(Quest q)
+    {
+        lock (Sync)
+            return q.Slot >= 0 ? SlotProgress.GetValueOrDefault(q.Slot) >= q.Value : CompletedQuests.Contains(q.ID);
+    }
+
+    public bool AcceptQuest(int id, bool log = true)
+    {
+        lock (Sync)
+        {
+            var q = GetOrLoadQuest(id)!;
+            if (ActiveQuests.Contains(id))
+                return true;
+
+            string? reason = null;
+            if (!LoggedIn)
+                reason = "not logged in";
+            else if (q.Upgrade && !IsMember)
+                reason = "member-only quest";
+            else if (Level < q.Level)
+                reason = $"requires level {q.Level}";
+            else if (!IsUnlocked(q))
+                reason = $"locked (slot {q.Slot} progress {SlotProgress.GetValueOrDefault(q.Slot)} < {q.Value - 1})";
+            else if (q.Once && HasBeenCompleted(q))
+                reason = "one-time quest already completed";
+            else if (DailiesCompleted.Contains(id))
+                reason = "daily/weekly quest already completed today";
+            else
+            {
+                var missing = q.AcceptRequirements?.FirstOrDefault(r => Quantity(Inventory, r.Name, r.ID) + Quantity(Bank, r.Name, r.ID) < Math.Max(1, r.Quantity));
+                if (missing != null)
+                    reason = $"missing accept requirement '{missing.Name}'";
+            }
+
+            if (reason != null)
+            {
+                if (log)
+                    Trace.World($"Accept quest {id} ({q.Name}) failed: {reason}.");
+                return false;
+            }
+
+            ActiveQuests.Add(id);
+            QuestsAcceptedCount++;
+            Trace.World($"Accepted quest {id} ({q.Name}).");
+            EnsureQuestTicker();
+        }
+        _ctx.RaiseEvent("QuestAccepted", id);
+        return true;
+    }
+
+    private void EnsureQuestTicker()
+    {
+        if (_questTickerActive)
+            return;
+        _questTickerActive = true;
+        _ctx.Clock.Scheduler.ScheduleRecurring(Now + 700, 700, "quest-watcher", RegisteredQuestTick);
+    }
+
+    public bool CanComplete(int id)
+    {
+        lock (Sync)
+        {
+            if (!ActiveQuests.Contains(id))
+                return false;
+            var q = GetOrLoadQuest(id)!;
+            return q.Requirements.All(r => Quantity(r.Temp ? TempInventory : Inventory, r.Name, r.ID) >= Math.Max(1, r.Quantity));
+        }
+    }
+
+    public bool CompleteQuest(int id, int rewardItemId, bool log = true)
+    {
+        Quest q;
+        lock (Sync)
+        {
+            q = GetOrLoadQuest(id)!;
+            if (!CanComplete(id))
+            {
+                if (log)
+                {
+                    var reason = !ActiveQuests.Contains(id)
+                        ? "quest not accepted"
+                        : "missing " + string.Join(", ", q.Requirements
+                            .Where(r => Quantity(r.Temp ? TempInventory : Inventory, r.Name, r.ID) < Math.Max(1, r.Quantity))
+                            .Select(r => $"{r.Name} {Quantity(r.Temp ? TempInventory : Inventory, r.Name, r.ID)}/{r.Quantity}"));
+                    Trace.World($"Complete quest {id} ({q.Name}) failed: {reason}.");
+                }
+                return false;
+            }
+
+            foreach (var req in q.Requirements)
+                RemoveItem(req.Name, req.ID, Math.Max(1, req.Quantity), req.Temp, $"quest {id} turn-in");
+
+            foreach (var reward in q.Rewards ?? new List<ItemBase>())
+            {
+                if (rewardItemId > 0 && reward.ID != rewardItemId && q.Rewards!.Any(r => r.ID == rewardItemId))
+                    continue;
+                var rate = q.SimpleRewards?.FirstOrDefault(s => s.ID == reward.ID)?.Rate ?? 100.0;
+                if (rewardItemId <= 0 && _ctx.Rng.NextDouble() * 100.0 >= rate)
+                    continue;
+                AddToInventory(_ctx.Catalog.FindItem(reward.ID) ?? InfoOf(reward), Math.Max(1, reward.Quantity), $"quest {id} reward");
+            }
+
+            Gold += q.Gold;
+            XP += q.XP;
+            if (q.Slot >= 0)
+                SlotProgress[q.Slot] = Math.Max(SlotProgress.GetValueOrDefault(q.Slot), q.Value);
+            if (q.Once || q.Slot >= 0)
+                CompletedQuests.Add(id);
+            if (!string.IsNullOrWhiteSpace(q.Field))
+                DailiesCompleted.Add(id);
+            ActiveQuests.Remove(id);
+            QuestsCompletedCount++;
+            QuestTurnIns[id] = QuestTurnIns.GetValueOrDefault(id) + 1;
+            Trace.World($"Completed quest {id} ({q.Name}) (+{q.Gold} gold, +{q.XP} xp).");
+        }
+        _ctx.RaiseEvent("QuestTurnedIn", id);
+        return true;
+    }
+
+    public void RegisterQuests(IEnumerable<(int Id, int Reward)> quests)
+    {
+        lock (Sync)
+        {
+            foreach (var (id, reward) in quests)
+                RegisteredQuests[id] = reward;
+            if (RegisteredQuests.Count > 0)
+                EnsureQuestTicker();
+        }
+    }
+
+    private bool RegisteredQuestTick()
+    {
+        List<(int Id, int Reward, bool Reaccept)> candidates;
+        lock (Sync)
+        {
+            if (RegisteredQuests.Count == 0 && ActiveQuests.Count == 0)
+            {
+                _questTickerActive = false;
+                return false;
+            }
+            candidates = ActiveQuests
+                .Union(RegisteredQuests.Keys)
+                .Select(id => (id, RegisteredQuests.GetValueOrDefault(id, -1), RegisteredQuests.ContainsKey(id)))
+                .ToList();
+        }
+        foreach (var (id, reward, reaccept) in candidates)
+        {
+            if (reaccept && !ActiveQuests.Contains(id))
+                AcceptQuest(id, log: false);
+            if (CanComplete(id))
+            {
+                CompleteQuest(id, reward);
+                if (reaccept)
+                    AcceptQuest(id, log: false);
+            }
+        }
+        return true;
+    }
+
+    // ================================================================ Shops
+
+    public ShopInfo LoadShop(int shopId)
+    {
+        lock (Sync)
+        {
+            var cached = ShopCache.FirstOrDefault(s => s.ID == shopId);
+            if (cached == null)
+            {
+                var items = new List<ShopItem>();
+                string name;
+                if (_ctx.Catalog.Captured.Shops.TryGetValue(shopId, out var data))
+                {
+                    name = data.Name;
+                    foreach (var si in data.Items)
+                    {
+                        items.Add(new ShopItem
+                        {
+                            ID = si.ID,
+                            Name = si.Name,
+                            ShopItemID = si.ShopItemID,
+                            Cost = si.Cost,
+                            Coins = si.Coins,
+                            Upgrade = si.Upgrade,
+                            Level = si.Level,
+                            MaxStack = Math.Max(1, si.MaxStack),
+                            Faction = si.Faction,
+                            RequiredReputation = si.RequiredReputation,
+                            CategoryString = si.Category,
+                            Quantity = 1,
+                            TokenID = si.TokenID,
+                            TokenQuantity = si.TokenQuantity,
+                            TokenName = si.TokenName,
+                            Requirements = si.Requirements.Select(r => (ItemBase)NewItemBase(_ctx.Catalog.FindItem(r.ItemID) ?? new ItemInfo { ID = r.ItemID, Name = r.ItemName, Temp = r.Temp }, r.Quantity)).ToList()
+                        });
+                    }
+                }
+                else
+                {
+                    name = $"Shop #{shopId}";
+                    if (_ctx.ScriptShopHints.TryGetValue(shopId, out var hintedItems))
+                    {
+                        var nextShopItemId = 1;
+                        foreach (var itemName in hintedItems)
+                        {
+                            var info = ResolveItem(itemName);
+                            items.Add(new ShopItem
+                            {
+                                ID = info.ID,
+                                Name = info.Name,
+                                ShopItemID = shopId * 100 + nextShopItemId++,
+                                Cost = 0,
+                                Coins = info.Coins,
+                                Upgrade = info.Upgrade,
+                                MaxStack = Math.Max(1, info.MaxStack),
+                                CategoryString = info.Category,
+                                Quantity = 1,
+                                Requirements = new List<ItemBase>()
+                            });
+                        }
+                    }
+                    Trace.Synthesize($"shop:{shopId}", $"Shop {shopId} has no captured data: synthesized {items.Count} item(s){(Rules.LenientShops ? " (free, no merge requirements checked)" : "")}.");
+                }
+                cached = new ShopInfo(shopId, name, items);
+                ShopCache.Add(cached);
+            }
+            CurrentShop = cached;
+            Trace.World($"Loaded shop {shopId} ({cached.Name}, {cached.Items.Count} items).");
+            return cached;
+        }
+    }
+
+    public bool Buy(string? name, int? itemId, int shopItemId, int quantity)
+    {
+        int charItemId;
+        lock (Sync)
+        {
+            var shop = CurrentShop;
+            var item = shop?.Items.FirstOrDefault(i => shopItemId > 0 ? i.ShopItemID == shopItemId : Matches(i, name, itemId));
+            var qty = quantity > 0 ? quantity : 1;
+
+            if (item == null)
+            {
+                if (shop == null)
+                {
+                    Trace.World($"BuyItem({name ?? itemId?.ToString()}) failed: no shop loaded.");
+                    return false;
+                }
+                if (!Rules.LenientShops)
+                {
+                    Trace.World($"BuyItem({name ?? itemId?.ToString()}) failed: item not in shop {shop.ID}.");
+                    return false;
+                }
+                var info = ResolveItem(name, itemId);
+                Trace.Synthesize($"buy:{shop.ID}:{info.Name.ToLowerInvariant()}", $"Bought '{info.Name}' from shop {shop.ID} without captured shop data (free, no requirements checked).");
+                AddToInventory(info, qty, $"bought from shop {shop.ID}");
+                charItemId = Inventory.FirstOrDefault(i => i.ID == info.ID)?.CharItemID ?? 0;
+            }
+            else
+            {
+                string? reason = null;
+                var totalCost = (long)item.Cost * qty;
+                if (item.Upgrade && !IsMember)
+                    reason = "member-only item";
+                else if (item.Coins ? Coins < totalCost : Gold < totalCost)
+                    reason = $"not enough {(item.Coins ? "AC" : "gold")} ({totalCost} needed)";
+                else
+                {
+                    var missing = item.Requirements?.FirstOrDefault(r => Quantity(r.Temp ? TempInventory : Inventory, r.Name, r.ID) < Math.Max(1, r.Quantity) * qty);
+                    if (missing != null)
+                        reason = $"missing merge requirement '{missing.Name}' x{missing.Quantity * qty}";
+                }
+
+                if (reason != null)
+                {
+                    Trace.World($"Buy '{item.Name}' failed: {reason}.");
+                    return false;
+                }
+
+                foreach (var req in item.Requirements ?? new List<ItemBase>())
+                    RemoveItem(req.Name, req.ID, Math.Max(1, req.Quantity) * qty, req.Temp, $"merge for {item.Name}");
+                if (item.Coins)
+                    Coins -= (int)totalCost;
+                else
+                    Gold -= totalCost;
+                AddToInventory(_ctx.Catalog.FindItem(item.ID) ?? InfoOf(item), qty, $"bought from shop {shop!.ID}");
+                charItemId = Inventory.FirstOrDefault(i => i.ID == item.ID)?.CharItemID ?? 0;
+            }
+        }
+        _ctx.RaiseEvent("ItemBought", charItemId);
+        return true;
+    }
+
+    public bool Sell(string? name, int? id, int quantity)
+    {
+        InventoryItem? item;
+        int sold;
+        lock (Sync)
+        {
+            item = Inventory.FirstOrDefault(i => Matches(i, name, id));
+            if (item == null || item.Equipped)
+                return false;
+            sold = quantity > 0 ? Math.Min(quantity, item.Quantity) : item.Quantity;
+            RemoveItem(item.Name, item.ID, sold, false, "sold");
+        }
+        _ctx.RaiseEvent("ItemSold", item.CharItemID, sold, Math.Max(0, item.Quantity), 0, item.Coins);
+        return true;
+    }
+
+    // ================================================================ Session
+
+    public void Logout(bool autoRelogin, int reloginDelayMs)
+    {
+        lock (Sync)
+        {
+            LoggedIn = false;
+            MapLoaded = false;
+            Target = null;
+            Trace.World("Logged out.");
+        }
+        _ctx.RaiseEvent("Logout");
+        if (!autoRelogin)
+            return;
+        _ctx.RaiseEvent("ReloginTriggered", false);
+        _ctx.Clock.Scheduler.Schedule(Now + Math.Max(1000, reloginDelayMs), "relogin", () => Relogin());
+    }
+
+    public bool Relogin()
+    {
+        lock (Sync)
+        {
+            LoggedIn = true;
+            Relogins++;
+            Trace.World("Logged back in.");
+        }
+        Join("battleon", "Enter", "Spawn", ignoreCheck: true, raiseEvents: true, delay: false);
+        return true;
+    }
+
+    public PlayerInfo SelfInfo()
+    {
+        lock (Sync)
+        {
+            return new PlayerInfo
+            {
+                Name = Username,
+                HP = Health,
+                MaxHP = MaxHealth,
+                MP = 100,
+                Level = Level,
+                Cell = Cell,
+                Pad = Pad,
+                State = State,
+                EntID = 1,
+                X = PositionX,
+                Y = PositionY,
+                Stats = new PlayerStats()
+            };
+        }
+    }
+
+    // ================================================================ Snapshots
+
+    public WorldSnapshot Snapshot()
+    {
+        lock (Sync)
+        {
+            return new WorldSnapshot
+            {
+                Map = MapName,
+                Room = RoomNumber,
+                Cell = Cell,
+                Pad = Pad,
+                Level = Level,
+                Gold = Gold,
+                Coins = Coins,
+                Health = Health,
+                Alive = Alive,
+                LoggedIn = LoggedIn,
+                Inventory = Inventory.Select(i => new ItemCount(i.ID, i.Name, i.Quantity, i.Equipped)).ToList(),
+                Bank = Bank.Select(i => new ItemCount(i.ID, i.Name, i.Quantity, false)).ToList(),
+                TempInventory = TempInventory.Select(i => new ItemCount(i.ID, i.Name, i.Quantity, false)).ToList(),
+                ActiveQuests = ActiveQuests.OrderBy(i => i).ToList(),
+                CompletedQuests = CompletedQuests.OrderBy(i => i).ToList()
+            };
+        }
+    }
+}
+
+public sealed record ItemCount(int Id, string Name, int Quantity, bool Equipped);
+
+public sealed class WorldSnapshot
+{
+    public string Map { get; init; } = "";
+    public int Room { get; init; }
+    public string Cell { get; init; } = "";
+    public string Pad { get; init; } = "";
+    public int Level { get; init; }
+    public long Gold { get; init; }
+    public int Coins { get; init; }
+    public int Health { get; init; }
+    public bool Alive { get; init; }
+    public bool LoggedIn { get; init; }
+    public List<ItemCount> Inventory { get; init; } = new();
+    public List<ItemCount> Bank { get; init; } = new();
+    public List<ItemCount> TempInventory { get; init; } = new();
+    public List<int> ActiveQuests { get; init; } = new();
+    public List<int> CompletedQuests { get; init; } = new();
+}

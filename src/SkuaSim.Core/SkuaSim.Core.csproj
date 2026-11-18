@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>SkuaSim.Core</AssemblyName>
+    <RootNamespace>SkuaSim.Core</RootNamespace>
+    <Version>0.1.0</Version>
+    <Description>SkuaSim simulation engine: compiles Skua scripts and runs them against a simulated game world.</Description>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <VibeSkuaDir Condition="'$(VibeSkuaDir)' == ''">$(LOCALAPPDATA)\VibeSkua\current\Assemblies</VibeSkuaDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SkuaSim.Collector\SkuaSim.Collector.csproj" />
+  </ItemGroup>
+
+  <!-- Skua/VibeSkua assemblies are resolved at runtime from the installed client (see SkuaAssemblyResolver),
+       so the simulator always runs against the exact API version the user has installed. -->
+  <ItemGroup>
+    <Reference Include="Skua.Core"><HintPath>$(VibeSkuaDir)\Skua.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Skua.Core.Interfaces"><HintPath>$(VibeSkuaDir)\Skua.Core.Interfaces.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Skua.Core.Models"><HintPath>$(VibeSkuaDir)\Skua.Core.Models.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Skua.Core.Utils"><HintPath>$(VibeSkuaDir)\Skua.Core.Utils.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="CommunityToolkit.Mvvm"><HintPath>$(VibeSkuaDir)\CommunityToolkit.Mvvm.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Newtonsoft.Json"><HintPath>$(VibeSkuaDir)\Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Microsoft.CodeAnalysis"><HintPath>$(VibeSkuaDir)\Microsoft.CodeAnalysis.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Microsoft.CodeAnalysis.CSharp"><HintPath>$(VibeSkuaDir)\Microsoft.CodeAnalysis.CSharp.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+</Project>

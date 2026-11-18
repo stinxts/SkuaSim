@@ -1,0 +1,22 @@
+{
+  "name": "Low-Level Player (Level 50)",
+  "description": "Simulates a Level 50 member player starting a leveling farm from battleon.",
+  "seed": 42,
+  "player": {
+    "username": "NewHero",
+    "level": 50,
+    "gold": 5000,
+    "isMember": true,
+    "class": "Legion Revenant",
+    "damagePerSecond": 900
+  },
+  "location": {
+    "map": "battleon",
+    "cell": "Enter",
+    "pad": "Spawn"
+  },
+  "limits": {
+    "maxVirtualMinutes": 5,
+    "maxRealSeconds": 30
+  }
+}

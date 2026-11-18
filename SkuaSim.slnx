@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SkuaSim.Cli/SkuaSim.Cli.csproj" />
+    <Project Path="src/SkuaSim.Collector/SkuaSim.Collector.csproj" />
+    <Project Path="src/SkuaSim.Core/SkuaSim.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SkuaSim.Collector.Tests/SkuaSim.Collector.Tests.csproj" />
+    <Project Path="tests/SkuaSim.Core.Tests/SkuaSim.Core.Tests.csproj" />
+  </Folder>
+</Solution>

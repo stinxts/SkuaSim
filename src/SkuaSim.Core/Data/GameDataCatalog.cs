@@ -1,0 +1,190 @@
+using Newtonsoft.Json;
+using Skua.Core.Models.Items;
+using Skua.Core.Models.Quests;
+using SkuaSim.Collector.Models;
+
+namespace SkuaSim.Core.Data;
+
+public enum DataSource { Captured, QuestData, Scenario, Synthesized }
+
+public sealed class ItemInfo
+{
+    public int ID { get; init; }
+    public string Name { get; init; } = "";
+    public int MaxStack { get; set; } = 1;
+    public bool Temp { get; set; }
+    public string Category { get; set; } = "Item";
+    public bool Coins { get; set; }
+    public bool Upgrade { get; set; }
+    public DataSource Source { get; set; }
+}
+
+/// <summary>
+/// Read-only game knowledge: the collector database (gamedata.json) plus Skua's QuestData.json.
+/// </summary>
+public sealed class GameDataCatalog
+{
+    private readonly Dictionary<int, ItemInfo> _itemsById = new();
+    private readonly Dictionary<string, ItemInfo> _itemsByName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, List<CapturedMonster>> _monstersByName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<int, CapturedMonster> _monstersById = new();
+    private readonly Dictionary<int, List<CapturedMonster>> _dropSources = new();
+
+    public GameDatabase Captured { get; }
+    public string? CapturedPath { get; }
+    public IReadOnlyDictionary<int, QuestData> Quests { get; }
+    public string? QuestDataPath { get; }
+
+    private GameDataCatalog(GameDatabase captured, string? capturedPath, Dictionary<int, QuestData> quests, string? questDataPath)
+    {
+        Captured = captured;
+        CapturedPath = capturedPath;
+        Quests = quests;
+        QuestDataPath = questDataPath;
+        BuildIndexes();
+    }
+
+    public static GameDataCatalog Load(string? gameDataPath, string? questDataPath)
+    {
+        var captured = new GameDatabase();
+        string? usedCaptured = null;
+        if (!string.IsNullOrEmpty(gameDataPath) && File.Exists(gameDataPath))
+        {
+            captured = JsonConvert.DeserializeObject<GameDatabase>(File.ReadAllText(gameDataPath)) ?? new GameDatabase();
+            usedCaptured = Path.GetFullPath(gameDataPath);
+        }
+
+        var quests = new Dictionary<int, QuestData>();
+        string? usedQuests = null;
+        if (!string.IsNullOrEmpty(questDataPath) && File.Exists(questDataPath))
+        {
+            var list = JsonConvert.DeserializeObject<List<QuestData>>(File.ReadAllText(questDataPath)) ?? new List<QuestData>();
+            foreach (var q in list)
+                quests[q.ID] = q;
+            usedQuests = Path.GetFullPath(questDataPath);
+        }
+
+        return new GameDataCatalog(captured, usedCaptured, quests, usedQuests);
+    }
+
+    private void BuildIndexes()
+    {
+        foreach (var item in Captured.Items.Values)
+        {
+            AddItem(new ItemInfo
+            {
+                ID = item.ID,
+                Name = item.Name,
+                MaxStack = Math.Max(1, item.MaxStack),
+                Temp = item.Temp,
+                Category = string.IsNullOrWhiteSpace(item.Category) ? "Item" : item.Category,
+                Coins = item.Coins,
+                Upgrade = item.Upgrade,
+                Source = DataSource.Captured
+            });
+        }
+
+        foreach (var q in Quests.Values)
+        {
+            foreach (var list in new[] { q.Requirements, q.AcceptRequirements, q.Rewards })
+            {
+                if (list == null)
+                    continue;
+                foreach (var it in list)
+                    AddItemBase(it, DataSource.QuestData);
+            }
+        }
+
+        foreach (var shop in Captured.Shops.Values)
+        {
+            foreach (var si in shop.Items)
+            {
+                AddItem(new ItemInfo
+                {
+                    ID = si.ID,
+                    Name = si.Name,
+                    MaxStack = Math.Max(1, si.MaxStack),
+                    Category = string.IsNullOrWhiteSpace(si.Category) ? "Item" : si.Category,
+                    Coins = si.Coins,
+                    Upgrade = si.Upgrade,
+                    Source = DataSource.Captured
+                });
+            }
+        }
+
+        foreach (var mon in Captured.Monsters.Values)
+        {
+            if (!string.IsNullOrWhiteSpace(mon.Name))
+            {
+                if (!_monstersByName.TryGetValue(mon.Name.Trim(), out var list))
+                    _monstersByName[mon.Name.Trim()] = list = new List<CapturedMonster>();
+                list.Add(mon);
+            }
+            if (mon.ID > 0)
+                _monstersById[mon.ID] = mon;
+            foreach (var drop in mon.Drops.Values)
+            {
+                if (!_dropSources.TryGetValue(drop.ItemID, out var sources))
+                    _dropSources[drop.ItemID] = sources = new List<CapturedMonster>();
+                sources.Add(mon);
+            }
+        }
+    }
+
+    private void AddItemBase(ItemBase it, DataSource source)
+    {
+        if (it == null || it.ID <= 0 || string.IsNullOrWhiteSpace(it.Name))
+            return;
+        AddItem(new ItemInfo
+        {
+            ID = it.ID,
+            Name = it.Name.Trim(),
+            MaxStack = Math.Max(1, it.MaxStack),
+            Temp = it.Temp,
+            Category = string.IsNullOrWhiteSpace(it.CategoryString) ? "Item" : it.CategoryString,
+            Coins = it.Coins,
+            Upgrade = it.Upgrade,
+            Source = source
+        });
+    }
+
+    private void AddItem(ItemInfo info)
+    {
+        if (info.ID <= 0 || string.IsNullOrWhiteSpace(info.Name))
+            return;
+        if (_itemsById.TryGetValue(info.ID, out var existing))
+        {
+            // Captured data wins over QuestData; keep the larger stack size.
+            existing.MaxStack = Math.Max(existing.MaxStack, info.MaxStack);
+            return;
+        }
+        _itemsById[info.ID] = info;
+        _itemsByName.TryAdd(info.Name.Trim(), info);
+    }
+
+    public ItemInfo? FindItem(int id) => _itemsById.GetValueOrDefault(id);
+
+    public ItemInfo? FindItem(string? name) =>
+        string.IsNullOrWhiteSpace(name) ? null : _itemsByName.GetValueOrDefault(name.Trim());
+
+    public QuestData? FindQuest(int id) => Quests.GetValueOrDefault(id);
+
+    public CapturedMap? FindMap(string normalizedName) =>
+        Captured.Maps.TryGetValue(normalizedName, out var map) ? map : null;
+
+    public CapturedMonster? FindMonster(int monsterId, string? name)
+    {
+        if (monsterId > 0 && _monstersById.TryGetValue(monsterId, out var byId))
+            return byId;
+        if (!string.IsNullOrWhiteSpace(name) && _monstersByName.TryGetValue(name.Trim(), out var list))
+            return list.OrderByDescending(m => m.KillCount).First();
+        return null;
+    }
+
+    /// <summary>Captured monsters known to drop the item.</summary>
+    public IReadOnlyList<CapturedMonster> DropSources(int itemId) =>
+        _dropSources.TryGetValue(itemId, out var list) ? list : Array.Empty<CapturedMonster>();
+
+    public int ItemCount => _itemsById.Count;
+    public int QuestCount => Quests.Count;
+}

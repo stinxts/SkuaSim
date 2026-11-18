@@ -1,0 +1,17 @@
+{
+  "name": "EldersBlood Daily Already Completed Today",
+  "description": "Simulates a player who already completed Quest #802 (Elders' Blood) today.",
+  "seed": 42,
+  "player": {
+    "username": "DailyTester",
+    "level": 100,
+    "class": "ArchPaladin"
+  },
+  "quests": {
+    "dailiesCompleted": [ 802 ]
+  },
+  "limits": {
+    "maxVirtualMinutes": 5,
+    "maxRealSeconds": 30
+  }
+}

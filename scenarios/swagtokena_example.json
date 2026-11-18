@@ -1,0 +1,28 @@
+{
+  "name": "SwagTokenA Edge-Case Test (490x Token D in Bank, Non-Member)",
+  "description": "Simulates a non-member player starting with 490x Super-Fan Swag Token D in the bank and 99x Token A in inventory.",
+  "seed": 123,
+  "player": {
+    "username": "BugReporter",
+    "level": 90,
+    "gold": 500000,
+    "isMember": false,
+    "class": "ArchPaladin",
+    "damagePerSecond": 5500
+  },
+  "location": {
+    "map": "battleon",
+    "cell": "Enter",
+    "pad": "Spawn"
+  },
+  "inventory": [
+    { "name": "Super-Fan Swag Token A", "quantity": 99 }
+  ],
+  "bank": [
+    { "name": "Super-Fan Swag Token D", "quantity": 490 }
+  ],
+  "limits": {
+    "maxVirtualMinutes": 60,
+    "maxRealSeconds": 60
+  }
+}
