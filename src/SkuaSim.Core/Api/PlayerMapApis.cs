@@ -58,8 +58,8 @@ public sealed class PlayerApi : ApiBase
     public Monster? Target => World.Target?.ToModel();
     public bool HasTarget => World.Target is { Alive: true };
     public bool Loaded => World.LoggedIn && World.MapLoaded;
-    public SkillInfo[] Skills => _skills;
-    public PlayerStats Stats { get; } = new() { AttackPower = 1000, SpellPower = 1000, Haste = 0.2f, CriticalChance = 0.3f, CriticalMultiplier = 1.5f, EvasionChance = 0.1f };
+    public SkillInfo[] Skills => World.Skills;
+    public PlayerStats Stats => World.Stats;
     public bool AFK => false;
     public int X => World.PositionX;
     public int Y => World.PositionY;

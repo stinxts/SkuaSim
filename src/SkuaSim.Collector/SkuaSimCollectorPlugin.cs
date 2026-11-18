@@ -320,6 +320,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                 var monsters = bot.Monsters.MapMonsters;
 
                 EnqueueWork(() => _engine.RecordMapSnapshot(mapName, mapFile, cell, pad, cells, monsters));
+                CaptureLivePlayerSnapshot(bot);
             }
             catch
             {
@@ -387,6 +388,11 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                     break;
 
                 _engine.CollectCombatDetails = GetBoolOption(OptCombatDetails, true);
+                if (IsCollectingActive() && _bot is { Player.LoggedIn: true })
+                {
+                    CaptureLivePlayerSnapshot(_bot);
+                    await Task.Delay(150, token).ConfigureAwait(false);
+                }
                 FlushSafe();
             }
             catch (OperationCanceledException)
@@ -441,7 +447,8 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                     $"• Cataloged Monsters: {db.Monsters.Count} ({totalKills} kills)\n" +
                     $"• Cataloged Items: {db.Items.Count} ({totalDrops} drops)\n" +
                     $"• Captured Shops: {db.Shops.Count}\n" +
-                    $"• Captured Quests: {db.Quests.Count}\n\n" +
+                    $"• Captured Quests: {db.Quests.Count}\n" +
+                    $"• Captured Classes: {db.Classes.Count} ({db.Enhancements.Count} enh patterns)\n\n" +
                     $"=== Current Session (PID {Environment.ProcessId}) ===\n" +
                     $"• Processed Packets: {_engine.SessionPacketsProcessed}\n" +
                     $"• Visited Maps: {_engine.SessionMapsVisited}\n" +
@@ -449,7 +456,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                     $"• Recorded Drops: {_engine.SessionDropsRecorded}\n\n" +
                     $"Primary File:\n{store.PrimaryFilePath}";
 
-                Log($"[SkuaSim Collector] Maps={db.Maps.Count}, Monsters={db.Monsters.Count}, Kills={totalKills}, Items={db.Items.Count}, Shops={db.Shops.Count}, Quests={db.Quests.Count}");
+                Log($"[SkuaSim Collector] Maps={db.Maps.Count}, Monsters={db.Monsters.Count}, Kills={totalKills}, Items={db.Items.Count}, Shops={db.Shops.Count}, Quests={db.Quests.Count}, Classes={db.Classes.Count}, Enh={db.Enhancements.Count}");
 
                 if (_bot == null)
                     return;
@@ -551,6 +558,89 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
         catch { }
 
         return string.Empty;
+    }
+
+    private void CaptureLivePlayerSnapshot(IScriptInterface bot)
+    {
+        try
+        {
+            if (!bot.Player.LoggedIn)
+                return;
+
+            var uid = 0;
+            try
+            {
+                uid = bot.Flash?.GetGameObject<int>("world.myAvatar.uid", 0) ?? 0;
+            }
+            catch
+            {
+                // Ignore Flash read errors during transitions
+            }
+
+            var currentClass = bot.Player.CurrentClass;
+            var className = currentClass?.Name;
+            var level = bot.Player.Level;
+            var maxHp = bot.Player.MaxHealth;
+            var stats = bot.Player.Stats;
+            var skills = bot.Player.Skills;
+
+            int weaponEnhPat = 0, weaponEnhLvl = 0;
+            int classEnhPat = currentClass?.EnhancementPatternID ?? 0;
+            int classEnhLvl = currentClass?.EnhancementLevel ?? 0;
+            int helmEnhPat = 0, helmEnhLvl = 0;
+            int capeEnhPat = 0, capeEnhLvl = 0;
+
+            var items = bot.Inventory?.Items;
+            if (items != null)
+            {
+                foreach (var item in items)
+                {
+                    if (item == null || !item.Equipped)
+                        continue;
+
+                    if (string.Equals(item.ItemGroup, "Weapon", StringComparison.OrdinalIgnoreCase))
+                    {
+                        weaponEnhPat = item.EnhancementPatternID;
+                        weaponEnhLvl = item.EnhancementLevel;
+                    }
+                    else if (string.Equals(item.CategoryString, "Class", StringComparison.OrdinalIgnoreCase))
+                    {
+                        classEnhPat = item.EnhancementPatternID;
+                        classEnhLvl = item.EnhancementLevel;
+                    }
+                    else if (string.Equals(item.CategoryString, "Helm", StringComparison.OrdinalIgnoreCase))
+                    {
+                        helmEnhPat = item.EnhancementPatternID;
+                        helmEnhLvl = item.EnhancementLevel;
+                    }
+                    else if (string.Equals(item.CategoryString, "Cape", StringComparison.OrdinalIgnoreCase))
+                    {
+                        capeEnhPat = item.EnhancementPatternID;
+                        capeEnhLvl = item.EnhancementLevel;
+                    }
+                }
+            }
+
+            EnqueueWork(() => _engine.RecordLivePlayerState(
+                uid,
+                className,
+                level,
+                maxHp,
+                stats,
+                skills,
+                weaponEnhPat,
+                weaponEnhLvl,
+                classEnhPat,
+                classEnhLvl,
+                helmEnhPat,
+                helmEnhLvl,
+                capeEnhPat,
+                capeEnhLvl));
+        }
+        catch
+        {
+            // Never propagate exceptions from background stat sampling
+        }
     }
 
     private bool IsCollectingActive()

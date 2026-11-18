@@ -11,7 +11,7 @@ namespace SkuaSim.Collector.Parsing;
 /// Processes game packets and Skua model snapshots into an in-memory delta GameDatabase.
 /// Thread-safe via internal lock; designed to be called from a background worker or event handlers.
 /// </summary>
-public sealed class PacketCollectorEngine
+public sealed partial class PacketCollectorEngine
 {
     private readonly object _sync = new();
     private GameDatabase _delta = new();
@@ -78,7 +78,9 @@ public sealed class PacketCollectorEngine
                 || _delta.Monsters.Count > 0
                 || _delta.Items.Count > 0
                 || _delta.Shops.Count > 0
-                || _delta.Quests.Count > 0;
+                || _delta.Quests.Count > 0
+                || _delta.Classes.Count > 0
+                || _delta.Enhancements.Count > 0;
         }
     }
 
@@ -128,6 +130,13 @@ public sealed class PacketCollectorEngine
                     break;
                 case "ct":
                     HandleCombatTick(dataObj);
+                    HandlePlayerCombatTick(dataObj);
+                    break;
+                case "sAct":
+                    HandleSkillActionsPacket(dataObj);
+                    break;
+                case "stu":
+                    HandleStatUpdatePacket(dataObj);
                     break;
                 case "dropItem":
                     HandleDropItemPacket(dataObj);
@@ -362,7 +371,10 @@ public sealed class PacketCollectorEngine
                         RequiredReputation = si.RequiredReputation,
                         TokenID = si.TokenID,
                         TokenQuantity = si.TokenQuantity,
-                        TokenName = si.TokenName ?? string.Empty
+                        TokenName = si.TokenName ?? string.Empty,
+                        EnhancementPatternID = si.EnhancementPatternID,
+                        ProcID = si.ProcID,
+                        Meta = si.Meta ?? string.Empty
                     };
 
                     if (si.Requirements is { Count: > 0 })
@@ -905,7 +917,10 @@ public sealed class PacketCollectorEngine
                     Level = ParseInt(itemObj["iLvl"]),
                     MaxStack = Math.Max(1, capturedItem.MaxStack),
                     Faction = itemObj["sFaction"]?.ToString() ?? string.Empty,
-                    RequiredReputation = ParseInt(itemObj["iReqRep"])
+                    RequiredReputation = ParseInt(itemObj["iReqRep"]),
+                    EnhancementPatternID = ParseInt(itemObj["EnhPatternID"]),
+                    ProcID = ParseInt(itemObj["ProcID"]),
+                    Meta = itemObj["sMeta"]?.ToString() ?? string.Empty
                 };
 
                 if (itemObj["turnin"] is JArray turninArr)

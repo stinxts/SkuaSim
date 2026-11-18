@@ -297,6 +297,115 @@ try
     var zipPath = store.ExportZipPackage(Path.Combine(tempDir, "exports"));
     Assert(File.Exists(zipPath), "Exported zip not created");
 
+    Console.WriteLine("4. Testing class skills (sAct), stat updates (stu), player combat (ct), enhancements & anonymization...");
+    var c1 = new PacketCollectorEngine();
+    var c2 = new PacketCollectorEngine();
+
+    c1.SetPlayerCombatContext(
+        selfEntityId: 4242,
+        className: "Mage",
+        level: 10,
+        maxHealth: 850,
+        weaponEnhPattern: 6, weaponEnhLevel: 10,
+        classEnhPattern: 6, classEnhLevel: 10,
+        helmEnhPattern: 6, helmEnhLevel: 10,
+        capeEnhPattern: 6, capeEnhLevel: 10);
+
+    static string Pext(string dataObj) => "{\"params\":{\"type\":\"json\",\"dataObj\":" + dataObj + "}}";
+
+    c1.ProcessExtensionPacketJson(Pext("""
+    {
+      "cmd": "sAct",
+      "actions": {
+        "active": [
+          { "id": 1, "actID": 1001, "nam": "Auto attack", "damage": 1.0, "cd": 2000, "mp": 0, "typ": "m", "auto": true },
+          { "id": 2, "actID": 1002, "nam": "Fireball", "damage": 1.5, "cd": 3000, "mp": 15, "typ": "m", "desc": "Burns target." },
+          { "id": 3, "actID": 1003, "nam": "Arcane Mend", "damage": -1.2, "cd": 8000, "mp": 25, "typ": "h", "desc": "Heals caster." }
+        ],
+        "passive": [
+          { "nam": "Runic Mastery", "desc": "Increases INT by 15%." }
+        ]
+      }
+    }
+    """));
+
+    c1.ProcessExtensionPacketJson(Pext("""
+    {
+      "cmd": "stu",
+      "sta": {
+        "$STR": 12, "$INT": 95, "$END": 40, "$DEX": 25, "$WIS": 60, "$LCK": 18,
+        "$ap": 48, "$sp": 210, "$tha": 0.14, "$tcr": 0.11, "$scm": 1.65, "$tdo": 0.08
+      }
+    }
+    """));
+
+    // Outgoing player crit, hit, miss; self heal; incoming monster dodge & hit; another player's ignored hit
+    c1.ProcessExtensionPacketJson(Pext("""
+    {
+      "cmd": "ct",
+      "a": [
+        { "cInf": "p:4242", "tInf": "m:1", "type": "crit", "hp": 320 },
+        { "cInf": "p:4242", "tInf": "m:1", "type": "hit", "hp": 180 },
+        { "cInf": "p:4242", "tInf": "m:1", "type": "miss", "hp": 0 },
+        { "cInf": "p:4242", "tInf": "p:4242", "type": "hit", "hp": -190 },
+        { "cInf": "m:1", "tInf": "p:4242", "type": "dodge", "hp": 0 },
+        { "cInf": "m:1", "tInf": "p:4242", "type": "hit", "hp": 75 },
+        { "cInf": "p:99999", "tInf": "m:1", "type": "crit", "hp": 99999 }
+      ]
+    }
+    """));
+
+    // Verify loadShop captures EnhPatternID & ProcID on shop items
+    c2.ProcessExtensionPacketJson(Pext("""
+    {
+      "cmd": "loadShop",
+      "shopinfo": {
+        "ShopID": 141,
+        "sName": "Wizard Enhancements",
+        "items": [
+          { "ShopItemID": 5001, "ItemID": 51001, "sName": "Wizard Weapon Enh Lv 10", "sType": "Enhancement", "iCost": 250, "iLvl": 10, "EnhPatternID": 6, "ProcID": 0, "sMeta": "Weapon" }
+        ]
+      }
+    }
+    """));
+
+    c2.SetPlayerCombatContext(selfEntityId: 8888, className: "Mage", level: 10, maxHealth: 850);
+    c2.ProcessExtensionPacketJson(Pext("""
+    {
+      "cmd": "ct",
+      "a": [
+        { "cInf": "p:8888", "tInf": "m:2", "type": "hit", "hp": 100 },
+        { "cInf": "m:2", "tInf": "p:8888", "type": "dodge", "hp": 0 }
+      ]
+    }
+    """));
+
+    store.FlushDelta(c1.TakeDeltaSnapshot());
+    var finalDb = store.FlushDelta(c2.TakeDeltaSnapshot());
+
+    Assert(finalDb.Classes.TryGetValue("Mage", out var mage), "Mage class profile missing");
+    Assert(mage!.Skills.Count == 3, $"Expected 3 captured skills, got {mage.Skills.Count}");
+    Assert(mage.Skills[2].IsHealHint, "Expected Arcane Mend to be flagged IsHealHint");
+    Assert(mage.Passives.Count == 1, "Expected 1 passive skill");
+    Assert(mage.StatsByLevel.TryGetValue(10, out var lv10) && lv10 is { Intellect: 95, SpellPower: 210 }, "Lv 10 Mage stats mismatch");
+    Assert(lv10!.EnhancementSignature == "W6:10|C6:10|H6:10|K6:10", $"Unexpected enh signature: {lv10.EnhancementSignature}");
+
+    // Combat sums across c1 + c2 (notice c1 ignored p:99999)
+    Assert(mage.Combat.Crits == 1 && mage.Combat.Hits == 2 && mage.Combat.Misses == 1,
+        $"Unexpected Mage hits/crits/misses: {mage.Combat.Hits}/{mage.Combat.Crits}/{mage.Combat.Misses}");
+    Assert(mage.Combat.TotalDamageDealt == 600, $"Expected 600 total damage (320+180+100), got {mage.Combat.TotalDamageDealt}");
+    Assert(mage.Combat.HealEvents == 1 && mage.Combat.TotalHealingDone == 190, "Expected 1 heal for 190");
+    Assert(mage.Combat.AttacksTaken == 3 && mage.Combat.DodgesTaken == 2,
+        $"Expected 3 incoming attacks & 2 dodges, got {mage.Combat.AttacksTaken}/{mage.Combat.DodgesTaken}");
+
+    Assert(finalDb.Enhancements.TryGetValue(6, out var wizEnh) && wizEnh!.Name == "Wizard" && wizEnh.PureSetStatsByLevel.ContainsKey(10),
+        "Wizard enhancement profile not recorded");
+    Assert(finalDb.Shops.TryGetValue(141, out var enhShop) && enhShop!.Items[0].EnhancementPatternID == 6,
+        "Shop 141 EnhancementPatternID not captured");
+
+    var persistedJson = File.ReadAllText(primaryPath);
+    Assert(!persistedJson.Contains("4242") && !persistedJson.Contains("8888"), "Persisted JSON must not leak ephemeral entity IDs");
+
     Console.WriteLine("   OK: All Collector tests passed successfully!");
 }
 finally

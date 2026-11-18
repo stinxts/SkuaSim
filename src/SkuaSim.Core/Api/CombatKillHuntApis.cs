@@ -335,12 +335,21 @@ public sealed class SkillsApi : ApiBase
     public bool TimerRunning { get; private set; } = true;
     public SkillUseMode SkillUseMode { get; set; } = SkillUseMode.UseIfAvailable;
 
-    public bool CanUseSkill(int index) => World.Alive && index is >= 0 and <= 5;
+    public bool CanUseSkill(int index)
+    {
+        if (!World.Alive || index is < 0 or > 5)
+            return false;
+        var skills = World.Skills;
+        if (skills.Length > index)
+            return !skills[index].Locked && skills[index].IsOk;
+        return true;
+    }
 
     public bool UseSkill(int index)
     {
         if (!CanUseSkill(index))
             return false;
+        World.RecordManualSkillUse(index);
         if (World.Target is { Alive: true } target)
             World.Attack(target);
         return true;

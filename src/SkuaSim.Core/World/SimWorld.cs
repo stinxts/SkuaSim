@@ -5,6 +5,7 @@ using Skua.Core.Models.Monsters;
 using Skua.Core.Models.Players;
 using Skua.Core.Models.Quests;
 using Skua.Core.Models.Shops;
+using Skua.Core.Models.Skills;
 using SkuaSim.Collector.Models;
 using SkuaSim.Core.Data;
 using SkuaSim.Core.Runtime;
@@ -64,7 +65,7 @@ public sealed record WantedItem(ItemInfo Info, int Quantity);
 /// Data comes, in priority order, from the scenario, the collector database and QuestData.json; anything else is
 /// synthesized and recorded in the trace so the report shows which results depend on invented data.
 /// </summary>
-public sealed class SimWorld
+public sealed partial class SimWorld
 {
     public const int MaxLevel = 100;
     private const int CombatTickMs = 1000;
@@ -89,10 +90,12 @@ public sealed class SimWorld
         IsMember = p.IsMember;
         AccessLevel = p.AccessLevel;
         Guild = p.Guild;
-        MaxHealth = Math.Max(1, p.MaxHealth);
+        MaxHealth = Math.Max(1, p.MaxHealth ?? 370);
         Health = MaxHealth;
         ClassRank = p.ClassRank;
         LoggedIn = ctx.Scenario.Location.LoggedIn;
+        RecalculateStats();
+        Health = MaxHealth;
     }
 
     public object Sync { get; } = new();
@@ -211,6 +214,10 @@ public sealed class SimWorld
                 Trace.Synthesize("scenario:class", "No class in the scenario: a default 'Warrior' class was equipped.");
             }
 
+            RecalculateStats();
+            if (!s.Player.MaxHealth.HasValue)
+                Health = MaxHealth;
+
             foreach (var id in s.Quests.Completed)
             {
                 CompletedQuests.Add(id);
@@ -261,6 +268,12 @@ public sealed class SimWorld
         if (setup.Member.HasValue)
             info.Upgrade = setup.Member.Value;
         var item = NewInventoryItem(info, setup.Quantity);
+        if (setup.EnhancementPatternID.HasValue)
+            item.EnhancementPatternID = Math.Max(0, setup.EnhancementPatternID.Value);
+        if (setup.EnhancementLevel.HasValue)
+            item.EnhancementLevel = Math.Max(0, setup.EnhancementLevel.Value);
+        if (setup.ProcID.HasValue)
+            item.ProcID = Math.Max(0, setup.ProcID.Value);
         container.Add(item);
         if (setup.Equipped && container == Inventory)
             EquipInternal(item, log: false);
@@ -277,19 +290,23 @@ public sealed class SimWorld
         if (info != null)
         {
             if (!string.IsNullOrWhiteSpace(category))
-                return new ItemInfo { ID = info.ID, Name = info.Name, MaxStack = info.MaxStack, Temp = tempHint ?? info.Temp, Category = category, Coins = info.Coins, Upgrade = info.Upgrade, Source = info.Source };
+                return new ItemInfo { ID = info.ID, Name = info.Name, MaxStack = info.MaxStack, Temp = tempHint ?? info.Temp, Category = category, Coins = info.Coins, Upgrade = info.Upgrade, ItemGroup = string.IsNullOrWhiteSpace(info.ItemGroup) || info.ItemGroup == "None" ? InferDefaultItemGroup(category) : info.ItemGroup, Meta = info.Meta, EnhancementPatternID = info.EnhancementPatternID, ProcID = info.ProcID, Source = info.Source };
+            if (string.IsNullOrWhiteSpace(info.ItemGroup) || info.ItemGroup == "None")
+                info.ItemGroup = InferDefaultItemGroup(info.Category);
             return info;
         }
 
         var finalName = string.IsNullOrWhiteSpace(name) ? $"Item #{id}" : name.Trim();
         var finalId = id is > 0 ? id.Value : SynthesizedItemId(finalName);
+        var finalCat = category ?? "Item";
         var synthesized = new ItemInfo
         {
             ID = finalId,
             Name = finalName,
-            MaxStack = category is "Class" or "Armor" or "Helm" or "Cape" or "Pet" ? 1 : 1000,
+            MaxStack = finalCat is "Class" or "Armor" or "Helm" or "Cape" or "Pet" ? 1 : 1000,
             Temp = tempHint ?? false,
-            Category = category ?? "Item",
+            Category = finalCat,
+            ItemGroup = InferDefaultItemGroup(finalCat),
             Source = DataSource.Synthesized
         };
         Trace.Synthesize($"item:{finalName.ToLowerInvariant()}", $"Item '{finalName}' (ID {finalId}) is unknown to the collector and QuestData: metadata invented (temp={synthesized.Temp}, max stack={synthesized.MaxStack}).");
@@ -319,7 +336,11 @@ public sealed class SimWorld
         Temp = info.Temp,
         CharItemID = _nextCharItemId++,
         Description = "",
-        ItemGroup = "None",
+        ItemGroup = string.IsNullOrWhiteSpace(info.ItemGroup) || info.ItemGroup == "None" ? InferDefaultItemGroup(info.Category) : info.ItemGroup,
+        Meta = info.Meta ?? "",
+        EnhancementPatternID = info.EnhancementPatternID,
+        ProcID = info.ProcID,
+        EnhancementLevel = info.EnhancementPatternID > 0 ? Math.Clamp(Level, 1, 100) : 0,
         Level = 1
     };
 
@@ -547,6 +568,8 @@ public sealed class SimWorld
         foreach (var other in Inventory.Where(i => i.Equipped && i != item && EquipGroup(i.CategoryString) == group))
             other.Equipped = false;
         item.Equipped = true;
+        if (CombatProfile != null)
+            RecalculateStats();
         if (log)
             Trace.World($"Equipped {item.Name} ({item.CategoryString}).");
     }
@@ -923,6 +946,7 @@ public sealed class SimWorld
         {
             if (!Alive || !LoggedIn || monster == null || !monster.Alive || !Eq(monster.Cell, Cell))
                 return false;
+            ApplyNaturalOutOfCombatRegen();
             if (Target != monster)
                 Trace.Info($"Attacking {monster.Name} (MapID {monster.MapID}, HP {monster.HP}/{monster.MaxHP})");
             Target = monster;
@@ -970,10 +994,14 @@ public sealed class SimWorld
                 return false;
             }
 
-            var dps = Math.Max(1, _ctx.Scenario.Player.DamagePerSecond);
-            var damage = (int)(dps * (0.85 + _ctx.Rng.NextDouble() * 0.3));
+            var damage = RollCombatDamageTick(out var isCrit);
+            PlayerAttacks++;
+            if (isCrit)
+                PlayerCrits++;
+            TotalDamageDealt += damage;
             target.HP = Math.Max(0, target.HP - damage);
             InCombatUntilMs = Now + 2000;
+            ApplyCombatSustain(damage);
 
             MonsterRetaliates(target);
 
@@ -1015,12 +1043,12 @@ public sealed class SimWorld
 
         if (Now >= monster.NextAttackMs)
         {
-            var dealt = (int)(avgDamage * (0.8 + _ctx.Rng.NextDouble() * 0.4));
-            Health -= dealt;
+            ApplyMonsterRetaliationDamage(avgDamage);
             monster.NextAttackMs = Now + interval;
         }
 
-        Health = Math.Min(MaxHealth, Health + (int)(MaxHealth * _ctx.Scenario.Player.RegenPercentPerSecond / 100.0));
+        if (_ctx.Scenario.Player.RegenPercentPerSecond is > 0 and var regenPct)
+            Health = Math.Min(MaxHealth, Health + (int)(MaxHealth * regenPct / 100.0));
         if (Health <= 0)
             OnPlayerDeath(monster);
     }
@@ -1103,10 +1131,17 @@ public sealed class SimWorld
                 break;
             pool -= needed;
             Level++;
-            MaxHealth += 35;
-            if (Alive)
-                Health = MaxHealth;
-            Trace.World($"Level up! Reached Lv. {Level} (MaxHP {MaxHealth}).");
+            if (_ctx.Scenario.Player.MaxHealth.HasValue)
+            {
+                MaxHealth += 35;
+                if (Alive)
+                    Health = MaxHealth;
+            }
+            else
+            {
+                RecalculateStats(healToFullOnIncrease: true);
+            }
+            Trace.World($"Level up! Reached Lv. {Level} (MaxHP {MaxHealth}, DPS {(int)CombatProfile.EffectiveDps}).");
         }
 
         XP = Level >= MaxLevel ? 0 : (int)Math.Min(int.MaxValue, pool);
@@ -1573,6 +1608,9 @@ public sealed class SimWorld
                             TokenID = si.TokenID,
                             TokenQuantity = si.TokenQuantity,
                             TokenName = si.TokenName,
+                            EnhancementPatternID = si.EnhancementPatternID,
+                            ProcID = si.ProcID,
+                            Meta = si.Meta,
                             Requirements = si.Requirements.Select(r => (ItemBase)NewItemBase(_ctx.Catalog.FindItem(r.ItemID) ?? new ItemInfo { ID = r.ItemID, Name = r.ItemName, Temp = r.Temp }, r.Quantity)).ToList()
                         });
                     }
@@ -1801,6 +1839,23 @@ public sealed class SimWorld
                 Kills = Kills,
                 Deaths = Deaths,
                 DropsPicked = DropsPicked,
+                EffectiveDps = CombatProfile?.EffectiveDps ?? 0,
+                PlayerCrits = PlayerCrits,
+                PlayerDodges = PlayerDodges,
+                TotalDamageDealt = TotalDamageDealt,
+                TotalHealingDone = TotalHealingDone,
+                Strength = CombatProfile?.Stats.Strength ?? 0,
+                Intellect = CombatProfile?.Stats.Intellect ?? 0,
+                Endurance = CombatProfile?.Stats.Endurance ?? 0,
+                Dexterity = CombatProfile?.Stats.Dexterity ?? 0,
+                Wisdom = CombatProfile?.Stats.Wisdom ?? 0,
+                Luck = CombatProfile?.Stats.Luck ?? 0,
+                AttackPower = CombatProfile?.Stats.AttackPower ?? 0,
+                SpellPower = CombatProfile?.Stats.SpellPower ?? 0,
+                CritChance = CombatProfile?.Stats.CriticalChance ?? 0,
+                CritMultiplier = CombatProfile?.Stats.CriticalMultiplier ?? 1.5f,
+                Haste = CombatProfile?.Stats.Haste ?? 0,
+                EvasionChance = CombatProfile?.Stats.EvasionChance ?? 0,
                 MapCells = Map?.Cells.ToList() ?? new List<string>(),
                 Target = target != null ? ToMonsterSnapshot(target, isTarget: true) : null,
                 CellMonsters = Map?.Monsters.Where(m => Eq(m.Cell, Cell)).Select(m => ToMonsterSnapshot(m, ReferenceEquals(m, target))).ToList() ?? new List<MonsterSnapshot>(),
@@ -1853,6 +1908,23 @@ public sealed class WorldSnapshot
     public int Kills { get; init; }
     public int Deaths { get; init; }
     public int DropsPicked { get; init; }
+    public double EffectiveDps { get; init; }
+    public long PlayerCrits { get; init; }
+    public long PlayerDodges { get; init; }
+    public long TotalDamageDealt { get; init; }
+    public long TotalHealingDone { get; init; }
+    public int Strength { get; init; }
+    public int Intellect { get; init; }
+    public int Endurance { get; init; }
+    public int Dexterity { get; init; }
+    public int Wisdom { get; init; }
+    public int Luck { get; init; }
+    public int AttackPower { get; init; }
+    public int SpellPower { get; init; }
+    public double CritChance { get; init; }
+    public double CritMultiplier { get; init; } = 1.5;
+    public double Haste { get; init; }
+    public double EvasionChance { get; init; }
     public List<string> MapCells { get; init; } = new();
     public MonsterSnapshot? Target { get; init; }
     public List<MonsterSnapshot> CellMonsters { get; init; } = new();

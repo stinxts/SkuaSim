@@ -71,11 +71,12 @@ public sealed class PlayerSetup
     /// <summary>Name of the class to equip (added to the inventory if missing).</summary>
     public string? Class { get; set; }
     public int ClassRank { get; set; } = 10;
-    public int MaxHealth { get; set; } = 10_000;
-    /// <summary>Average damage the player deals per second while attacking.</summary>
-    public int DamagePerSecond { get; set; } = 4_000;
-    /// <summary>Percentage of max health regenerated per second (simulates healing skills/potions).</summary>
-    public double RegenPercentPerSecond { get; set; } = 4;
+    /// <summary>Optional fixed MaxHealth override. Null computes AQW health from Level, Class, END, and Enhancements.</summary>
+    public int? MaxHealth { get; set; }
+    /// <summary>Optional fixed DPS override. Null computes AQW DPS from Class, Primary/Secondary Stats, Crit, Haste, and Enhancements.</summary>
+    public int? DamagePerSecond { get; set; }
+    /// <summary>Optional fixed HP%/s regen override. Null uses class heal skills, weapon lifesteal, and out-of-combat regen.</summary>
+    public double? RegenPercentPerSecond { get; set; }
     public bool Invulnerable { get; set; }
     public int InventorySlots { get; set; } = 200;
     public int BankSlots { get; set; } = 600;
@@ -101,6 +102,9 @@ public sealed class ItemSetup
     public bool? Temp { get; set; }
     public bool? Coins { get; set; }
     public bool? Member { get; set; }
+    public int? EnhancementLevel { get; set; }
+    public int? EnhancementPatternID { get; set; }
+    public int? ProcID { get; set; }
 }
 
 public sealed class QuestSetup

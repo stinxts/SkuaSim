@@ -282,6 +282,16 @@ public sealed class SendApi : ApiBase
                     }
                 }
                 break;
+
+            case "enhanceItemShop":
+                if (parts.Length >= 7 &&
+                    int.TryParse(parts[4], out var targetItemId) &&
+                    int.TryParse(parts[5], out var enhShopItemId) &&
+                    int.TryParse(parts[6], out var enhShopId))
+                {
+                    World.EnhanceItem(targetItemId, enhShopItemId, enhShopId);
+                }
+                break;
         }
     }
 
@@ -461,6 +471,11 @@ public sealed class FlashApi : ApiBase
                 ["sName"] = it.Name,
                 ["sType"] = it.CategoryString ?? "Item",
                 ["iCost"] = it.Cost,
+                ["iLvl"] = it.Level,
+                ["EnhPatternID"] = it.EnhancementPatternID,
+                ["ProcID"] = it.ProcID,
+                ["sMeta"] = it.Meta ?? "",
+                ["sES"] = it.ItemGroup ?? "None",
                 ["bCoins"] = it.Coins ? 1 : 0,
                 ["bUpg"] = it.Upgrade ? 1 : 0,
                 ["iStk"] = Math.Max(1, it.MaxStack),
@@ -483,6 +498,12 @@ public sealed class FlashApi : ApiBase
                     ["CharItemID"] = it.CharItemID,
                     ["sName"] = it.Name,
                     ["sType"] = it.CategoryString ?? "Item",
+                    ["iLvl"] = it.Level,
+                    ["EnhLvl"] = it.EnhancementLevel,
+                    ["EnhPatternID"] = it.EnhancementPatternID,
+                    ["ProcID"] = it.ProcID,
+                    ["sES"] = it.ItemGroup ?? "None",
+                    ["sMeta"] = it.Meta ?? "",
                     ["iStk"] = Math.Max(1, it.MaxStack),
                     ["iQty"] = it.Quantity,
                     ["bCoins"] = it.Coins ? 1 : 0,

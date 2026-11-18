@@ -16,6 +16,10 @@ public sealed class ItemInfo
     public string Category { get; set; } = "Item";
     public bool Coins { get; set; }
     public bool Upgrade { get; set; }
+    public string ItemGroup { get; set; } = "None";
+    public string Meta { get; set; } = "";
+    public int EnhancementPatternID { get; set; }
+    public int ProcID { get; set; }
     public DataSource Source { get; set; }
 }
 
@@ -80,6 +84,9 @@ public sealed class GameDataCatalog
                 Category = string.IsNullOrWhiteSpace(item.Category) ? "Item" : item.Category,
                 Coins = item.Coins,
                 Upgrade = item.Upgrade,
+                ItemGroup = string.IsNullOrWhiteSpace(item.ItemGroup) ? "None" : item.ItemGroup,
+                Meta = item.Meta ?? "",
+                EnhancementPatternID = item.EnhancementPatternID,
                 Source = DataSource.Captured
             });
         }
@@ -107,6 +114,9 @@ public sealed class GameDataCatalog
                     Category = string.IsNullOrWhiteSpace(si.Category) ? "Item" : si.Category,
                     Coins = si.Coins,
                     Upgrade = si.Upgrade,
+                    Meta = si.Meta ?? "",
+                    EnhancementPatternID = si.EnhancementPatternID,
+                    ProcID = si.ProcID,
                     Source = DataSource.Captured
                 });
             }
@@ -187,4 +197,16 @@ public sealed class GameDataCatalog
 
     public int ItemCount => _itemsById.Count;
     public int QuestCount => Quests.Count;
+
+    public CapturedClassProfile? FindClassProfile(string? className) =>
+        !string.IsNullOrWhiteSpace(className) && Captured.Classes != null &&
+        Captured.Classes.TryGetValue(className.Trim(), out var cls)
+            ? cls
+            : null;
+
+    public CapturedEnhancementProfile? FindEnhancementProfile(int patternId) =>
+        patternId > 0 && Captured.Enhancements != null &&
+        Captured.Enhancements.TryGetValue(patternId, out var enh)
+            ? enh
+            : null;
 }

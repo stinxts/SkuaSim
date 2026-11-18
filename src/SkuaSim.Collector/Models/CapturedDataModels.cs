@@ -17,6 +17,8 @@ public sealed class GameDatabase
     public Dictionary<int, CapturedItem> Items { get; set; } = new();
     public Dictionary<int, CapturedShop> Shops { get; set; } = new();
     public Dictionary<int, CapturedQuest> Quests { get; set; } = new();
+    public Dictionary<string, CapturedClassProfile> Classes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<int, CapturedEnhancementProfile> Enhancements { get; set; } = new();
 
     public static string NormalizeMapName(string? mapName)
     {
@@ -211,6 +213,9 @@ public sealed class CapturedShopItem
     public int TokenID { get; set; }
     public double TokenQuantity { get; set; }
     public string TokenName { get; set; } = string.Empty;
+    public int EnhancementPatternID { get; set; }
+    public int ProcID { get; set; }
+    public string Meta { get; set; } = string.Empty;
     public List<CapturedItemRequirement> Requirements { get; set; } = new();
 }
 

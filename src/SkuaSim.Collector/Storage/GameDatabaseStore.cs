@@ -9,7 +9,7 @@ namespace SkuaSim.Collector.Storage;
 /// Thread-safe and multi-process-safe store that merges incremental deltas from
 /// multiple running Skua/VibeSkua clients into a single unified gamedata.json.
 /// </summary>
-public sealed class GameDatabaseStore
+public sealed partial class GameDatabaseStore
 {
     private const string MutexName = @"Global\SkuaSim_GameDatabase_Mutex_v1";
 
@@ -99,7 +99,9 @@ public sealed class GameDatabaseStore
                 TotalMonsterKills = db.Monsters.Values.Sum(m => m.KillCount),
                 ItemsCount = db.Items.Count,
                 ShopsCount = db.Shops.Count,
-                QuestsCount = db.Quests.Count
+                QuestsCount = db.Quests.Count,
+                ClassesCount = db.Classes.Count,
+                EnhancementsCount = db.Enhancements.Count
             }
         };
 
@@ -406,6 +408,9 @@ public sealed class GameDatabaseStore
             if (srcQuest.LastSeenUtc > dstQuest.LastSeenUtc)
                 dstQuest.LastSeenUtc = srcQuest.LastSeenUtc;
         }
+
+        // 6. Merge Classes & Enhancements
+        MergeClassesAndEnhancements(target, source);
     }
 
     private static GameDatabase LoadFromDiskInternal(string filePath)
@@ -419,7 +424,10 @@ public sealed class GameDatabaseStore
                 var json = File.ReadAllText(candidate, Encoding.UTF8);
                 var db = JsonConvert.DeserializeObject<GameDatabase>(json, JsonSettings);
                 if (db != null)
+                {
+                    NormalizeLoadedDatabase(db);
                     return db;
+                }
             }
             catch
             {

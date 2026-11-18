@@ -10,9 +10,6 @@
     "isMember": false,
     "class": "Mage",
     "classRank": 1,
-    "maxHealth": 350,
-    "damagePerSecond": 120,
-    "regenPercentPerSecond": 5,
     "inventorySlots": 40,
     "bankSlots": 30
   },
@@ -27,7 +24,9 @@
       "name": "Default Staff",
       "category": "Staff",
       "quantity": 1,
-      "equipped": true
+      "equipped": true,
+      "enhancementLevel": 0,
+      "enhancementPatternID": 0
     }
   ],
   "quests": {
