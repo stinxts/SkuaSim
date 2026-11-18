@@ -1,0 +1,51 @@
+{
+  "name": "FarmerJoe Starter (Level 1 Mage, Fresh Account)",
+  "description": "Simulates a brand-new level 1 non-member account starting 0FarmerJoeDoAll.cs from scratch with Rank 1 Mage, Default Staff, zero quest progress, and zero gold.",
+  "seed": 42,
+  "player": {
+    "username": "StarterMage",
+    "level": 1,
+    "gold": 0,
+    "coins": 0,
+    "isMember": false,
+    "class": "Mage",
+    "classRank": 1,
+    "maxHealth": 350,
+    "damagePerSecond": 120,
+    "regenPercentPerSecond": 5,
+    "inventorySlots": 40,
+    "bankSlots": 30
+  },
+  "location": {
+    "map": "battleon",
+    "cell": "Enter",
+    "pad": "Spawn",
+    "loggedIn": true
+  },
+  "inventory": [
+    {
+      "name": "Default Staff",
+      "category": "Staff",
+      "quantity": 1,
+      "equipped": true
+    }
+  ],
+  "quests": {
+    "completed": [],
+    "active": [],
+    "dailiesCompleted": [],
+    "slotProgress": {}
+  },
+  "options": {
+    "OutFit": false,
+    "EquipOutfit": false,
+    "SellStarterClasses": false,
+    "GetBoosts": false,
+    "PetChoice": "None"
+  },
+  "limits": {
+    "maxVirtualMinutes": 120,
+    "maxRealSeconds": 120,
+    "stallRealSeconds": 20
+  }
+}
