@@ -100,10 +100,9 @@ public sealed class SimulationRunner
                 var name = opt.Name ?? "";
                 if (string.IsNullOrWhiteSpace(name))
                     continue;
-                var category = !string.IsNullOrWhiteSpace(opt.Category) &&
-                               (isPrimary || !string.Equals(opt.Category, "Options", StringComparison.OrdinalIgnoreCase))
+                var category = !string.IsNullOrWhiteSpace(opt.Category)
                     ? opt.Category
-                    : (isPrimary ? "Options" : memberName);
+                    : (isPrimary ? "Default" : memberName);
                 if (!seen.Add($"{category}|{name}"))
                     continue;
 
