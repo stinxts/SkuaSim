@@ -1,13 +1,13 @@
 {
-  "name": "Low-Level Player (Level 50)",
-  "description": "Simulates a Level 50 member player starting a leveling farm from battleon.",
+  "name": "Low-Level Player (Level 10)",
+  "description": "Simulates a Level 10 non-member starting a leveling farm from battleon.",
   "seed": 42,
   "player": {
     "username": "NewHero",
-    "level": 50,
+    "level": 10,
     "gold": 5000,
-    "isMember": true,
-    "class": "Legion Revenant",
+    "isMember": false,
+    "class": "Warrior",
     "damagePerSecond": 900
   },
   "location": {

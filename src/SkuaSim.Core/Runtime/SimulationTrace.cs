@@ -11,6 +11,8 @@ public sealed record TraceEntry(
     [property: JsonPropertyName("thread")] string Thread,
     [property: JsonPropertyName("text")] string Text);
 
+public sealed record IndexedTraceEntry(long Seq, TraceEntry Entry);
+
 public sealed class SynthesizedDataRecord
 {
     public required string Key { get; init; }
@@ -22,21 +24,25 @@ public sealed class SynthesizedDataRecord
 /// <summary>
 /// Records everything that happens during a run: API calls, script logs, world events, warnings,
 /// synthesized (invented) data and API members the simulator does not implement yet.
-/// The full timeline streams to trace.jsonl; summaries are kept in memory for the report.
+/// The full timeline streams to trace.jsonl; summaries and bounded live rings are kept in memory for reports and UIs.
 /// </summary>
 public sealed class SimulationTrace : IDisposable
 {
     private const int RecentCapacity = 400;
+    private const int LiveHistoryCapacity = 8_192;
     private const int ScriptLogCapacity = 50_000;
 
     private readonly object _gate = new();
-    private readonly StreamWriter? _writer;
+    private StreamWriter? _writer;
     private readonly Queue<TraceEntry> _recent = new();
+    private readonly Queue<IndexedTraceEntry> _liveHistory = new();
     private readonly Func<long> _clock;
     private readonly Func<long, string> _format;
     private readonly long _maxEntries;
     private long _entries;
+    private long _nextSeq;
     private bool _truncationNoted;
+    private volatile string? _lastApiCall;
 
     public SimulationTrace(string? jsonlPath, Func<long> clock, Func<long, string> format, long maxEntries = 500_000)
     {
@@ -59,6 +65,9 @@ public sealed class SimulationTrace : IDisposable
     public ConcurrentDictionary<string, long> CallCounts { get; } = new(StringComparer.Ordinal);
     public long TotalApiCalls;
     public long TotalEntries => Interlocked.Read(ref _entries);
+    public string? LastApiCall => _lastApiCall;
+    public int ScriptLogCount { get { lock (_gate) return ScriptLog.Count; } }
+    public int WarningCount { get { lock (_gate) return Warnings.Count; } }
 
     public IReadOnlyList<TraceEntry> RecentTimeline
     {
@@ -126,8 +135,86 @@ public sealed class SimulationTrace : IDisposable
 
     public long CountCall(string member)
     {
+        _lastApiCall = member;
         Interlocked.Increment(ref TotalApiCalls);
         return CallCounts.AddOrUpdate(member, 1, (_, c) => c + 1);
+    }
+
+    public IReadOnlyList<TraceEntry> ReadScriptLogsSince(int startIndex, out int nextIndex, int maxCount = 500) =>
+        ReadListSince(ScriptLog, startIndex, out nextIndex, maxCount);
+
+    public IReadOnlyList<TraceEntry> ReadWarningsSince(int startIndex, out int nextIndex, int maxCount = 500) =>
+        ReadListSince(Warnings, startIndex, out nextIndex, maxCount);
+
+    public IReadOnlyList<IndexedTraceEntry> ReadTimelineSince(long afterSeq, out long latestSeq, out bool droppedEntries, int maxCount = 1000)
+    {
+        var limit = Math.Max(1, maxCount);
+        lock (_gate)
+        {
+            if (_liveHistory.Count == 0)
+            {
+                latestSeq = _nextSeq;
+                droppedEntries = false;
+                return Array.Empty<IndexedTraceEntry>();
+            }
+
+            var firstSeq = _liveHistory.Peek().Seq;
+            droppedEntries = afterSeq > 0 && afterSeq + 1 < firstSeq;
+
+            var batch = new List<IndexedTraceEntry>(Math.Min(limit, _liveHistory.Count));
+            var lastReturned = afterSeq;
+            foreach (var item in _liveHistory)
+            {
+                if (item.Seq <= afterSeq)
+                    continue;
+                batch.Add(item);
+                lastReturned = item.Seq;
+                if (batch.Count >= limit)
+                    break;
+            }
+
+            latestSeq = batch.Count > 0 ? lastReturned : Math.Max(afterSeq, _nextSeq);
+            return batch;
+        }
+    }
+
+    public IReadOnlyList<SynthesizedDataRecord> GetSynthesizedSnapshot()
+    {
+        lock (_gate)
+        {
+            return Synthesized.Values
+                .Select(s => new SynthesizedDataRecord
+                {
+                    Key = s.Key,
+                    Description = s.Description,
+                    Count = s.Count,
+                    FirstVirtualMs = s.FirstVirtualMs
+                })
+                .OrderBy(s => s.FirstVirtualMs)
+                .ToList();
+        }
+    }
+
+    public IReadOnlyDictionary<string, long> GetUnimplementedSnapshot() =>
+        Unimplemented.ToDictionary(k => k.Key, k => k.Value);
+
+    private IReadOnlyList<TraceEntry> ReadListSince(List<TraceEntry> source, int startIndex, out int nextIndex, int maxCount)
+    {
+        var start = Math.Max(0, startIndex);
+        var limit = Math.Max(1, maxCount);
+        lock (_gate)
+        {
+            if (start >= source.Count)
+            {
+                nextIndex = source.Count;
+                return Array.Empty<TraceEntry>();
+            }
+
+            var take = Math.Min(limit, source.Count - start);
+            var slice = source.GetRange(start, take);
+            nextIndex = start + take;
+            return slice;
+        }
     }
 
     private TraceEntry Write(string kind, string text)
@@ -140,6 +227,10 @@ public sealed class SimulationTrace : IDisposable
             _recent.Enqueue(entry);
             while (_recent.Count > RecentCapacity)
                 _recent.Dequeue();
+
+            _liveHistory.Enqueue(new IndexedTraceEntry(++_nextSeq, entry));
+            while (_liveHistory.Count > LiveHistoryCapacity)
+                _liveHistory.Dequeue();
 
             _entries++;
             if (_writer != null)
@@ -170,6 +261,7 @@ public sealed class SimulationTrace : IDisposable
         {
             _writer?.Flush();
             _writer?.Dispose();
+            _writer = null;
         }
     }
 }

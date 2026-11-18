@@ -61,6 +61,7 @@ public sealed class SimContext
         StopReason = reason;
         StopRequested = true;
         Trace.Info("Stop requested: " + reason);
+        Clock.NotifyStopRequested();
     }
 
     /// <summary>

@@ -1702,45 +1702,125 @@ public sealed class SimWorld
     {
         lock (Sync)
         {
+            var questIds = ActiveQuests
+                .Union(CompletedQuests)
+                .Union(DailiesCompleted)
+                .Union(RegisteredQuests.Keys)
+                .Union(QuestTurnIns.Keys)
+                .OrderBy(id => id)
+                .ToList();
+
+            var questDetails = new List<QuestStatusSnapshot>(questIds.Count);
+            foreach (var qid in questIds)
+            {
+                var quest = LoadedQuests.GetValueOrDefault(qid);
+                var data = quest == null ? _ctx.Catalog.FindQuest(qid) : null;
+                var name = quest?.Name ?? data?.Name ?? $"Quest #{qid}";
+                var active = ActiveQuests.Contains(qid);
+                var canComplete = active && quest != null &&
+                                  quest.Requirements.All(r => Quantity(r.Temp ? TempInventory : Inventory, r.Name, r.ID) >= Math.Max(1, r.Quantity));
+                questDetails.Add(new QuestStatusSnapshot(
+                    qid,
+                    name,
+                    active,
+                    CompletedQuests.Contains(qid),
+                    DailiesCompleted.Contains(qid),
+                    canComplete,
+                    QuestTurnIns.GetValueOrDefault(qid)));
+            }
+
+            var currentClass = Inventory.FirstOrDefault(i => i.Equipped && i.CategoryString == "Class")?.Name;
+            var target = Target;
+
             return new WorldSnapshot
             {
+                Username = Username,
                 Map = MapName,
                 Room = RoomNumber,
                 Cell = Cell,
                 Pad = Pad,
+                MapLoaded = MapLoaded,
+                MapSource = Map == null ? "" : DescribeMapSource(Map),
                 Level = Level,
                 Gold = Gold,
                 Coins = Coins,
                 Health = Health,
+                MaxHealth = MaxHealth,
+                Mana = 100,
+                MaxMana = 100,
                 Alive = Alive,
+                InCombat = InCombat,
                 LoggedIn = LoggedIn,
+                EquippedClass = currentClass,
+                ClassRank = ClassRank,
+                Kills = Kills,
+                Deaths = Deaths,
+                DropsPicked = DropsPicked,
+                MapCells = Map?.Cells.ToList() ?? new List<string>(),
+                Target = target != null ? ToMonsterSnapshot(target, isTarget: true) : null,
+                CellMonsters = Map?.Monsters.Where(m => Eq(m.Cell, Cell)).Select(m => ToMonsterSnapshot(m, ReferenceEquals(m, target))).ToList() ?? new List<MonsterSnapshot>(),
+                MapMonsters = Map?.Monsters.Select(m => ToMonsterSnapshot(m, ReferenceEquals(m, target))).ToList() ?? new List<MonsterSnapshot>(),
+                PendingDrops = DropStack.Select(d => new ItemCount(d.ID, d.Name, d.Quantity, false)).ToList(),
                 Inventory = Inventory.Select(i => new ItemCount(i.ID, i.Name, i.Quantity, i.Equipped)).ToList(),
                 Bank = Bank.Select(i => new ItemCount(i.ID, i.Name, i.Quantity, false)).ToList(),
                 TempInventory = TempInventory.Select(i => new ItemCount(i.ID, i.Name, i.Quantity, false)).ToList(),
+                House = House.Select(i => new ItemCount(i.ID, i.Name, i.Quantity, i.Equipped)).ToList(),
+                Factions = Factions.Select(f => new FactionSnapshot(f.ID, f.Name, f.Rank, f.Rep, f.RequiredRep, f.TotalRep)).ToList(),
                 ActiveQuests = ActiveQuests.OrderBy(i => i).ToList(),
-                CompletedQuests = CompletedQuests.OrderBy(i => i).ToList()
+                CompletedQuests = CompletedQuests.OrderBy(i => i).ToList(),
+                DailiesCompleted = DailiesCompleted.OrderBy(i => i).ToList(),
+                QuestDetails = questDetails,
+                MapsVisited = MapsVisited.OrderBy(m => m, StringComparer.OrdinalIgnoreCase).ToList()
             };
         }
     }
+
+    private static MonsterSnapshot ToMonsterSnapshot(SimMonster m, bool isTarget) =>
+        new(m.MapID, m.MonID, m.Name, m.Cell, m.HP, m.MaxHP, m.Level, m.Alive, isTarget, m.Synthesized);
 }
 
 public sealed record ItemCount(int Id, string Name, int Quantity, bool Equipped);
+public sealed record MonsterSnapshot(int MapId, int MonId, string Name, string Cell, int Hp, int MaxHp, int Level, bool Alive, bool IsTarget, bool Synthesized);
+public sealed record FactionSnapshot(int Id, string Name, int Rank, int Rep, int RequiredRep, int TotalRep);
+public sealed record QuestStatusSnapshot(int Id, string Name, bool Active, bool Completed, bool DailyCompleted, bool CanComplete, int TurnIns);
 
 public sealed class WorldSnapshot
 {
+    public string Username { get; init; } = "";
     public string Map { get; init; } = "";
     public int Room { get; init; }
     public string Cell { get; init; } = "";
     public string Pad { get; init; } = "";
+    public bool MapLoaded { get; init; }
+    public string MapSource { get; init; } = "";
     public int Level { get; init; }
     public long Gold { get; init; }
     public int Coins { get; init; }
     public int Health { get; init; }
+    public int MaxHealth { get; init; }
+    public int Mana { get; init; } = 100;
+    public int MaxMana { get; init; } = 100;
     public bool Alive { get; init; }
+    public bool InCombat { get; init; }
     public bool LoggedIn { get; init; }
+    public string? EquippedClass { get; init; }
+    public int ClassRank { get; init; }
+    public int Kills { get; init; }
+    public int Deaths { get; init; }
+    public int DropsPicked { get; init; }
+    public List<string> MapCells { get; init; } = new();
+    public MonsterSnapshot? Target { get; init; }
+    public List<MonsterSnapshot> CellMonsters { get; init; } = new();
+    public List<MonsterSnapshot> MapMonsters { get; init; } = new();
+    public List<ItemCount> PendingDrops { get; init; } = new();
     public List<ItemCount> Inventory { get; init; } = new();
     public List<ItemCount> Bank { get; init; } = new();
     public List<ItemCount> TempInventory { get; init; } = new();
+    public List<ItemCount> House { get; init; } = new();
+    public List<FactionSnapshot> Factions { get; init; } = new();
     public List<int> ActiveQuests { get; init; } = new();
     public List<int> CompletedQuests { get; init; } = new();
+    public List<int> DailiesCompleted { get; init; } = new();
+    public List<QuestStatusSnapshot> QuestDetails { get; init; } = new();
+    public List<string> MapsVisited { get; init; } = new();
 }

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.Loader;
@@ -29,6 +30,7 @@ public sealed class SimulationRunOptions
 public sealed class SimulationRunner
 {
     private readonly SkuaInstallation _installation;
+    private readonly ConcurrentDictionary<string, ScriptCompiler> _compilers = new(StringComparer.OrdinalIgnoreCase);
 
     public SimulationRunner(SkuaInstallation installation)
     {
@@ -36,20 +38,126 @@ public sealed class SimulationRunner
         SkuaAssemblyResolver.Register(installation.ProbeDirectories);
     }
 
+    public SkuaInstallation Installation => _installation;
+
+    public ScriptCompileResult Compile(string scriptPath, IReadOnlyList<string>? includeRoots = null) =>
+        GetCompiler(useVirtualTime: true, includeRoots).Compile(Path.GetFullPath(scriptPath));
+
+    public ScriptInspectionResult InspectScript(string scriptPath, IReadOnlyList<string>? includeRoots = null)
+    {
+        var scriptFullPath = Path.GetFullPath(scriptPath);
+        var compileResult = Compile(scriptFullPath, includeRoots);
+        if (!compileResult.Success || compileResult.Main == null)
+        {
+            return new ScriptInspectionResult
+            {
+                ScriptPath = scriptFullPath,
+                CompileResult = compileResult,
+                ErrorMessage = "Compilation failed."
+            };
+        }
+
+        var loadContext = new SimScriptLoadContext();
+        var instProp = typeof(IScriptInterface).GetProperty(nameof(IScriptInterface.Instance), BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+        var setDummyBot = false;
+
+        try
+        {
+            var mainAssembly = LoadUnitsIntoContext(compileResult.Units, compileResult.Main, loadContext);
+            var mainInfo = FindScriptMain(mainAssembly);
+            if (mainInfo == null)
+            {
+                return new ScriptInspectionResult
+                {
+                    ScriptPath = scriptFullPath,
+                    CompileResult = compileResult,
+                    ErrorMessage = "No class with a ScriptMain(IScriptInterface) method was found in the compiled script."
+                };
+            }
+
+            if (instProp != null && instProp.GetValue(null) == null)
+            {
+                var dummyClock = new SimClock(new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc));
+                using var dummyTrace = new SimulationTrace(null, () => dummyClock.NowMs, ms => dummyClock.Format(ms));
+                var dummyCtx = new SimContext(new Scenario(), GameDataCatalog.Load(null, null), dummyClock, dummyTrace, 0, _installation.Flavor)
+                {
+                    LoadedScriptPath = scriptFullPath
+                };
+                instProp.SetValue(null, BuildBotProxy(dummyCtx));
+                setDummyBot = true;
+            }
+
+            var (scriptType, _) = mainInfo.Value;
+            var instance = Activator.CreateInstance(scriptType)
+                           ?? throw new InvalidOperationException($"Failed to instantiate script class {scriptType.FullName}.");
+
+            var storage = ExtractOptionsStorage(scriptType, instance);
+            var descriptors = new List<ScriptOptionDescriptor>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (memberName, isPrimary, opt) in DiscoverScriptOptions(scriptType, instance))
+            {
+                var name = opt.Name ?? "";
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+                var category = !string.IsNullOrWhiteSpace(opt.Category) &&
+                               (isPrimary || !string.Equals(opt.Category, "Options", StringComparison.OrdinalIgnoreCase))
+                    ? opt.Category
+                    : (isPrimary ? "Options" : memberName);
+                if (!seen.Add($"{category}|{name}"))
+                    continue;
+
+                descriptors.Add(CreateOptionDescriptor(category, opt));
+            }
+
+            return new ScriptInspectionResult
+            {
+                ScriptPath = scriptFullPath,
+                CompileResult = compileResult,
+                ScriptClass = scriptType.FullName ?? scriptType.Name,
+                OptionsStorage = storage,
+                Options = descriptors
+            };
+        }
+        catch (Exception ex)
+        {
+            return new ScriptInspectionResult
+            {
+                ScriptPath = scriptFullPath,
+                CompileResult = compileResult,
+                ErrorMessage = $"{ex.GetType().Name}: {ex.Message}"
+            };
+        }
+        finally
+        {
+            if (setDummyBot)
+                instProp?.SetValue(null, null);
+            try { loadContext.Unload(); } catch { }
+        }
+    }
+
     public SimulationReport Run(SimulationRunOptions options)
     {
-        var realSw = Stopwatch.StartNew();
+        using var session = Start(options);
+        return session.Completion.GetAwaiter().GetResult();
+    }
+
+    public SimulationSession Start(SimulationRunOptions options, SimulationSessionOptions? sessionOptions = null)
+    {
         var scriptFullPath = Path.GetFullPath(options.ScriptPath);
+        var seed = options.SeedOverride ?? options.Scenario.Seed ?? 42;
+        return new SimulationSession(
+            scriptFullPath,
+            options.Scenario.Name,
+            seed,
+            sessionOptions ?? new SimulationSessionOptions(),
+            session => ExecuteSession(options, scriptFullPath, seed, session));
+    }
+
+    private SimulationReport ExecuteSession(SimulationRunOptions options, string scriptFullPath, int seed, SimulationSession session)
+    {
         var scenario = options.Scenario;
-        var seed = options.SeedOverride ?? scenario.Seed ?? 42;
-
-        var compiler = new ScriptCompiler(_installation, new CompilerSettings
-        {
-            UseVirtualTime = true,
-            IncludeRoots = options.IncludeRoots
-        });
-
-        var compileResult = compiler.Compile(scriptFullPath);
+        var compileResult = Compile(scriptFullPath, options.IncludeRoots);
         if (!compileResult.Success || compileResult.Main == null)
         {
             return new SimulationReport
@@ -60,21 +168,29 @@ public sealed class SimulationRunner
                 Outcome = SimulationOutcome.CompileError,
                 StopReason = "compilation failed",
                 CompileDuration = compileResult.Elapsed,
-                RealDuration = realSw.Elapsed,
+                RealDuration = session.CurrentActiveRealDuration(null),
                 CompileErrors = compileResult.Errors
+            };
+        }
+
+        if (session.StopRequested)
+        {
+            return new SimulationReport
+            {
+                ScriptPath = scriptFullPath,
+                ScenarioName = scenario.Name,
+                Seed = seed,
+                Outcome = SimulationOutcome.LimitReached,
+                StopReason = session.RequestedStopReason ?? "stopped by user before execution",
+                CompileDuration = compileResult.Elapsed,
+                RealDuration = session.CurrentActiveRealDuration(null)
             };
         }
 
         // Load compiled assemblies into an isolated per-run AssemblyLoadContext so static singletons
         // (such as CoreBots.Instance) start completely fresh on every simulation run.
         var loadContext = new SimScriptLoadContext();
-        Assembly? mainAssembly = null;
-        foreach (var unit in compileResult.Units)
-        {
-            var asm = loadContext.LoadUnit(unit.Image, unit.Pdb);
-            if (unit == compileResult.Main)
-                mainAssembly = asm;
-        }
+        var mainAssembly = LoadUnitsIntoContext(compileResult.Units, compileResult.Main, loadContext);
 
         var gameDataPath = options.GameDataPath ?? FindDefaultGameDataPath();
         var questDataPath = options.QuestDataPath ?? _installation.QuestDataFile;
@@ -117,13 +233,16 @@ public sealed class SimulationRunner
 
         var bot = BuildBotProxy(ctx);
         ctx.Bot = bot;
-        typeof(IScriptInterface).GetProperty(nameof(IScriptInterface.Instance), BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)?.SetValue(null, bot);
+        var instProp = typeof(IScriptInterface).GetProperty(nameof(IScriptInterface.Instance), BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+        instProp?.SetValue(null, bot);
 
         ctx.World.InitializeFromScenario();
         var initialSnapshot = ctx.World.Snapshot();
 
         // Find and instantiate the script class containing ScriptMain(IScriptInterface).
-        var (scriptInstance, scriptMainMethod) = CreateScriptInstance(mainAssembly!, ctx);
+        var (scriptInstance, scriptMainMethod) = CreateScriptInstance(mainAssembly, ctx);
+
+        session.AttachRuntime(ctx, clock, trace);
 
         var outcome = SimulationOutcome.Completed;
         string? exceptionText = null;
@@ -137,7 +256,9 @@ public sealed class SimulationRunner
             SkuaSim.Runtime.SimHooks.Source = clock;
             try
             {
-                scriptMainMethod.Invoke(scriptInstance, new object?[] { bot });
+                clock.WaitIfPaused();
+                if (!session.StopRequested)
+                    scriptMainMethod.Invoke(scriptInstance, new object?[] { bot });
             }
             catch (TargetInvocationException tie) when (tie.InnerException != null)
             {
@@ -164,7 +285,17 @@ public sealed class SimulationRunner
 
         while (!scriptDone.Wait(50))
         {
-            if (realSw.ElapsedMilliseconds >= maxRealMs)
+            if (session.StopRequested)
+            {
+                ctx.RequestStop(session.RequestedStopReason ?? "stopped by user");
+                break;
+            }
+
+            if (clock.IsPaused)
+                continue;
+
+            var activeRealMs = Math.Max(0, session.TotalRealElapsedMs - clock.TotalPausedMs);
+            if (activeRealMs >= maxRealMs)
             {
                 ctx.RequestStop($"real-time limit reached ({scenario.Limits.MaxRealSeconds:F1}s)");
                 break;
@@ -190,6 +321,8 @@ public sealed class SimulationRunner
         finally
         {
             SkuaSim.Runtime.SimHooks.Source = null;
+            if (instProp != null && ReferenceEquals(instProp.GetValue(null), bot))
+                instProp.SetValue(null, null);
             try { loadContext.Unload(); } catch { }
         }
 
@@ -223,7 +356,7 @@ public sealed class SimulationRunner
             StopReason = ctx.StopReason,
             ExceptionText = exceptionText,
             CompileDuration = compileResult.Elapsed,
-            RealDuration = realSw.Elapsed,
+            RealDuration = session.CurrentActiveRealDuration(clock),
             VirtualDuration = TimeSpan.FromMilliseconds(clock.NowMs),
             TotalApiCalls = trace.TotalApiCalls,
             Kills = ctx.World.Kills,
@@ -246,6 +379,33 @@ public sealed class SimulationRunner
             RecentTimeline = trace.RecentTimeline.ToList(),
             TraceFilePath = options.TraceOutputPath
         };
+    }
+
+    private ScriptCompiler GetCompiler(bool useVirtualTime, IReadOnlyList<string>? includeRoots)
+    {
+        var roots = (includeRoots ?? Array.Empty<string>())
+            .Where(r => !string.IsNullOrWhiteSpace(r))
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var key = $"{useVirtualTime}|{string.Join(";", roots)}";
+        return _compilers.GetOrAdd(key, _ => new ScriptCompiler(_installation, new CompilerSettings
+        {
+            UseVirtualTime = useVirtualTime,
+            IncludeRoots = roots
+        }));
+    }
+
+    private static Assembly LoadUnitsIntoContext(IReadOnlyList<CompiledUnit> units, CompiledUnit mainUnit, SimScriptLoadContext loadContext)
+    {
+        Assembly? mainAssembly = null;
+        foreach (var unit in units)
+        {
+            var asm = loadContext.LoadUnit(unit.Image, unit.Pdb);
+            if (unit == mainUnit)
+                mainAssembly = asm;
+        }
+        return mainAssembly ?? throw new InvalidOperationException("Failed to load main compiled script assembly.");
     }
 
     private static IScriptInterface BuildBotProxy(SimContext ctx)
@@ -291,7 +451,7 @@ public sealed class SimulationRunner
         return hub.Create<IScriptInterface>(botHandler, "Bot");
     }
 
-    private static (object Instance, MethodInfo Method) CreateScriptInstance(Assembly assembly, SimContext ctx)
+    private static (Type Type, MethodInfo Method)? FindScriptMain(Assembly assembly)
     {
         const BindingFlags Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
 
@@ -301,35 +461,137 @@ public sealed class SimulationRunner
                 continue;
             var method = type.GetMethods(Flags)
                 .FirstOrDefault(m => m.Name == "ScriptMain" && m.GetParameters().Length == 1);
-            if (method == null)
-                continue;
-
-            var instance = Activator.CreateInstance(type)
-                           ?? throw new InvalidOperationException($"Failed to instantiate script class {type.FullName}.");
-
-            PopulateScriptConfig(type, instance, ctx);
-            return (instance, method);
+            if (method != null)
+                return (type, method);
         }
 
-        throw new InvalidOperationException("No class with a ScriptMain(IScriptInterface) method was found in the compiled script.");
+        return null;
+    }
+
+    private static (object Instance, MethodInfo Method) CreateScriptInstance(Assembly assembly, SimContext ctx)
+    {
+        var found = FindScriptMain(assembly)
+                    ?? throw new InvalidOperationException("No class with a ScriptMain(IScriptInterface) method was found in the compiled script.");
+
+        var (type, method) = found;
+        var instance = Activator.CreateInstance(type)
+                       ?? throw new InvalidOperationException($"Failed to instantiate script class {type.FullName}.");
+
+        PopulateScriptConfig(type, instance, ctx);
+        return (instance, method);
     }
 
     private static void PopulateScriptConfig(Type scriptType, object scriptInstance, SimContext ctx)
     {
-        const BindingFlags Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
         var configState = ProxyHub.GetState(ctx.Bot is IScriptInterface b ? b.Config : null);
         if (configState?.Handler is not ConfigApi config)
             return;
 
-        // Discover Options list on the script class or any included fields (like Core.Options).
-        var optionsField = scriptType.GetField("Options", Flags);
-        var optionsProp = scriptType.GetProperty("Options", Flags);
-        var rawOptions = optionsField?.GetValue(scriptInstance) ?? optionsProp?.GetValue(scriptInstance);
-        if (rawOptions is IEnumerable<IOption> opts)
+        foreach (var (memberName, isPrimary, opt) in DiscoverScriptOptions(scriptType, scriptInstance))
         {
-            config.Options.AddRange(opts);
-            config.SetDefaults();
+            if (isPrimary)
+            {
+                if (!config.Options.Contains(opt))
+                    config.Options.Add(opt);
+            }
+            else
+            {
+                if (!config.MultipleOptions.TryGetValue(memberName, out var list))
+                    config.MultipleOptions[memberName] = list = new List<IOption>();
+                if (!list.Contains(opt))
+                    list.Add(opt);
+            }
+
+            if (!config.OptionValues.ContainsKey(opt))
+                config.OptionValues[opt] = opt.DefaultValue?.ToString() ?? "";
         }
+    }
+
+    private static string? ExtractOptionsStorage(Type scriptType, object scriptInstance)
+    {
+        const BindingFlags Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
+        var field = scriptType.GetField("OptionsStorage", Flags);
+        if (field?.FieldType == typeof(string))
+            return field.GetValue(field.IsStatic ? null : scriptInstance) as string;
+
+        var prop = scriptType.GetProperty("OptionsStorage", Flags);
+        if (prop?.PropertyType == typeof(string) && prop.GetIndexParameters().Length == 0 && prop.GetMethod is { } getter)
+            return prop.GetValue(getter.IsStatic ? null : scriptInstance) as string;
+
+        return null;
+    }
+
+    private static IEnumerable<(string MemberName, bool IsPrimary, IOption Option)> DiscoverScriptOptions(Type scriptType, object scriptInstance)
+    {
+        const BindingFlags Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
+        var members = new List<(string Name, bool IsPrimary, IEnumerable<IOption> List)>();
+
+        void TryCollectMember(string name, Func<object?> getter)
+        {
+            try
+            {
+                if (getter() is IEnumerable<IOption> opts)
+                    members.Add((name, string.Equals(name, "Options", StringComparison.OrdinalIgnoreCase), opts));
+            }
+            catch { }
+        }
+
+        foreach (var field in scriptType.GetFields(Flags))
+        {
+            if (field.Name.Contains('<') || !typeof(IEnumerable<IOption>).IsAssignableFrom(field.FieldType))
+                continue;
+            TryCollectMember(field.Name, () => field.GetValue(field.IsStatic ? null : scriptInstance));
+        }
+
+        foreach (var prop in scriptType.GetProperties(Flags))
+        {
+            if (prop.GetIndexParameters().Length > 0 || !prop.CanRead || !typeof(IEnumerable<IOption>).IsAssignableFrom(prop.PropertyType))
+                continue;
+            if (prop.GetMethod is not { } getter)
+                continue;
+            TryCollectMember(prop.Name, () => prop.GetValue(getter.IsStatic ? null : scriptInstance));
+        }
+
+        foreach (var group in members.OrderByDescending(m => m.IsPrimary).ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var opt in group.List)
+            {
+                if (opt != null)
+                    yield return (group.Name, group.IsPrimary, opt);
+            }
+        }
+    }
+
+    private static ScriptOptionDescriptor CreateOptionDescriptor(string category, IOption opt)
+    {
+        var type = opt.Type;
+        var isEnum = type?.IsEnum == true || opt.DefaultValue is Enum;
+        var allowed = type?.IsEnum == true ? (IReadOnlyList<string>)Enum.GetNames(type) : Array.Empty<string>();
+        var valueType = isEnum
+            ? "Enum"
+            : type?.FullName ?? opt.DefaultValue?.GetType().FullName ?? "System.String";
+
+        return new ScriptOptionDescriptor(
+            category,
+            opt.Name ?? "",
+            string.IsNullOrWhiteSpace(opt.DisplayName) ? opt.Name ?? "" : opt.DisplayName,
+            opt.Description ?? "",
+            valueType,
+            ToSafeScalarDefault(opt.DefaultValue, type),
+            allowed);
+    }
+
+    private static object? ToSafeScalarDefault(object? value, Type? declaredType)
+    {
+        if (value == null)
+            return null;
+        if (declaredType?.IsEnum == true || value is Enum)
+            return value.ToString();
+        return value switch
+        {
+            bool or int or long or float or double or decimal or string => value,
+            _ => value.ToString()
+        };
     }
 
     public string? FindDefaultGameDataPath()
