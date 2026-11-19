@@ -79,6 +79,7 @@ public sealed class ProxyHub
 
         var resolution = _cache.GetOrAdd((state.Handler?.GetType() ?? typeof(void), method), key => Resolve(key.HandlerType, method));
         var member = $"{state.Label}.{resolution.MemberName}";
+        Context.NotePostStopApiCall(member);
         var count = trace.CountCall(member);
 
         object? result;

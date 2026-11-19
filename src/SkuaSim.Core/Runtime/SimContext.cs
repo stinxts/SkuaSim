@@ -13,6 +13,7 @@ namespace SkuaSim.Core.Runtime;
 public sealed class SimContext
 {
     private long _lastApiActivityTicks = DateTime.UtcNow.Ticks;
+    private int _postStopMainThreadCalls;
 
     public SimContext(Scenario scenario, GameDataCatalog catalog, SimClock clock, SimulationTrace trace, int seed, string skuaFlavor)
     {
@@ -59,9 +60,27 @@ public sealed class SimContext
         if (StopRequested)
             return;
         StopReason = reason;
+        Interlocked.Exchange(ref _postStopMainThreadCalls, 0);
         StopRequested = true;
         Trace.Info("Stop requested: " + reason);
         Clock.NotifyStopRequested();
+    }
+
+    /// <summary>
+    /// Guards against scripts with loops that ignore Bot.ShouldExit (e.g., CoreStory.KillQuest's
+    /// while(CurrentRequirements.Count > 0)) by allowing a small grace window to observe ShouldExit
+    /// and then unwinding cleanly via SimulationStopException.
+    /// </summary>
+    internal void NotePostStopApiCall(string memberName)
+    {
+        if (!StopRequested || CleanupPhase || !Clock.IsMainThread)
+            return;
+        if (memberName.EndsWith(".ShouldExit", StringComparison.OrdinalIgnoreCase) ||
+            memberName.EndsWith(".ScriptRunning", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        if (Interlocked.Increment(ref _postStopMainThreadCalls) >= 40)
+            ThrowIfStopping();
     }
 
     /// <summary>

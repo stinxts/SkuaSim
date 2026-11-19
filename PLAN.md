@@ -10,55 +10,65 @@ An **offline, reproducible, standalone, and detailed** test environment where **
 
 ```mermaid
 flowchart LR
-    A["Any .cs Script<br/>(+ //cs_include)"] --> B["Compiler<br/>(Roslyn, matching Skua)"]
+    A["Any .cs Script (+ //cs_include)"] --> B["Compiler (Roslyn, matching Skua)"]
     B --> C["Compiled Script"]
-    C -->|calls| D["FakeScriptInterface<br/>(implements real Skua interfaces)"]
-    D --> E["Simulated World<br/>maps, cells, monsters,<br/>quests, drops, inventory, bank,<br/>shops, reputation, classes"]
-    F["Bug Scenario<br/>(JSON)"] --> E
-    G["Game Data<br/>QuestData.json + Collector DB"] --> E
-    H["Fault Injection<br/>lag, disconnect, drop failure"] --> E
-    D --> I["Trace + Report + Visual UI<br/>timeline, API calls, live state, errors"]
+    C -->|calls| D["FakeScriptInterface (real Skua interfaces)"]
+    D --> E["Simulated World & AQW StatEngine"]
+    F["Bug Scenario (JSON)"] --> E
+    G["Game Data (QuestData.json + Collector DB)"] --> E
+    H["Fault Injection (Phase 5)"] --> E
+    D --> I["Trace + Report + Avalonia 12 UI"]
 ```
 
 ### Components
 | # | Component | Status | Description |
 |---|---|---|---|
-| 1 | **Collector (`SkuaSim.Collector`)** | ✅ Done | Passive plugin for VibeSkua/Skua that records maps, cells, monsters, combat damage/auras/skill animations, zone events, drop counts, map items, shops, quests, classes/skills/stats, enhancements, and Awe/Forge proc rates into `gamedata.json` (multi-client safe via global `Mutex`). |
-| 2 | **Loader / Compiler** | ✅ Done | Recursively resolves `//cs_include` directives and compiles scripts with Roslyn against the **real Skua assemblies** (`Skua.Core.*`) in isolated `AssemblyLoadContext`s, rewriting time APIs to the virtual clock. |
-| 3 | **FakeScriptInterface** | ✅ Core Done | Implements the Skua interfaces (`Player`, `Map`, `Monsters`, `Combat`, `Kill`, `Hunt`, `Inventory`, `TempInv`, `Bank`, `House`, `Quests`, `Drops`, `Shops`, `Skills`, `Options`, `Wait`, `Send`, `Events`, `Flash`, `Stats`, `Lite`, `Accounts`, `Handlers`, `Servers`, etc.). |
-| 4 | **Simulated World** | ✅ Core Done | 3-tier in-memory game state (Scenario → Collector DB + `QuestData.json` → AST-assisted synthesized fallbacks flagged in reports) plus AQW Stat/Enhancement/Class combat engine (`StatEngine`). |
-| 5 | **Virtual Clock** | ✅ Done | `bot.Sleep`, `Wait.For*`, `Thread.Sleep`, `Task.Delay`, `DateTime`, and `Stopwatch` advance simulated time deterministically (`same seed = identical outcome`). |
+| 1 | **Collector (`SkuaSim.Collector`)** | ✅ Done | Passive plugin for VibeSkua/Skua that captures maps, cells, monsters, combat damage (`ct.sara[].actionResult`), HoT/DoT (`typ: "d"`), auras & stack counts (`stk`), skill animations (`animStr`), zone events, drop counts, map items, shops, quests, classes/skills/stats (`sAct`/`stu`), enhancements, Awe/Forge proc rates, and cross-session anonymized `packet_schemas.json` into `gamedata.json` (multi-client safe via global `Mutex`). |
+| 2 | **Loader / Compiler** | ✅ Done | Recursively resolves `//cs_include` directives and compiles scripts with Roslyn against the **real Skua assemblies** (`Skua.Core.*`) in collectible per-run `AssemblyLoadContext`s, rewriting time APIs to the virtual clock (`TimeHookRewriter`). |
+| 3 | **FakeScriptInterface** | ✅ Core Done | Implements the Skua interfaces (`Player`, `Map`, `Monsters`, `Combat`, `Kill`, `Hunt`, `Inventory`, `TempInv`, `Bank`, `House`, `Quests`, `Drops`, `Shops`, `Skills`, `Boosts`, `Options`, `Config`, `Wait`, `Send`, `Events`, `Flash`, `Stats`, `Lite`, `Accounts`, `Handlers`, `Servers`, etc.) via `ProxyHub`. |
+| 4 | **Simulated World & AQW StatEngine** | ✅ Core Done | 3-tier in-memory game state (Scenario → Collector DB + `QuestData.json` → AST-assisted synthesized fallbacks flagged in reports), authentic AQW `StatEngine` (STR/INT/END/DEX/WIS/LCK, Crit, 50% Haste cap, Dodge, class-skill calibration), real AQW boosted gear catalog (`AqwBoostGearCatalog`), Awe/Forge quest unlocks (`EnhancementUnlockCatalog`), and `2x` consumable/server boosts. |
+| 5 | **Virtual Clock** | ✅ Done | `bot.Sleep`, `Wait.For*`, `Thread.Sleep`, `Task.Delay`, `DateTime`, and `Stopwatch` advance simulated time deterministically (`same seed = identical outcome`). Supports minutes, hours, days, weeks, and Unlimited (`0`) virtual & real execution limits with multi-day clock formatting (`Xd hh:mm:ss.fff`). |
 | 6 | **CLI (`skuasim.exe`)** | ✅ MVP Done | Standalone offline executable: `skuasim db-stats`, `skuasim compile <script.cs>`, `skuasim run <script.cs> --scenario <file.json> --seed 42`. |
-| 7 | **Visual UI (`SkuaSim.UI`)** | ✅ Done | Standalone Avalonia desktop dashboard ("Skua without Flash") showing live client state, AQW stats/combat telemetry, visual Scenario & Script Options editor, live logs, searchable API Trace timeline, diagnostics, and report export. |
-| 8 | **Multi-Client (Army)** | 🔜 Planned | N simulated players sharing the same world/rooms and sync files, each executing on its own thread to test Army scripts and synchronization. |
-| 9 | **Fault Injection & Asserts** | 🔜 Planned | Disconnects, lag, full room, failed `Join`, quest failure, dry drop streaks, stall/loop detection, and scenario assertions (`inventoryContains`, `questsCompleted`, etc.). |
+| 7 | **Visual UI (`SkuaSim.UI`)** | ✅ Done | Standalone Avalonia 12 desktop dashboard ("Skua without Flash") with adaptive multi-resolution scaling (`Auto`, HD–8K), standardized typography, responsive splitters, live client/AQW combat state, databank class & live stats preview, real AQW boosted equipment picker, Awe/Forge enhancement checklists (with master + per-category `All Weapon`/`All Helm`/`All Cape`), Skua-faithful `Script Options` (`CheckBox` booleans, `MultiOptions` tabs, headers, `Reset Defaults`, `Load Skua .cfg`), color-coded Logs/Errors/Trace (Violet for Synthesized data), and `.md`/`.json` export. |
+| 8 | **Multi-Client (Army)** | 🔜 Next (Phase 4) | Up to **20 concurrent simulated players** (`1–20` accounts) sharing rooms, monster HP pools, party buffs/auras, `Goto`/cell tracking, and Army sync files (`*.sync`, `character_locations`, `army-control-jump.json`) on synchronized virtual-clock threads. |
+| 9 | **Role Loadouts, Live Swaps & Potions** | 🔜 Next (Phase 4) | Per-scenario combat role classes (`Solo`, `Farm`, `Dodge`, `Boss` — CBO-compatible), real-time live class & enhancement swaps (`Core.EquipClass`, `Adv.EnhanceItem`), and full Potion/Elixir/Tonic/Scroll simulation (for `UltrasLW` and endgame scripts). |
+| 10 | **Fault Injection & Asserts** | 🔜 Planned (Phase 5) | Disconnects, lag spikes, full rooms, failed `Join`, quest failure, dry drop streaks, infinite-loop/regression detection, declarative scenario `asserts`, diagnostic file generator, and bug report templates. |
+| 11 | **Replay & Public Release** | 🔜 Planned (Phase 6) | Real session log replay, official Skua parity pass, CLI `--skua-*` flags + `init-scenario`/`merge-data`, baseline starter DB, open-source license, and packaged releases. |
 
 ## Game Data Sources (Fidelity)
 - **`QuestData.json`** (already available in VibeSkua/Skua): quest definitions, requirements, and rewards.
-- **Passive Collector Plugin (`SkuaSim.Collector`)**: runs passively inside VibeSkua/Skua during normal use and saves anonymized maps, cells, monsters, combat stats, observed drop rates, map items, shops, and quests into `gamedata.json`.
-- **Automatic Fallbacks**: when data is missing, the simulated world generates plausible defaults (synthesized monsters, AST-inferred targets/shop items, 50% default drop rate, etc.) and explicitly flags in the report that **those values were synthesized**.
+- **Passive Collector Plugin (`SkuaSim.Collector`)**: runs passively inside VibeSkua/Skua during normal use and saves anonymized maps, cells, monsters, combat telemetry, class skills, observed drop rates, map items, shops, and quests into `gamedata.json` (plus anonymized structural packet samples in `packet_schemas.json`).
+- **Automatic Fallbacks**: when data is missing, the simulated world generates plausible defaults (synthesized monsters, AST-inferred targets/shop items, 50% default drop rate, etc.) and explicitly flags every synthesized entity in **Violet** in the UI diagnostics and execution reports.
 
 > [!WARNING]
 > **Honest Limitations:**
 > - **Windows-only:** scripts such as `CoreBots.cs` reference `System.Windows.Forms`, requiring Windows and `Microsoft.WindowsDesktop.App`.
-> - **Data fidelity:** simulation excels at catching **script logic bugs** (control flow, conditions, loops, inventory/bank/quest accounting, purchase math — already validated by catching a real infinite-loop bug in `CoreFarms.SwagTokenA`!). Bugs that depend on **exact server timing or Flash client quirks** (live packet jitter, deep ActionScript `Bot.Flash` calls, undocumented boss mechanics) may not reproduce until captured or replayed in Phase 5.
+> - **Data fidelity:** simulation excels at catching **script logic bugs** (control flow, conditions, loops, inventory/bank/quest accounting, purchase math — already validated by catching a real infinite-loop bug in `CoreFarms.SwagTokenA`!). Bugs that depend on **exact server timing, Ultra boss aura/zone choreography, or Flash client quirks** require either Phase 4 (Army/Aura combat simulation) or Phase 6 (real session log replay).
 
 ## Phases
 | Phase | Deliverable | Status | Outcome |
 |---|---|---|---|
 | **1 — MVP** | Loader + compiler + core `FakeScriptInterface` + virtual clock + trace | ✅ Done | Scripts compile unchanged (tested up to 171 `//cs_include` files) and run deterministically with detailed reports |
-| **2 — Data-Driven World** | Import `QuestData.json` + Collector `gamedata.json` + JSON scenario format | ✅ Done | Reproduce specific user states (inventory, bank, quests, class, stats) |
-| **3 — Visual Interface (`SkuaSim.UI`)** | Avalonia desktop dashboard ("Skua without Flash") | ✅ Done | Run/pause/stop scripts visually, live AQW stats/combat & client state, visual Scenario + Script Options editor, Logs, searchable API Trace timeline, diagnostics, and `.md`/`.json` report export |
-| **4 — Multi-Client (Army)** | N clients, shared rooms, party & sync files (`character_locations`, `Goto`) | 🔜 Planned | Test Army scripts (`ArmyFarmerJoeDoAll.cs`) and multi-account synchronization |
-| **5 — Faults, Asserts & Templates** | Fault injection, stall detector, scenario `asserts`, diagnostic generator & bug report template | 🔜 Planned | End-to-end workflow: "bug → scenario → reproduce → fix → automated regression test passes" |
-| **6 — Replay & Packaging** | Real session log replay + public developer release tooling | 🔜 Planned | Reproduce server-dependent edge cases and distribute cleanly to external developers |
+| **2 — Data-Driven World** | Import `QuestData.json` + Collector `gamedata.json` + JSON scenario format + AQW `StatEngine` | ✅ Done | Reproduce specific user states (level, class, real AQW boosted gear, Awe/Forge unlocks, boosts, quests) |
+| **3 — Visual Interface (`SkuaSim.UI`)** | Avalonia 12 desktop dashboard ("Skua without Flash") + UX & Collector protocol polish | ✅ Done | Multi-resolution UI (HD–8K), live client/stats state, real AQW gear & enhancement editor, Skua-faithful `Script Options` + `.cfg` import, unlimited virtual & real execution limits, color-coded Logs/Diagnostics/Trace, and `.md`/`.json` export |
+| **4 — Multi-Client (Army), Live Loadouts, Potions & Boss/Aura Combat** | Up to 20 concurrent clients, `Solo`/`Farm`/`Dodge`/`Boss` role classes + live class/enhancement swaps, Potions/Elixirs/Tonics/Scrolls (`UltrasLW`), and active aura/zone/Ultra boss combat | 🔜 Next | Test Army scripts (`ArmyFarmerJoeDoAll.cs`), `UltrasLW` potion/taunt teams, and dynamic CBO class/enhancement switching end-to-end |
+| **5 — Faults, Asserts & Bug Templates** | Fault injection (lag/disconnect/drop droughts), scenario `asserts`, diagnostic generator & bug report template | 🔜 Planned | End-to-end workflow: "bug → scenario → reproduce → fix → automated regression test passes" |
+| **6 — Replay & Public Packaging** | Real session log replay + official Skua parity + CLI ergonomic flags (`merge-data`, `init-scenario`) + release bundle | 🔜 Planned | Reproduce server-dependent edge cases and distribute cleanly to external developers |
 
-## Visual Interface Design (`SkuaSim.UI`)
-A standalone desktop GUI (Avalonia, matching VibeSkua's stack) wired directly to `SimulationRunner`:
-- **Execution Controls:** script `.cs` browser, scenario `.json` loader + visual form editor (level, class, member, inventory, bank, quests, script options), seed input, virtual speed/time limits, and **Run / Pause / Stop** buttons.
-- **Live Client State ("Skua without Flash"):** current map & cell, monsters in room/cell with live HP bars, player HP/gold/class, inventory/bank/temp inventory tabs, and active/completed quests.
-- **Logs Tab:** live scrolling script logs matching Skua's Logs tab.
-- **Errors & Diagnostics Screen:** highlighted exception stack trace (file + line number), loop/stall warnings, synthesized data warnings, and searchable API call timeline (`trace`).
+## Phase 4 — Next Milestone Scope (Multi-Client Army, Live Loadouts, Potions & Aura/Boss Simulation)
+1. **Shared World Room & Multi-Client Coordinator (`ArmySimulationRunner` — up to 20 players):**
+   - Spawn `1` to `20` simulated clients concurrently in one shared `SimWorld` room system with a single synchronized `SimClock` (lockstep/event-driven virtual time across client threads so no account races ahead in virtual time).
+   - Shared room monster instances (HP pool, aggro/taunt, simultaneous DPS contributions, shared kill credit, and per-player drop rolls).
+   - Multi-account `Bot.Map.PlayerNames` / `Bot.Map.Players`, `Bot.Player.Goto(playerName)`, party invites/membership, and isolated per-account `Inventory`/`Bank`/`Quests`/`Options` while sharing `Army*.sync` / `character_locations/` / `army-control-jump.json` coordination cleanly.
+2. **Combat Role Class Profiles (`Solo`, `Farm`, `Dodge`, `Boss`) & Live Class/Enhancement Swapping:**
+   - Extend `Scenario` and `ScenarioEditorView` with role-specific class selections (`SoloClass`, `FarmClass`, `DodgeClass`, `BossClass`) backed by the Collector databank, pre-seeding them into inventory/bank and syncing with `CoreBots` / CBO (`CoreBotsOptions`) settings.
+   - Fully simulate live mid-run class switches (`Core.EquipClass(ClassType.Solo/Farm/Dodge/Boss)`, `Bot.Inventory.Equip`) and live enhancement changes (`Adv.EnhanceItem`, `%xt%zm%enhanceItemShop%`, Awe/Forge swaps), immediately recalculating `StatEngine` (HP, DPS, Crit, Haste, Dodge, skills, and procs) and updating Live Client telemetry.
+3. **Potions, Elixirs, Tonics & Scrolls Simulation (`UltrasLW` Support):**
+   - Model real AQW consumables (Potions, Elixirs, Tonics, and Scrolls — e.g., *Fate Tonic*, *Sage Tonic*, *Body Tonic*, *Potent Battle/Malevolence/Destruction/Revitalize Elixir*, *Potent Honor/Malice Potion*, *Felicitous Philtre*, *Scroll of Enrage*, etc.) with inventory stack consumption, equip-to-potion-slot (`skill 5`), cooldowns, virtual-clock buff durations, stat/DPS/heal/taunt effects in `StatEngine`, and aura visibility.
+4. **Active Aura, Buff & Ultra Boss Mechanics Engine (using Collector's captured `ct`/aura/zone data):**
+   - Simulate timed player & monster auras (`Bot.Self.HasActiveAura`, `Bot.Target.HasActiveAura`, stacks `stk`, party buffs like LoO/AP/SC/LR) and boss cues (`animStr`, event zones, nuke intervals) captured in `gamedata.json`.
+5. **Army Scenario & UI Support:**
+   - Multi-account scenario definitions (`accounts[]`, supporting up to 20 players with per-account username, level, role classes, boosts, enhancements, potions, and script options) and an **Army Overview** tab in `SkuaSim.UI` showing all accounts' live map/cell/HP/class/status, per-account logs, and synchronized pause/stop.
 
 ## Public Distribution & Developer Release Checklist
 `SkuaSim` is **100% standalone** (zero AI dependency, runs completely offline on any developer's machine). Before publishing a public release for external developers:
@@ -69,20 +79,22 @@ A standalone desktop GUI (Avalonia, matching VibeSkua's stack) wired directly to
 3. **Installed Client:** **VibeSkua** or **official Skua** installed locally (plus `Scripts\` and `QuestData.json`). `SkuaSim` uses `<Private>false</Private>` and resolves `Skua.Core.*` assemblies from the user's machine at runtime without redistributing third-party client binaries.
 
 ### Pre-Release Tasks
-1. **CLI & Config Ergonomics:** expose `--skua-assemblies`, `--skua-data`, and `--scripts-dir` flags in `SkuaSim.Cli` (complementing `SKUASIM_SKUA_ASSEMBLIES` / `SKUASIM_SKUA_DATA` env vars), plus `skuasim init-scenario` and `skuasim merge-data` commands for merging Collector `.zip` exports (Option B).
+1. **CLI & Config Ergonomics:** expose `--skua-assemblies`, `--skua-data`, and `--scripts-dir` flags in `SkuaSim.Cli` (complementing `SKUASIM_SKUA_ASSEMBLIES` / `SKUASIM_SKUA_DATA` env vars), update `--max-real-sec` help text default to `0`, and add `skuasim init-scenario` and `skuasim merge-data` commands for merging Collector exports.
 2. **Official Skua Compatibility Pass:** verify assembly resolution, .NET version compatibility, and interface signatures against an official Skua installation (currently verified on VibeSkua / .NET 10).
-3. **Baseline Game Database:** include a clean, anonymized starter `data/gamedata.json` in the release so developers can test common maps/monsters immediately without waiting to collect data first.
-4. **Repository Hygiene & Packaging:** add `.gitignore` (excluding `bin/`, `obj/`, temporary reports/traces), an open-source license, a comprehensive English `README.md`, and a packaged release archive (`skuasim.exe`, `SkuaSim.UI`, `SkuaSim.Collector.dll`).
-5. **Security & Privacy Notice:** document clearly that `SkuaSim.Collector` never records personal/account data, and that `SkuaSim` compiles and executes real C# script code locally (developers should only run trusted scripts).
+3. **Baseline Game Database:** curate a clean, anonymized starter `data/gamedata.json` in the release so developers can test common maps/monsters immediately without waiting to collect data first.
+4. **Repository Hygiene & Packaging:** ✅ `.gitignore` and ✅ English `README.md` done; remaining: open-source license (`LICENSE`) and automated packaged release archive (`skuasim.exe`, `SkuaSim.UI`, `SkuaSim.Collector.dll`).
+5. **Security & Privacy Notice:** document clearly (already covered in `README.md`) that `SkuaSim.Collector` never records personal/account data, and that `SkuaSim` compiles and executes real C# script code locally.
 
 ## Project Structure
-Everything resides directly in this workspace (`SkuaSim\`), organized into .NET 10 projects (`SkuaSim.Collector`, `SkuaSim.Core`, `SkuaSim.Cli`, `SkuaSim.UI` [planned], `SkuaSim.Collector.Tests`, `SkuaSim.Core.Tests`). Existing scripts are **never** modified, and the ArmyFarmerJoeDoAll repository remains completely separate.
+Everything resides directly in this workspace (`SkuaSim\`), organized into .NET 10 projects (`SkuaSim.Collector`, `SkuaSim.Core`, `SkuaSim.Cli`, `SkuaSim.UI`, `SkuaSim.Collector.Tests`, `SkuaSim.Core.Tests`). Existing scripts are **never** modified, and the ArmyFarmerJoeDoAll repository remains completely separate.
 
 ## Confirmed Decisions
-1. **Target:** compatible with both **VibeSkua and official Skua** (using the `Skua.Core.*` assemblies in `C:\Users\lucas\AppData\Local\VibeSkua\current\Assemblies\`).
+1. **Target:** compatible with both **VibeSkua and official Skua** (resolving `Skua.Core.*` assemblies dynamically at runtime).
 2. **Language:** all source code, UI, CLI, logs, tests, and documentation in **English**.
 3. **Execution Order:**
-   - **Stage 1 — Collector (`SkuaSim.Collector`):** ✅ Done — passive plugin for VibeSkua/Skua collecting real game data into `gamedata.json`.
-   - **Stage 2 — Simulator MVP & Data World (`SkuaSim.Core` + `SkuaSim.Cli`):** ✅ Done — loader, compiler, `FakeScriptInterface`, virtual clock, 3-tier world, trace, and CLI.
-   - **Stage 3 — Visual Interface (`SkuaSim.UI`):** ✅ Done — Avalonia desktop dashboard with live client/AQW combat telemetry, visual Scenario & Script Options editor, searchable API Trace, diagnostics, and report export.
-   - **Stage 4+ (Next Priorities):** Multi-Client (Army) + Aura/Boss mechanics engine, Fault Injection & Scenario Assertions, Diagnostic Generator / Bug Report Template, and Public Release Packaging.
+   - **Stage 1 — Collector (`SkuaSim.Collector`):** ✅ Done & verified on live AQW data (6/6 tests).
+   - **Stage 2 — Simulator MVP & Data World (`SkuaSim.Core` + `SkuaSim.Cli`):** ✅ Done & verified (11/11 tests).
+   - **Stage 3 — Visual Interface (`SkuaSim.UI`) & Realistic AQW Setup Polish:** ✅ Done & verified.
+   - **Stage 4 — Multi-Client (Army) & Aura/Boss Combat Engine:** 🔜 Next priority.
+   - **Stage 5 — Fault Injection, Scenario Assertions & Bug Report Templates:** 🔜 Planned.
+   - **Stage 6 — Session Replay & Public Release Packaging:** 🔜 Planned.

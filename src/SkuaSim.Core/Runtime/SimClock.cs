@@ -301,22 +301,23 @@ public sealed class SimClock : SkuaSim.Runtime.ISimTimeSource
     }
 
     /// <summary>
-    /// Called on every API call. A script polling the API in a tight loop without sleeping would never let
-    /// the world change, so after many calls without time passing the clock nudges forward by 100 ms.
+    /// Called on every API call. A script polling the API in a tight loop without sleeping (for example
+    /// CoreStory._MonsterHuntBatch waiting on a monster respawn) would otherwise stall virtual time,
+    /// so after 500 consecutive calls without time passing the clock nudges forward by 250 ms.
     /// </summary>
     public void NoteApiCall()
     {
         if (!IsMainThread)
             return;
         WaitIfPaused();
-        if (++_spinCounter < 20_000)
+        if (++_spinCounter < 500)
             return;
         if (!_spinNoted)
         {
             _spinNoted = true;
-            Context?.Trace.Warn("Script is polling the API in a tight loop without sleeping; the clock is auto-advanced by 100 ms every 20,000 calls.");
+            Context?.Trace.Warn("Script is polling the API in a tight loop without sleeping; the clock is auto-advanced by 250 ms every 500 calls.");
         }
-        Advance(100);
+        Advance(250);
     }
 
     public void WaitBackground(long milliseconds)

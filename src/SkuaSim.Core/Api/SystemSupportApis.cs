@@ -376,6 +376,13 @@ public sealed class FlashApi : ApiBase
 
     public string GetGameObject(string path)
     {
+        if (string.Equals(path, "sfc.myUserName", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(path, "world.myAvatar.objData.strUsername", StringComparison.OrdinalIgnoreCase))
+            return JsonConvert.SerializeObject(World.Username ?? "SimPlayer");
+        if (string.Equals(path, "world.myAvatar.objData.guild.Name", StringComparison.OrdinalIgnoreCase))
+            return "null";
+        if (string.Equals(path, "ui.monsterIcon.redX.visible", StringComparison.OrdinalIgnoreCase))
+            return "false";
         if (string.Equals(path, "world.shopinfo.items", StringComparison.OrdinalIgnoreCase))
             return BuildShopItemsJArray().ToString(Formatting.None);
         if (string.Equals(path, "world.myAvatar.items", StringComparison.OrdinalIgnoreCase) ||
@@ -388,6 +395,13 @@ public sealed class FlashApi : ApiBase
     {
         try
         {
+            if (string.Equals(path, "sfc.myUserName", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(path, "world.myAvatar.objData.strUsername", StringComparison.OrdinalIgnoreCase))
+                return typeof(T) == typeof(string) ? (T)(object)(World.Username ?? "SimPlayer") : def;
+            if (string.Equals(path, "world.myAvatar.objData.guild.Name", StringComparison.OrdinalIgnoreCase))
+                return def;
+            if (string.Equals(path, "ui.monsterIcon.redX.visible", StringComparison.OrdinalIgnoreCase))
+                return typeof(T) == typeof(bool) ? (T)(object)false : def;
             if (string.Equals(path, "world.shopinfo.items", StringComparison.OrdinalIgnoreCase))
             {
                 var arr = BuildShopItemsJArray();

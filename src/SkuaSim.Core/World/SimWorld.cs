@@ -808,22 +808,27 @@ public sealed partial class SimWorld
                     if (!map.Cells.Contains(cell, StringComparer.OrdinalIgnoreCase))
                         map.Cells.Add(cell);
                     var captured = _ctx.Catalog.FindMonster(0, monName);
-                    var level = captured?.Level > 0 ? captured.Level : 40;
+                    var level = captured?.Level > 0 ? captured.Level : SynthesizedMonsterLevel();
                     var hp = captured?.MaxHP > 0 ? captured.MaxHP : GenericHp(level);
-                    map.Monsters.Add(new SimMonster
+                    // Spawn 2 instances per hinted cell (like typical AQW rooms) so scripts aren't
+                    // forced to wait a full respawn timer after every single kill on synthesized maps.
+                    for (var copy = 0; copy < 2; copy++)
                     {
-                        MapID = nextMapId,
-                        MonID = captured?.ID > 0 ? captured.ID : 95_000 + nextMapId,
-                        Name = monName,
-                        Cell = cell,
-                        MaxHP = hp,
-                        HP = hp,
-                        Level = level,
-                        Race = captured?.Race ?? "None",
-                        Data = captured,
-                        Synthesized = true
-                    });
-                    nextMapId++;
+                        map.Monsters.Add(new SimMonster
+                        {
+                            MapID = nextMapId,
+                            MonID = captured?.ID > 0 ? captured.ID : 95_000 + nextMapId,
+                            Name = monName,
+                            Cell = cell,
+                            MaxHP = hp,
+                            HP = hp,
+                            Level = level,
+                            Race = captured?.Race ?? "None",
+                            Data = captured,
+                            Synthesized = true
+                        });
+                        nextMapId++;
+                    }
                 }
             }
             EnsureSynthesizedMonsterInCell(map, "Enter");
@@ -840,22 +845,35 @@ public sealed partial class SimWorld
             return;
 
         var nextMapId = map.Monsters.Count == 0 ? 1 : map.Monsters.Max(m => m.MapID) + 1;
-        var hp = GenericHp(30);
-        map.Monsters.Add(new SimMonster
+        var level = SynthesizedMonsterLevel();
+        var hp = GenericHp(level);
+        for (var copy = 0; copy < 2; copy++)
         {
-            MapID = nextMapId,
-            MonID = 99_000 + nextMapId,
-            Name = $"Synthesized Monster ({cell})",
-            Cell = cell,
-            MaxHP = hp,
-            HP = hp,
-            Level = 30,
-            Race = "None",
-            Synthesized = true
-        });
+            map.Monsters.Add(new SimMonster
+            {
+                MapID = nextMapId,
+                MonID = 99_000 + nextMapId,
+                Name = $"Synthesized Monster ({cell})",
+                Cell = cell,
+                MaxHP = hp,
+                HP = hp,
+                Level = level,
+                Race = "None",
+                Synthesized = true
+            });
+            nextMapId++;
+        }
     }
 
-    private int GenericHp(int level) => Math.Max(1000, Math.Max(1, level) * Rules.GenericMonsterHpPerLevel);
+    private int SynthesizedMonsterLevel() => Math.Clamp(Math.Max(5, (int)Math.Round(Level * 0.65)), 5, 35);
+
+    private int GenericHp(int level)
+    {
+        // Use the scenario's configured per-level HP multiplier when explicitly customized,
+        // otherwise scale moderately for uncaptured story/farm monsters (~180 HP/level, min 600).
+        var perLevel = Rules.GenericMonsterHpPerLevel == 400 ? 180 : Math.Max(20, Rules.GenericMonsterHpPerLevel);
+        return Math.Max(600, Math.Max(1, level) * perLevel);
+    }
 
     public bool Jump(string cell, string pad, bool autoCorrect)
     {
@@ -1038,7 +1056,7 @@ public sealed partial class SimWorld
         }
         else
         {
-            avgDamage = Math.Max(20, Math.Max(1, monster.Level) * 8);
+            avgDamage = Math.Max(15, Math.Max(1, monster.Level) * 5);
             interval = 2000;
             Trace.Synthesize($"combat:{monster.Name.ToLowerInvariant()}", $"Monster '{monster.Name}' has no captured combat data: assuming {avgDamage} damage every {interval} ms.");
         }
