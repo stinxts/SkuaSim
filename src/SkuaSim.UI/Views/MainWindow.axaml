@@ -19,7 +19,14 @@
     <Grid RowDefinitions="Auto,*,5,240" Margin="10" RowSpacing="8">
         <views:ExecutionToolbarView Grid.Row="0" />
 
-        <views:ClientStateView Grid.Row="1" DataContext="{Binding ClientState}" />
+        <TabControl Grid.Row="1" SelectedIndex="{Binding WorkspaceTabIndex}" Padding="0,6,0,0">
+            <TabItem Header="Live Client">
+                <views:ClientStateView DataContext="{Binding ClientState}" Margin="0,6,0,0" />
+            </TabItem>
+            <TabItem Header="Scenario &amp; Script Options">
+                <views:ScenarioEditorView DataContext="{Binding ScenarioEditor}" Margin="0,6,0,0" />
+            </TabItem>
+        </TabControl>
 
         <GridSplitter Grid.Row="2"
                       ResizeDirection="Rows"

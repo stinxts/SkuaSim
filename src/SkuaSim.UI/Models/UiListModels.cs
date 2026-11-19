@@ -1,3 +1,6 @@
+using System.Collections.ObjectModel;
+using CommunityToolkit.Mvvm.ComponentModel;
+
 namespace SkuaSim.UI.Models;
 
 public sealed record ScriptEntry(string DisplayName, string FullPath)
@@ -73,4 +76,56 @@ public sealed record CompileErrorRowItem(string File, int Line, int Column, stri
 public sealed record DiagnosticRowItem(string Badge, string Title, string Detail, long Count)
 {
     public string CountText => Count > 0 ? $"x{Count:N0}" : "";
+}
+
+public sealed record TraceRowItem(long Seq, string Clock, string Kind, string Thread, string Text)
+{
+    public string KindTag => Kind.ToUpperInvariant();
+    public string FormattedLine => $"[{Clock}] [{KindTag}] {Text}";
+}
+
+public partial class ScenarioItemEditorRow : ObservableObject
+{
+    [ObservableProperty]
+    public partial string Name { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string Category { get; set; } = "Item";
+
+    [ObservableProperty]
+    public partial int Quantity { get; set; } = 1;
+
+    [ObservableProperty]
+    public partial bool Equipped { get; set; }
+
+    [ObservableProperty]
+    public partial int EnhancementPatternID { get; set; }
+
+    [ObservableProperty]
+    public partial int EnhancementLevel { get; set; }
+
+    [ObservableProperty]
+    public partial int ProcID { get; set; }
+}
+
+public partial class ScriptOptionEditorRow : ObservableObject
+{
+    public string Name { get; init; } = "";
+    public string DisplayName { get; init; } = "";
+    public string Category { get; init; } = "";
+    public string Description { get; init; } = "";
+    public string ValueType { get; init; } = "string";
+    public bool IsBool { get; init; }
+    public bool IsChoice { get; init; }
+    public bool IsText => !IsBool && !IsChoice;
+    public ObservableCollection<string> AllowedValues { get; } = new();
+
+    [ObservableProperty]
+    public partial bool BoolValue { get; set; }
+
+    [ObservableProperty]
+    public partial string TextValue { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string? SelectedChoice { get; set; }
 }

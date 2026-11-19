@@ -67,6 +67,21 @@ public partial class ClientStateViewModel : ViewModelBase
     public partial int DropsPicked { get; set; }
 
     [ObservableProperty]
+    public partial string EffectiveDpsText { get; set; } = "0 DPS";
+
+    [ObservableProperty]
+    public partial string PowerStatsText { get; set; } = "AP 0  |  SP 0";
+
+    [ObservableProperty]
+    public partial string SecondaryStatsText { get; set; } = "Crit 0% (x1.50)  |  Haste 0%  |  Dodge 0%";
+
+    [ObservableProperty]
+    public partial string PrimaryStatsText { get; set; } = "STR 0  INT 0  END 0  DEX 0  WIS 0  LUK 0";
+
+    [ObservableProperty]
+    public partial string CombatCountersText { get; set; } = "Crits: 0  |  Dodges: 0  |  Healed: 0 HP";
+
+    [ObservableProperty]
     public partial string InventoryFilter { get; set; } = "";
 
     [ObservableProperty]
@@ -129,6 +144,11 @@ public partial class ClientStateViewModel : ViewModelBase
         Kills = 0;
         Deaths = 0;
         DropsPicked = 0;
+        EffectiveDpsText = "0 DPS";
+        PowerStatsText = "AP 0  |  SP 0";
+        SecondaryStatsText = "Crit 0% (x1.50)  |  Haste 0%  |  Dodge 0%";
+        PrimaryStatsText = "STR 0  INT 0  END 0  DEX 0  WIS 0  LUK 0";
+        CombatCountersText = "Crits: 0  |  Dodges: 0  |  Healed: 0 HP";
 
         _allInventory = new List<ItemRowItem>();
         CellMonsters.Clear();
@@ -176,6 +196,12 @@ public partial class ClientStateViewModel : ViewModelBase
         Kills = world.Kills;
         Deaths = world.Deaths;
         DropsPicked = world.DropsPicked;
+
+        EffectiveDpsText = $"{world.EffectiveDps:N0} DPS";
+        PowerStatsText = $"AP {world.AttackPower:N0}  |  SP {world.SpellPower:N0}";
+        SecondaryStatsText = $"Crit {world.CritChance * 100:F1}% (x{world.CritMultiplier:F2})  |  Haste {world.Haste * 100:F1}%  |  Dodge {world.EvasionChance * 100:F1}%";
+        PrimaryStatsText = $"STR {world.Strength}  INT {world.Intellect}  END {world.Endurance}  DEX {world.Dexterity}  WIS {world.Wisdom}  LUK {world.Luck}";
+        CombatCountersText = $"Crits: {world.PlayerCrits:N0}  |  Dodges: {world.PlayerDodges:N0}  |  Healed: {world.TotalHealingDone:N0} HP";
 
         var monsters = world.CellMonsters
             .Select(m => new MonsterRowItem(m.MapId, m.Name, m.Level, m.Hp, m.MaxHp, m.Alive, m.IsTarget, m.Synthesized))

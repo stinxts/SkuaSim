@@ -19,12 +19,14 @@ public partial class MainViewModel : ViewModelBase
     private SimulationSession? _activeSession;
     private int _logCursor;
     private int _warnCursor;
+    private long _traceCursor;
     private bool _suppressScriptSelectionSync;
     private bool _suppressScenarioSelectionSync;
 
     public MainViewModel()
     {
         ClientState = new ClientStateViewModel();
+        ScenarioEditor = new ScenarioEditorViewModel();
         Diagnostics = new DiagnosticsViewModel();
 
         SpeedPresets = new ObservableCollection<SpeedPreset>
@@ -54,10 +56,14 @@ public partial class MainViewModel : ViewModelBase
     }
 
     public ClientStateViewModel ClientState { get; }
+    public ScenarioEditorViewModel ScenarioEditor { get; }
     public DiagnosticsViewModel Diagnostics { get; }
     public ObservableCollection<SpeedPreset> SpeedPresets { get; }
     public ObservableCollection<ScriptEntry> FilteredScripts { get; } = new();
     public ObservableCollection<ScenarioEntry> AvailableScenarios { get; } = new();
+
+    [ObservableProperty]
+    public partial int WorkspaceTabIndex { get; set; }
 
     [ObservableProperty]
     public partial string ScriptPathText { get; set; } = "";
@@ -126,6 +132,7 @@ public partial class MainViewModel : ViewModelBase
     {
         _dialogService = dialogService;
         Diagnostics.AttachDialogService(dialogService);
+        ScenarioEditor.AttachServices(dialogService, _hostService, () => ScriptPathText, OnScenarioSavedAsync);
     }
 
     public void Shutdown()
@@ -150,6 +157,7 @@ public partial class MainViewModel : ViewModelBase
         if (_suppressScenarioSelectionSync || value == null)
             return;
         ScenarioPathText = value.FilePath ?? "";
+        LoadScenarioIntoEditor(value.FilePath);
     }
 
     partial void OnSelectedSpeedChanged(SpeedPreset value)
@@ -236,13 +244,23 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        int? seedOverride = int.TryParse(SeedText.Trim(), out var parsedSeed) ? parsedSeed : null;
+        // If the user typed a different scenario path directly in the toolbar box, sync editor before running.
+        if (scenarioPath != null &&
+            !string.Equals(Path.GetFullPath(scenarioPath), ScenarioEditor.LoadedFilePath, StringComparison.OrdinalIgnoreCase))
+        {
+            LoadScenarioIntoEditor(scenarioPath);
+        }
 
+        int? seedOverride = int.TryParse(SeedText.Trim(), out var parsedSeed) ? parsedSeed : null;
+        var scenarioToRun = ScenarioEditor.BuildScenario(seedOverride);
+
+        WorkspaceTabIndex = 0;
         ClientState.Reset();
         Diagnostics.Reset();
         Diagnostics.SelectedTabIndex = 0;
         _logCursor = 0;
         _warnCursor = 0;
+        _traceCursor = 0;
 
         VirtualClockText = "00:00:00.000";
         RealTimeText = "0.00 s";
@@ -252,7 +270,7 @@ public partial class MainViewModel : ViewModelBase
 
         try
         {
-            var session = _hostService.StartSimulation(scriptPath, scenarioPath, seedOverride, SelectedSpeed.Multiplier);
+            var session = _hostService.StartSimulation(scriptPath, scenarioToRun, seedOverride, SelectedSpeed.Multiplier);
             _activeSession = session;
             IsSessionActive = true;
             IsPaused = false;
@@ -347,7 +365,10 @@ public partial class MainViewModel : ViewModelBase
             new[] { ("Scenario JSON", new[] { "*.json" }), ("All Files", new[] { "*.*" }) });
 
         if (!string.IsNullOrWhiteSpace(picked))
+        {
             ScenarioPathText = picked;
+            LoadScenarioIntoEditor(picked);
+        }
     }
 
     [RelayCommand]
@@ -392,6 +413,7 @@ public partial class MainViewModel : ViewModelBase
                 var preferred = AvailableScenarios.FirstOrDefault(s => s.FilePath != null) ?? AvailableScenarios.FirstOrDefault();
                 SelectedScenario = preferred;
                 ScenarioPathText = preferred?.FilePath ?? "";
+                LoadScenarioIntoEditor(preferred?.FilePath);
             }
         }
         finally
@@ -503,17 +525,67 @@ public partial class MainViewModel : ViewModelBase
         {
             var logs = session.ReadScriptLogsSince(_logCursor, out _logCursor, 400);
             var warns = session.ReadWarningsSince(_warnCursor, out _warnCursor, 300);
+            var timeline = session.ReadTimelineSince(_traceCursor, out _traceCursor, out var dropped, 500);
             if (logs.Count > 0)
                 Diagnostics.AppendLogs(logs);
             if (warns.Count > 0)
                 Diagnostics.AppendWarnings(warns);
-            if (logs.Count == 0 && warns.Count == 0)
+            if (timeline.Count > 0 || dropped)
+                Diagnostics.AppendTimeline(timeline, dropped);
+            if (logs.Count == 0 && warns.Count == 0 && timeline.Count == 0)
                 break;
         }
 
         Diagnostics.SyncDiagnostics(
             session.GetSynthesizedSnapshot(),
             session.GetUnimplementedSnapshot());
+    }
+
+    private void LoadScenarioIntoEditor(string? path)
+    {
+        if (_hostService == null)
+            return;
+
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            ScenarioEditor.LoadFromScenario(new Core.Scenarios.Scenario { Name = "Custom Scenario" }, "");
+            return;
+        }
+
+        try
+        {
+            var loaded = _hostService.LoadScenarioFile(path);
+            ScenarioEditor.LoadFromScenario(loaded, Path.GetFullPath(path));
+            SeedText = (loaded.Seed ?? 42).ToString();
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.SetError("Scenario Load Error", ex.Message);
+        }
+    }
+
+    private Task OnScenarioSavedAsync(string savedPath)
+    {
+        if (_hostService == null)
+            return Task.CompletedTask;
+
+        var scenarios = _hostService.DiscoverScenarios();
+        AvailableScenarios.Clear();
+        foreach (var s in scenarios)
+            AvailableScenarios.Add(s);
+
+        _suppressScenarioSelectionSync = true;
+        try
+        {
+            ScenarioPathText = savedPath;
+            SelectedScenario = AvailableScenarios.FirstOrDefault(s =>
+                s.FilePath != null && string.Equals(Path.GetFullPath(s.FilePath), Path.GetFullPath(savedPath), StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            _suppressScenarioSelectionSync = false;
+        }
+        return Task.CompletedTask;
     }
 
     private void RefreshSkuaConfigurationState()

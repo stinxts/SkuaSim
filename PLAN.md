@@ -23,13 +23,13 @@ flowchart LR
 ### Components
 | # | Component | Status | Description |
 |---|---|---|---|
-| 1 | **Collector (`SkuaSim.Collector`)** | ✅ Done | Passive plugin for VibeSkua/Skua that records maps, cells, monsters, combat damage/auras, drop counts, map items, shops, and quests into `gamedata.json` (multi-client safe via global `Mutex`). |
+| 1 | **Collector (`SkuaSim.Collector`)** | ✅ Done | Passive plugin for VibeSkua/Skua that records maps, cells, monsters, combat damage/auras/skill animations, zone events, drop counts, map items, shops, quests, classes/skills/stats, enhancements, and Awe/Forge proc rates into `gamedata.json` (multi-client safe via global `Mutex`). |
 | 2 | **Loader / Compiler** | ✅ Done | Recursively resolves `//cs_include` directives and compiles scripts with Roslyn against the **real Skua assemblies** (`Skua.Core.*`) in isolated `AssemblyLoadContext`s, rewriting time APIs to the virtual clock. |
 | 3 | **FakeScriptInterface** | ✅ Core Done | Implements the Skua interfaces (`Player`, `Map`, `Monsters`, `Combat`, `Kill`, `Hunt`, `Inventory`, `TempInv`, `Bank`, `House`, `Quests`, `Drops`, `Shops`, `Skills`, `Options`, `Wait`, `Send`, `Events`, `Flash`, `Stats`, `Lite`, `Accounts`, `Handlers`, `Servers`, etc.). |
-| 4 | **Simulated World** | ✅ Core Done | 3-tier in-memory game state (Scenario → Collector DB + `QuestData.json` → AST-assisted synthesized fallbacks flagged in reports). |
+| 4 | **Simulated World** | ✅ Core Done | 3-tier in-memory game state (Scenario → Collector DB + `QuestData.json` → AST-assisted synthesized fallbacks flagged in reports) plus AQW Stat/Enhancement/Class combat engine (`StatEngine`). |
 | 5 | **Virtual Clock** | ✅ Done | `bot.Sleep`, `Wait.For*`, `Thread.Sleep`, `Task.Delay`, `DateTime`, and `Stopwatch` advance simulated time deterministically (`same seed = identical outcome`). |
 | 6 | **CLI (`skuasim.exe`)** | ✅ MVP Done | Standalone offline executable: `skuasim db-stats`, `skuasim compile <script.cs>`, `skuasim run <script.cs> --scenario <file.json> --seed 42`. |
-| 7 | **Visual UI (`SkuaSim.UI`)** | 🔜 Planned | Standalone desktop interface ("Skua without Flash") showing live simulated world state, script logs, scenario editor, and an error/trace inspector. |
+| 7 | **Visual UI (`SkuaSim.UI`)** | ✅ Done | Standalone Avalonia desktop dashboard ("Skua without Flash") showing live client state, AQW stats/combat telemetry, visual Scenario & Script Options editor, live logs, searchable API Trace timeline, diagnostics, and report export. |
 | 8 | **Multi-Client (Army)** | 🔜 Planned | N simulated players sharing the same world/rooms and sync files, each executing on its own thread to test Army scripts and synchronization. |
 | 9 | **Fault Injection & Asserts** | 🔜 Planned | Disconnects, lag, full room, failed `Join`, quest failure, dry drop streaks, stall/loop detection, and scenario assertions (`inventoryContains`, `questsCompleted`, etc.). |
 
@@ -48,7 +48,7 @@ flowchart LR
 |---|---|---|---|
 | **1 — MVP** | Loader + compiler + core `FakeScriptInterface` + virtual clock + trace | ✅ Done | Scripts compile unchanged (tested up to 171 `//cs_include` files) and run deterministically with detailed reports |
 | **2 — Data-Driven World** | Import `QuestData.json` + Collector `gamedata.json` + JSON scenario format | ✅ Done | Reproduce specific user states (inventory, bank, quests, class, stats) |
-| **3 — Visual Interface (`SkuaSim.UI`)** | Avalonia desktop dashboard ("Skua without Flash") | 🔜 Planned | Run/pause/stop scripts visually, inspect live map/monsters/inventory/quests, view real-time Logs and Error/Trace inspector |
+| **3 — Visual Interface (`SkuaSim.UI`)** | Avalonia desktop dashboard ("Skua without Flash") | ✅ Done | Run/pause/stop scripts visually, live AQW stats/combat & client state, visual Scenario + Script Options editor, Logs, searchable API Trace timeline, diagnostics, and `.md`/`.json` report export |
 | **4 — Multi-Client (Army)** | N clients, shared rooms, party & sync files (`character_locations`, `Goto`) | 🔜 Planned | Test Army scripts (`ArmyFarmerJoeDoAll.cs`) and multi-account synchronization |
 | **5 — Faults, Asserts & Templates** | Fault injection, stall detector, scenario `asserts`, diagnostic generator & bug report template | 🔜 Planned | End-to-end workflow: "bug → scenario → reproduce → fix → automated regression test passes" |
 | **6 — Replay & Packaging** | Real session log replay + public developer release tooling | 🔜 Planned | Reproduce server-dependent edge cases and distribute cleanly to external developers |
@@ -84,4 +84,5 @@ Everything resides directly in this workspace (`SkuaSim\`), organized into .NET 
 3. **Execution Order:**
    - **Stage 1 — Collector (`SkuaSim.Collector`):** ✅ Done — passive plugin for VibeSkua/Skua collecting real game data into `gamedata.json`.
    - **Stage 2 — Simulator MVP & Data World (`SkuaSim.Core` + `SkuaSim.Cli`):** ✅ Done — loader, compiler, `FakeScriptInterface`, virtual clock, 3-tier world, trace, and CLI.
-   - **Stage 3+ (Next Priorities):** Visual Interface (`SkuaSim.UI`), Multi-Client (Army), Fault Injection & Assertions, Diagnostic Generator / Bug Report Template, and Public Release Packaging.
+   - **Stage 3 — Visual Interface (`SkuaSim.UI`):** ✅ Done — Avalonia desktop dashboard with live client/AQW combat telemetry, visual Scenario & Script Options editor, searchable API Trace, diagnostics, and report export.
+   - **Stage 4+ (Next Priorities):** Multi-Client (Army) + Aura/Boss mechanics engine, Fault Injection & Scenario Assertions, Diagnostic Generator / Bug Report Template, and Public Release Packaging.

@@ -101,7 +101,8 @@ public sealed partial class GameDatabaseStore
                 ShopsCount = db.Shops.Count,
                 QuestsCount = db.Quests.Count,
                 ClassesCount = db.Classes.Count,
-                EnhancementsCount = db.Enhancements.Count
+                EnhancementsCount = db.Enhancements.Count,
+                ProcsCount = db.Procs.Count
             }
         };
 
@@ -190,6 +191,12 @@ public sealed partial class GameDatabaseStore
                     if (itemId > 0)
                         dstMapItem.GrantedItemIDs.Add(itemId);
             }
+
+            if (srcMap.ZoneEvents is { Count: > 0 })
+            {
+                dstMap.ZoneEvents ??= new Dictionary<string, CapturedZoneEvent>(StringComparer.OrdinalIgnoreCase);
+                MergeZoneEvents(dstMap.ZoneEvents, srcMap.ZoneEvents);
+            }
         }
 
         // 2. Merge Monsters
@@ -270,6 +277,7 @@ public sealed partial class GameDatabaseStore
             dc.TotalAttackIntervalMs += sc.TotalAttackIntervalMs;
             dc.CounterAttacksObserved += sc.CounterAttacksObserved;
             dc.PlayerDeathsInCell += sc.PlayerDeathsInCell;
+            dc.MaxTargetsHit = Math.Max(dc.MaxTargetsHit, sc.MaxTargetsHit);
 
             // Merge Auras
             foreach (var (auraName, srcAura) in srcMon.Auras)
@@ -279,21 +287,43 @@ public sealed partial class GameDatabaseStore
                     dstAura = new CapturedAuraStat { Name = srcAura.Name };
                     dstMon.Auras[auraName] = dstAura;
                 }
+                if (!string.IsNullOrWhiteSpace(srcAura.CasterType)) dstAura.CasterType = srcAura.CasterType;
                 if (!string.IsNullOrWhiteSpace(srcAura.TargetType)) dstAura.TargetType = srcAura.TargetType;
                 if (!string.IsNullOrWhiteSpace(srcAura.Category)) dstAura.Category = srcAura.Category;
                 if (srcAura.DurationSeconds > 0) dstAura.DurationSeconds = srcAura.DurationSeconds;
                 dstAura.TimesSeen += srcAura.TimesSeen;
                 dstAura.IsCounterAttack |= srcAura.IsCounterAttack;
+                dstAura.IsTaunt |= srcAura.IsTaunt;
+                dstAura.IsStacking |= srcAura.IsStacking;
+                dstAura.MaxStacksObserved = Math.Max(dstAura.MaxStacksObserved, srcAura.MaxStacksObserved);
+                dstAura.IntervalSamples += srcAura.IntervalSamples;
+                dstAura.TotalIntervalMs += srcAura.TotalIntervalMs;
+                if (srcAura.MinBossHpPercent.HasValue)
+                    dstAura.MinBossHpPercent = dstAura.MinBossHpPercent.HasValue ? Math.Min(dstAura.MinBossHpPercent.Value, srcAura.MinBossHpPercent.Value) : srcAura.MinBossHpPercent.Value;
+                if (srcAura.MaxBossHpPercent.HasValue)
+                    dstAura.MaxBossHpPercent = dstAura.MaxBossHpPercent.HasValue ? Math.Max(dstAura.MaxBossHpPercent.Value, srcAura.MaxBossHpPercent.Value) : srcAura.MaxBossHpPercent.Value;
                 if (srcAura.MinValue.HasValue)
                     dstAura.MinValue = dstAura.MinValue.HasValue ? Math.Min(dstAura.MinValue.Value, srcAura.MinValue.Value) : srcAura.MinValue.Value;
                 if (srcAura.MaxValue.HasValue)
                     dstAura.MaxValue = dstAura.MaxValue.HasValue ? Math.Max(dstAura.MaxValue.Value, srcAura.MaxValue.Value) : srcAura.MaxValue.Value;
             }
 
-            // Merge SpecialMessages
+            // Merge SpecialMessages, SkillEvents & ZoneEvents
             foreach (var (msg, count) in srcMon.SpecialMessages)
             {
                 dstMon.SpecialMessages[msg] = dstMon.SpecialMessages.GetValueOrDefault(msg) + count;
+            }
+
+            if (srcMon.SkillEvents is { Count: > 0 })
+            {
+                dstMon.SkillEvents ??= new Dictionary<string, CapturedMonsterSkillEvent>(StringComparer.OrdinalIgnoreCase);
+                MergeMonsterSkillEvents(dstMon.SkillEvents, srcMon.SkillEvents);
+            }
+
+            if (srcMon.ZoneEvents is { Count: > 0 })
+            {
+                dstMon.ZoneEvents ??= new Dictionary<string, CapturedZoneEvent>(StringComparer.OrdinalIgnoreCase);
+                MergeZoneEvents(dstMon.ZoneEvents, srcMon.ZoneEvents);
             }
 
             // Merge Drops

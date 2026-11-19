@@ -19,6 +19,7 @@ public sealed class GameDatabase
     public Dictionary<int, CapturedQuest> Quests { get; set; } = new();
     public Dictionary<string, CapturedClassProfile> Classes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<int, CapturedEnhancementProfile> Enhancements { get; set; } = new();
+    public Dictionary<int, CapturedProcStat> Procs { get; set; } = new();
 
     public static string NormalizeMapName(string? mapName)
     {
@@ -61,6 +62,11 @@ public sealed class CapturedMap
     /// Map items requested via getMapItem on this map, indexed by MapItemID.
     /// </summary>
     public Dictionary<int, CapturedMapItem> MapItems { get; set; } = new();
+
+    /// <summary>
+    /// Zone events (cmd="event", args.zoneSet) observed on this map (e.g. UltraDage, DarkCarnax).
+    /// </summary>
+    public Dictionary<string, CapturedZoneEvent> ZoneEvents { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 public sealed class CapturedMapMonsterSpawn
@@ -104,6 +110,8 @@ public sealed class CapturedMonster
     public long KillCount { get; set; }
     public CapturedCombatStats Combat { get; set; } = new();
     public Dictionary<string, CapturedAuraStat> Auras { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, CapturedMonsterSkillEvent> SkillEvents { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, CapturedZoneEvent> ZoneEvents { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, long> SpecialMessages { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<int, CapturedDropStat> Drops { get; set; } = new();
     public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
@@ -135,11 +143,13 @@ public sealed class CapturedCombatStats
 
     public long CounterAttacksObserved { get; set; }
     public long PlayerDeathsInCell { get; set; }
+    public int MaxTargetsHit { get; set; }
 }
 
 public sealed class CapturedAuraStat
 {
     public string Name { get; set; } = string.Empty;
+    public string CasterType { get; set; } = string.Empty; // "monster" or "player"
     public string TargetType { get; set; } = string.Empty; // "monster" or "player"
     public string Category { get; set; } = string.Empty;
     public int DurationSeconds { get; set; }
@@ -147,6 +157,19 @@ public sealed class CapturedAuraStat
     public float? MaxValue { get; set; }
     public long TimesSeen { get; set; }
     public bool IsCounterAttack { get; set; }
+    public bool IsTaunt { get; set; }
+    public bool IsStacking { get; set; }
+    public int MaxStacksObserved { get; set; }
+    public long IntervalSamples { get; set; }
+    public long TotalIntervalMs { get; set; }
+
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double AverageIntervalMs => IntervalSamples > 0
+        ? Math.Round((double)TotalIntervalMs / IntervalSamples, 0)
+        : 0.0;
+
+    public double? MinBossHpPercent { get; set; }
+    public double? MaxBossHpPercent { get; set; }
 }
 
 public sealed class CapturedDropStat

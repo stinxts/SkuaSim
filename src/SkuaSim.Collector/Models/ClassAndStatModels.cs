@@ -14,6 +14,7 @@ public sealed class CapturedClassProfile
     public List<CapturedClassSkill> Skills { get; set; } = new();
     public List<CapturedClassPassive> Passives { get; set; } = new();
     public Dictionary<int, CapturedLevelStatSnapshot> StatsByLevel { get; set; } = new();
+    public Dictionary<string, CapturedClassAuraStat> Auras { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public CapturedPlayerCombatStats Combat { get; set; } = new();
     public DateTime FirstSeenUtc { get; set; } = DateTime.UtcNow;
     public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
@@ -140,6 +141,7 @@ public static class EnhancementPatternCatalog
 {
     public static string GetPatternName(int patternId) => patternId switch
     {
+        1 => "Adventurer",
         2 => "Fighter",
         3 => "Thief",
         5 => "Hybrid",
@@ -160,4 +162,152 @@ public static class EnhancementPatternCatalog
         32 => "Hearty",
         _ => patternId > 0 ? $"Pattern_{patternId}" : "None"
     };
+}
+
+/// <summary>
+/// Anonymized aura cast by a player class (self buff, party buff, or target debuff).
+/// Essential for Phase 4 multi-client Army simulation (LoO, SC, AP, LR party buffs).
+/// </summary>
+public sealed class CapturedClassAuraStat
+{
+    public string Name { get; set; } = string.Empty;
+    public string TargetScope { get; set; } = string.Empty; // "self", "party", "ally", "monster"
+    public string Category { get; set; } = string.Empty;
+    public int DurationSeconds { get; set; }
+    public bool IsPartyBuff { get; set; }
+    public bool IsStacking { get; set; }
+    public int MaxStacksObserved { get; set; }
+    public float? MinValue { get; set; }
+    public float? MaxValue { get; set; }
+    public long TimesSeen { get; set; }
+}
+
+/// <summary>
+/// Captures boss/monster skill animation & message triggers from `ct.anims` (animStr, msg, HP% window, cadence).
+/// Used to replay Ultra Boss cues (`Attack2`, `Charge`, `ChargeAttack2`, etc.) in multi-client simulations.
+/// </summary>
+public sealed class CapturedMonsterSkillEvent
+{
+    public string Key { get; set; } = string.Empty;
+    public string AnimStr { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public int CasterMapID { get; set; }
+    public long TimesObserved { get; set; }
+    public long IntervalSamples { get; set; }
+    public long TotalIntervalMs { get; set; }
+
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double AverageIntervalMs => IntervalSamples > 0
+        ? Math.Round((double)TotalIntervalMs / IntervalSamples, 0)
+        : 0.0;
+
+    public double? MinHpPercent { get; set; }
+    public double? MaxHpPercent { get; set; }
+    public int MaxTargetsHit { get; set; }
+    public HashSet<string> AurasInSameTick { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
+/// <summary>
+/// Captures map/boss safe-zone or hazard-zone packets (`cmd == "event"`, `args.zoneSet`: "A", "B", "").
+/// </summary>
+public sealed class CapturedZoneEvent
+{
+    public string ZoneSet { get; set; } = string.Empty;
+    public string Cell { get; set; } = string.Empty;
+    public long TimesObserved { get; set; }
+    public long IntervalSamples { get; set; }
+    public long TotalIntervalMs { get; set; }
+
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double AverageIntervalMs => IntervalSamples > 0
+        ? Math.Round((double)TotalIntervalMs / IntervalSamples, 0)
+        : 0.0;
+
+    public double? MinBossHpPercent { get; set; }
+    public double? MaxBossHpPercent { get; set; }
+}
+
+/// <summary>
+/// Empirical RNG & cadence metrics for Awe and Forge weapon procs (Spiral Carve, Awe Blast, Valiance, Dauntless, etc.).
+/// </summary>
+public sealed class CapturedProcStat
+{
+    public int ProcID { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public HashSet<string> ObservedAuraNames { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public long PlayerHitsWhileEquipped { get; set; }
+    public long ProcTriggersObserved { get; set; }
+
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double EstimatedTriggerRate => PlayerHitsWhileEquipped > 0
+        ? Math.Min(1.0, Math.Round((double)ProcTriggersObserved / PlayerHitsWhileEquipped, 4))
+        : 0.0;
+
+    public int DurationSeconds { get; set; }
+    public long IntervalSamples { get; set; }
+    public long TotalIntervalMs { get; set; }
+
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double AverageCooldownMs => IntervalSamples > 0
+        ? Math.Round((double)TotalIntervalMs / IntervalSamples, 0)
+        : 0.0;
+
+    public DateTime FirstSeenUtc { get; set; } = DateTime.UtcNow;
+    public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
+}
+
+public static class WeaponProcCatalog
+{
+    public static string GetProcName(int procId) => procId switch
+    {
+        1 => "Forge",
+        2 => "Spiral Carve",
+        3 => "Awe Blast",
+        4 => "Health Vamp",
+        5 => "Mana Vamp",
+        6 => "Powerword Die",
+        7 => "Lacerate",
+        8 => "Smite",
+        9 => "Valiance",
+        10 => "Arcana's Concerto",
+        11 => "Acheron",
+        12 => "Elysium",
+        13 => "Praxis",
+        14 => "Dauntless",
+        15 => "Ravenous",
+        _ => procId > 0 ? $"Proc_{procId}" : "None"
+    };
+
+    /// <summary>
+    /// Resolves a WeaponSpecial ProcID from an observed aura name (or verifies match with equipped ProcID).
+    /// </summary>
+    public static int ResolveProcIdFromAura(string? auraName, int equippedProcId = 0)
+    {
+        if (string.IsNullOrWhiteSpace(auraName))
+            return 0;
+
+        var n = auraName.Trim();
+        if (n.Contains("Spiral Carve", StringComparison.OrdinalIgnoreCase)) return 2;
+        if (n.Contains("Awe Blast", StringComparison.OrdinalIgnoreCase)) return 3;
+        if (n.Contains("Health Vamp", StringComparison.OrdinalIgnoreCase)) return 4;
+        if (n.Contains("Mana Vamp", StringComparison.OrdinalIgnoreCase)) return 5;
+        if (n.Contains("Powerword", StringComparison.OrdinalIgnoreCase)) return 6;
+        if (n.Equals("Lacerate", StringComparison.OrdinalIgnoreCase)) return 7;
+        if (n.Equals("Smite", StringComparison.OrdinalIgnoreCase)) return 8;
+        if (n.Equals("Valiance", StringComparison.OrdinalIgnoreCase) || n.Equals("Hero's Valiance", StringComparison.OrdinalIgnoreCase)) return 9;
+        if (n.Contains("Arcana", StringComparison.OrdinalIgnoreCase) && n.Contains("Concerto", StringComparison.OrdinalIgnoreCase)) return 10;
+        if (n.Equals("Acheron", StringComparison.OrdinalIgnoreCase) || n.Equals("Stygian", StringComparison.OrdinalIgnoreCase)) return 11;
+        if (n.Equals("Elysium", StringComparison.OrdinalIgnoreCase)) return 12;
+        if (n.Equals("Praxis", StringComparison.OrdinalIgnoreCase)) return 13;
+        if (n.Equals("Dauntless", StringComparison.OrdinalIgnoreCase) || n.Equals("Malice", StringComparison.OrdinalIgnoreCase)) return 14;
+        if (n.Equals("Ravenous", StringComparison.OrdinalIgnoreCase) || n.Equals("Famine", StringComparison.OrdinalIgnoreCase)) return 15;
+
+        if (equippedProcId > 0)
+        {
+            var expected = GetProcName(equippedProcId);
+            if (!string.IsNullOrEmpty(expected) && n.Contains(expected, StringComparison.OrdinalIgnoreCase))
+                return equippedProcId;
+        }
+        return 0;
+    }
 }

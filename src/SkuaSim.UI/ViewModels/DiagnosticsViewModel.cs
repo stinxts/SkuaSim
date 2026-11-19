@@ -12,8 +12,10 @@ public partial class DiagnosticsViewModel : ViewModelBase
 {
     private const int MaxUiLogRows = 4_000;
     private const int MaxUiWarningRows = 2_000;
+    private const int MaxUiTraceRows = 5_000;
 
     private IFileDialogService? _dialogService;
+    private SimulationReport? _lastReport;
 
     [ObservableProperty]
     public partial bool HasFatalError { get; set; }
@@ -46,7 +48,33 @@ public partial class DiagnosticsViewModel : ViewModelBase
     public partial string ErrorsTabHeader { get; set; } = "Errors & Diagnostics";
 
     [ObservableProperty]
+    public partial string TraceTabHeader { get; set; } = "API Trace (0)";
+
+    [ObservableProperty]
+    public partial string TraceFilter { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string SelectedTraceKind { get; set; } = "All";
+
+    [ObservableProperty]
+    public partial bool AutoScrollTrace { get; set; } = true;
+
+    [ObservableProperty]
+    public partial int TotalTraceCount { get; set; }
+
+    [ObservableProperty]
+    public partial string TraceNoticeText { get; set; } = "";
+
+    [ObservableProperty]
+    public partial bool HasReport { get; set; }
+
+    [ObservableProperty]
+    public partial string ExportStatusText { get; set; } = "";
+
+    [ObservableProperty]
     public partial int SelectedTabIndex { get; set; }
+
+    public IReadOnlyList<string> TraceKindOptions { get; } = new[] { "All", "api", "world", "log", "warn", "synth", "info" };
 
     public ObservableCollection<LogRowItem> AllLogs { get; } = new();
     public ObservableCollection<LogRowItem> FilteredLogs { get; } = new();
@@ -54,10 +82,20 @@ public partial class DiagnosticsViewModel : ViewModelBase
     public ObservableCollection<CompileErrorRowItem> CompileErrors { get; } = new();
     public ObservableCollection<DiagnosticRowItem> SynthesizedItems { get; } = new();
     public ObservableCollection<DiagnosticRowItem> UnimplementedCalls { get; } = new();
+    public ObservableCollection<TraceRowItem> AllTraceEntries { get; } = new();
+    public ObservableCollection<TraceRowItem> FilteredTraceEntries { get; } = new();
+    public ObservableCollection<DiagnosticRowItem> TopApiCalls { get; } = new();
 
     public void AttachDialogService(IFileDialogService dialogService) => _dialogService = dialogService;
 
     partial void OnLogFilterChanged(string value) => RebuildFilteredLogs();
+    partial void OnTraceFilterChanged(string value) => RebuildFilteredTrace();
+    partial void OnSelectedTraceKindChanged(string value) => RebuildFilteredTrace();
+    partial void OnHasReportChanged(bool value)
+    {
+        ExportMarkdownReportCommand.NotifyCanExecuteChanged();
+        ExportJsonReportCommand.NotifyCanExecuteChanged();
+    }
 
     public void Reset()
     {
@@ -67,6 +105,11 @@ public partial class DiagnosticsViewModel : ViewModelBase
         HasCompileErrors = false;
         TotalLogsCount = 0;
         TotalWarningsCount = 0;
+        TotalTraceCount = 0;
+        TraceNoticeText = "";
+        ExportStatusText = "";
+        _lastReport = null;
+        HasReport = false;
 
         AllLogs.Clear();
         FilteredLogs.Clear();
@@ -74,6 +117,37 @@ public partial class DiagnosticsViewModel : ViewModelBase
         CompileErrors.Clear();
         SynthesizedItems.Clear();
         UnimplementedCalls.Clear();
+        AllTraceEntries.Clear();
+        FilteredTraceEntries.Clear();
+        TopApiCalls.Clear();
+        UpdateTabHeaders();
+    }
+
+    public void AppendTimeline(IReadOnlyList<IndexedTraceEntry> entries, bool droppedAny)
+    {
+        if (droppedAny && string.IsNullOrEmpty(TraceNoticeText))
+            TraceNoticeText = "Ring buffer wrapped — showing most recent events.";
+
+        if (entries.Count == 0)
+            return;
+
+        var filter = (TraceFilter ?? "").Trim();
+        var kind = SelectedTraceKind ?? "All";
+        foreach (var item in entries)
+        {
+            var e = item.Entry;
+            var row = new TraceRowItem(item.Seq, e.Clock, e.Kind, e.Thread, e.Text);
+            AllTraceEntries.Add(row);
+            TotalTraceCount++;
+            if (MatchesTraceFilter(row, filter, kind))
+                FilteredTraceEntries.Add(row);
+        }
+
+        while (AllTraceEntries.Count > MaxUiTraceRows)
+            AllTraceEntries.RemoveAt(0);
+        while (FilteredTraceEntries.Count > MaxUiTraceRows)
+            FilteredTraceEntries.RemoveAt(0);
+
         UpdateTabHeaders();
     }
 
@@ -202,6 +276,16 @@ public partial class DiagnosticsViewModel : ViewModelBase
             CompileErrors.Clear();
         }
 
+        _lastReport = report;
+        HasReport = true;
+
+        var topCalls = report.TopApiCalls
+            .OrderByDescending(kv => kv.Value)
+            .Take(25)
+            .Select(kv => new DiagnosticRowItem("API", kv.Key, "", kv.Value))
+            .ToList();
+        SyncCollection(TopApiCalls, topCalls);
+
         SyncDiagnostics(report.SynthesizedData, report.UnimplementedCalls);
         UpdateTabHeaders();
     }
@@ -213,6 +297,60 @@ public partial class DiagnosticsViewModel : ViewModelBase
         FilteredLogs.Clear();
         TotalLogsCount = 0;
         UpdateTabHeaders();
+    }
+
+    [RelayCommand]
+    private void ClearTrace()
+    {
+        AllTraceEntries.Clear();
+        FilteredTraceEntries.Clear();
+        TotalTraceCount = 0;
+        TraceNoticeText = "";
+        UpdateTabHeaders();
+    }
+
+    private bool CanExportReport() => HasReport && _lastReport != null;
+
+    [RelayCommand(CanExecute = nameof(CanExportReport))]
+    private async Task ExportMarkdownReportAsync()
+    {
+        if (_dialogService == null || _lastReport == null)
+            return;
+
+        var baseName = Path.GetFileNameWithoutExtension(_lastReport.ScriptPath);
+        var path = await _dialogService.PickSaveFileAsync(
+            "Export Simulation Report (Markdown)",
+            Directory.Exists("data") ? Path.GetFullPath("data") : Directory.GetCurrentDirectory(),
+            $"{baseName}_report.md",
+            "md",
+            new[] { ("Markdown Report", new[] { "*.md" }), ("All Files", new[] { "*.*" }) });
+
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+
+        await File.WriteAllTextAsync(path, _lastReport.ToMarkdown());
+        ExportStatusText = $"Saved {Path.GetFileName(path)}";
+    }
+
+    [RelayCommand(CanExecute = nameof(CanExportReport))]
+    private async Task ExportJsonReportAsync()
+    {
+        if (_dialogService == null || _lastReport == null)
+            return;
+
+        var baseName = Path.GetFileNameWithoutExtension(_lastReport.ScriptPath);
+        var path = await _dialogService.PickSaveFileAsync(
+            "Export Simulation Report (JSON)",
+            Directory.Exists("data") ? Path.GetFullPath("data") : Directory.GetCurrentDirectory(),
+            $"{baseName}_report.json",
+            "json",
+            new[] { ("JSON Report", new[] { "*.json" }), ("All Files", new[] { "*.*" }) });
+
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+
+        await File.WriteAllTextAsync(path, _lastReport.ToJson());
+        ExportStatusText = $"Saved {Path.GetFileName(path)}";
     }
 
     [RelayCommand]
@@ -238,11 +376,32 @@ public partial class DiagnosticsViewModel : ViewModelBase
         row.Text.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
         row.Clock.Contains(filter, StringComparison.OrdinalIgnoreCase);
 
+    private void RebuildFilteredTrace()
+    {
+        var filter = (TraceFilter ?? "").Trim();
+        var kind = SelectedTraceKind ?? "All";
+        var next = AllTraceEntries.Where(t => MatchesTraceFilter(t, filter, kind)).ToList();
+        SyncCollection(FilteredTraceEntries, next);
+    }
+
+    private static bool MatchesTraceFilter(TraceRowItem row, string filter, string kind)
+    {
+        if (!string.Equals(kind, "All", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(row.Kind, kind, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return string.IsNullOrEmpty(filter) ||
+               row.Text.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+               row.Clock.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+               row.Kind.Contains(filter, StringComparison.OrdinalIgnoreCase);
+    }
+
     private void UpdateTabHeaders()
     {
         LogsTabHeader = $"Logs ({TotalLogsCount:N0})";
         var issueCount = (HasFatalError ? 1 : 0) + TotalWarningsCount + SynthesizedItems.Count;
         ErrorsTabHeader = issueCount > 0 ? $"Errors & Diagnostics ({issueCount})" : "Errors & Diagnostics";
+        TraceTabHeader = $"API Trace ({TotalTraceCount:N0})";
     }
 
     private static void SyncCollection<T>(ObservableCollection<T> target, IReadOnlyList<T> next)

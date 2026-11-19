@@ -90,6 +90,8 @@ public sealed class SimulationReport
         sb.AppendLine("|---|---|");
         sb.AppendLine($"| Final Location | `{FinalState.Map}-{FinalState.Room}` (`{FinalState.Cell}` / `{FinalState.Pad}`) |");
         sb.AppendLine($"| Player Level / Gold | Lv. {FinalState.Level} / {FinalState.Gold:N0} Gold |");
+        sb.AppendLine($"| Class / HP / Effective DPS | {FinalState.EquippedClass ?? "-"} (Rank {FinalState.ClassRank}) / {FinalState.Health:N0} / {FinalState.MaxHealth:N0} HP / {FinalState.EffectiveDps:N0} DPS |");
+        sb.AppendLine($"| Combat (Crits / Dodges / Healed) | {FinalState.PlayerCrits:N0} crits / {FinalState.PlayerDodges:N0} dodges / {FinalState.TotalHealingDone:N0} HP healed |");
         sb.AppendLine($"| Monsters Killed | {Kills:N0} |");
         sb.AppendLine($"| Player Deaths | {Deaths:N0} |");
         sb.AppendLine($"| Drops Picked Up | {DropsPicked:N0} |");

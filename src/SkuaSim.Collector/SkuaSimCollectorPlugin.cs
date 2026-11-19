@@ -24,18 +24,20 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
     private const string OptCombatDetails = "collect_combat_details";
     private const string OptFlushSeconds = "flush_interval_seconds";
     private const string OptMirrorFile = "mirror_file_path";
+    private const string OptPacketSchemas = "dev_capture_packet_schemas";
 
     public string Name => "SkuaSim Collector";
     public string Author => "SkuaSim";
-    public string Description => "Passive game data collector (maps, monsters, damage, drops, shops, and quests) for the SkuaSim test environment.";
+    public string Description => "Passive game data collector (maps, monsters, damage, drops, shops, quests, classes, auras, and procs) for the SkuaSim test environment.";
     public string OptionsStorage => "skuasim_collector_options";
 
     public List<IOption> Options { get; } = new()
     {
         new Option<bool>(OptEnabled, "Active Collection", "Enables or pauses passive background data collection.", true),
-        new Option<bool>(OptCombatDetails, "Combat Details", "Collects monster min/max/avg damage, attack intervals, and aura effects.", true),
+        new Option<bool>(OptCombatDetails, "Combat Details", "Collects monster min/max/avg damage, attack intervals, skill cues, zones, procs, and aura effects.", true),
         new Option<int>(OptFlushSeconds, "Save Interval (s)", "Interval in seconds to merge collected data into gamedata.json.", 30),
-        new Option<string>(OptMirrorFile, "Mirror File Path (Optional)", "Extra file path to mirror gamedata.json (e.g., SkuaSim project folder).", GetDefaultWorkspaceMirrorPath())
+        new Option<string>(OptMirrorFile, "Mirror File Path (Optional)", "Extra file path to mirror gamedata.json (e.g., SkuaSim project folder).", GetDefaultWorkspaceMirrorPath()),
+        new Option<bool>(OptPacketSchemas, "Packet Schema Sampler", "Accumulates strictly anonymized sample payloads per combat/boss/event packet type into packet_schemas.json across sessions (zero personal data).", true)
     };
 
     private IScriptInterface? _bot;
@@ -50,6 +52,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
     private Task? _flushTimerTask;
     private EventHandler? _processExitHandler;
     private volatile bool _runtimePaused;
+    private int _playerRefreshPending;
 
     public void Load(IServiceProvider provider, IPluginHelper helper)
     {
@@ -65,6 +68,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
         {
             CollectCombatDetails = GetBoolOption(OptCombatDetails, true)
         };
+        _engine.SchemaSampler.Enabled = GetBoolOption(OptPacketSchemas, true);
 
         _store = CreateStore();
 
@@ -174,6 +178,12 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
             if (args[0] is string rawJson && !string.IsNullOrWhiteSpace(rawJson))
             {
                 EnqueueWork(() => _engine.ProcessExtensionPacketJson(rawJson));
+                if (rawJson.Contains("\"updateClass\"", StringComparison.Ordinal) ||
+                    rawJson.Contains("\"equipItem\"", StringComparison.Ordinal) ||
+                    rawJson.Contains("\"sAct\"", StringComparison.Ordinal))
+                {
+                    SchedulePlayerStateRefresh(delayMs: 350);
+                }
             }
         }
         else if (string.Equals(name, "packet", StringComparison.Ordinal))
@@ -329,6 +339,37 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
         }, token);
     }
 
+    private void SchedulePlayerStateRefresh(int delayMs)
+    {
+        if (Interlocked.CompareExchange(ref _playerRefreshPending, 1, 0) != 0)
+            return;
+
+        var token = _cts?.Token ?? CancellationToken.None;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (delayMs > 0)
+                    await Task.Delay(delayMs, token).ConfigureAwait(false);
+
+                if (token.IsCancellationRequested || !IsCollectingActive())
+                    return;
+
+                var bot = _bot;
+                if (bot is { Player.LoggedIn: true })
+                    CaptureLivePlayerSnapshot(bot);
+            }
+            catch
+            {
+                // Ignore transient errors during class/item transitions
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _playerRefreshPending, 0);
+            }
+        }, token);
+    }
+
     private Skua.Core.Models.Quests.Quest? TryFindQuestInTree(int questId)
     {
         try
@@ -388,6 +429,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                     break;
 
                 _engine.CollectCombatDetails = GetBoolOption(OptCombatDetails, true);
+                _engine.SchemaSampler.Enabled = GetBoolOption(OptPacketSchemas, true);
                 if (IsCollectingActive() && _bot is { Player.LoggedIn: true })
                 {
                     CaptureLivePlayerSnapshot(_bot);
@@ -410,11 +452,27 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
     {
         try
         {
+            var store = _store ?? CreateStore();
+            _store = store;
+
+            if (_engine.SchemaSampler.HasPendingFlush)
+            {
+                try
+                {
+                    var primaryDir = Path.GetDirectoryName(store.PrimaryFilePath) ?? GetPrimaryDataDirectory();
+                    var primarySchema = Path.Combine(primaryDir, "packet_schemas.json");
+                    var mirrorSchemas = store.MirrorFilePaths
+                        .Select(p => Path.GetDirectoryName(p))
+                        .Where(d => !string.IsNullOrWhiteSpace(d))
+                        .Select(d => Path.Combine(d!, "packet_schemas.json"));
+                    _engine.SchemaSampler.FlushToFiles(primarySchema, mirrorSchemas);
+                }
+                catch { }
+            }
+
             if (!_engine.HasPendingChanges())
                 return null;
 
-            var store = _store ?? CreateStore();
-            _store = store;
             var delta = _engine.TakeDeltaSnapshot();
             return store.FlushDelta(delta);
         }
@@ -448,7 +506,8 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                     $"• Cataloged Items: {db.Items.Count} ({totalDrops} drops)\n" +
                     $"• Captured Shops: {db.Shops.Count}\n" +
                     $"• Captured Quests: {db.Quests.Count}\n" +
-                    $"• Captured Classes: {db.Classes.Count} ({db.Enhancements.Count} enh patterns)\n\n" +
+                    $"• Captured Classes: {db.Classes.Count} ({db.Enhancements.Count} enh, {db.Procs.Count} procs)\n" +
+                    $"• Packet Schemas: {(_engine.SchemaSampler.Enabled ? $"ON ({_engine.SchemaSampler.TotalSamplesCaptured} session samples)" : "OFF")}\n\n" +
                     $"=== Current Session (PID {Environment.ProcessId}) ===\n" +
                     $"• Processed Packets: {_engine.SessionPacketsProcessed}\n" +
                     $"• Visited Maps: {_engine.SessionMapsVisited}\n" +
@@ -456,7 +515,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                     $"• Recorded Drops: {_engine.SessionDropsRecorded}\n\n" +
                     $"Primary File:\n{store.PrimaryFilePath}";
 
-                Log($"[SkuaSim Collector] Maps={db.Maps.Count}, Monsters={db.Monsters.Count}, Kills={totalKills}, Items={db.Items.Count}, Shops={db.Shops.Count}, Quests={db.Quests.Count}, Classes={db.Classes.Count}, Enh={db.Enhancements.Count}");
+                Log($"[SkuaSim Collector] Maps={db.Maps.Count}, Monsters={db.Monsters.Count}, Kills={totalKills}, Items={db.Items.Count}, Shops={db.Shops.Count}, Quests={db.Quests.Count}, Classes={db.Classes.Count}, Enh={db.Enhancements.Count}, Procs={db.Procs.Count}");
 
                 if (_bot == null)
                     return;
@@ -579,12 +638,13 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
 
             var currentClass = bot.Player.CurrentClass;
             var className = currentClass?.Name;
+            var username = bot.Player.Username;
             var level = bot.Player.Level;
             var maxHp = bot.Player.MaxHealth;
             var stats = bot.Player.Stats;
             var skills = bot.Player.Skills;
 
-            int weaponEnhPat = 0, weaponEnhLvl = 0;
+            int weaponEnhPat = 0, weaponEnhLvl = 0, weaponProcId = 0;
             int classEnhPat = currentClass?.EnhancementPatternID ?? 0;
             int classEnhLvl = currentClass?.EnhancementLevel ?? 0;
             int helmEnhPat = 0, helmEnhLvl = 0;
@@ -602,6 +662,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                     {
                         weaponEnhPat = item.EnhancementPatternID;
                         weaponEnhLvl = item.EnhancementLevel;
+                        weaponProcId = item.ProcID;
                     }
                     else if (string.Equals(item.CategoryString, "Class", StringComparison.OrdinalIgnoreCase))
                     {
@@ -635,7 +696,9 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                 helmEnhPat,
                 helmEnhLvl,
                 capeEnhPat,
-                capeEnhLvl));
+                capeEnhLvl,
+                username,
+                weaponProcId));
         }
         catch
         {

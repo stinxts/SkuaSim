@@ -88,15 +88,28 @@ public sealed class SimulationHostService : IDisposable
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    public Task<ScriptInspectionResult> InspectScriptAsync(string scriptPath)
+    {
+        var runner = EnsureRunner();
+        return Task.Run(() => runner.InspectScript(scriptPath));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public SimulationSession StartSimulation(string scriptPath, string? scenarioPath, int? seedOverride, double speedMultiplier)
     {
-        DisposeActiveSession();
-
-        var runner = EnsureRunner();
         var scenario = !string.IsNullOrWhiteSpace(scenarioPath) && File.Exists(scenarioPath)
             ? LoadScenario(scenarioPath)
             : new Scenario { Name = Path.GetFileNameWithoutExtension(scriptPath) };
 
+        return StartSimulation(scriptPath, scenario, seedOverride, speedMultiplier);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public SimulationSession StartSimulation(string scriptPath, Scenario scenario, int? seedOverride, double speedMultiplier)
+    {
+        DisposeActiveSession();
+
+        var runner = EnsureRunner();
         var session = runner.Start(
             new SimulationRunOptions
             {
@@ -112,6 +125,9 @@ public sealed class SimulationHostService : IDisposable
         _activeSession = session;
         return session;
     }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public Scenario LoadScenarioFile(string path) => Scenario.Load(path);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static Scenario LoadScenario(string path) => Scenario.Load(path);

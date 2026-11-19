@@ -20,12 +20,12 @@ An **offline, reproducible test environment** for **any Skua/VibeSkua script**, 
 ## Phases (see `PLAN.md` for details)
 1. **MVP**: `//cs_include` loader + Roslyn compiler against real Skua DLLs + core `FakeScriptInterface` + virtual clock + execution trace (✅ Done)
 2. **Data-Driven World**: import `QuestData.json` + Collector database (`gamedata.json`) + JSON scenario format (✅ Done)
-3. **Visual Interface (`SkuaSim.UI`)**: standalone Avalonia dashboard ("Skua without Flash") with live state, logs, and error/trace inspector
+3. **Visual Interface (`SkuaSim.UI`)**: standalone Avalonia dashboard ("Skua without Flash") with live client/AQW stats state, visual Scenario & Script Options editor, logs, searchable API Trace, error inspector, and report export (✅ Done)
 4. **Multi-Client (Army)**: N clients, shared rooms, party & synchronization testing
 5. **Fault Injection, Assertions & Templates**: lag/disconnect/drop failure injection, stall/infinite-loop detector, scenario assertions, diagnostic generator & bug report template
 6. **Replay & Public Release**: real session log replay + external developer distribution packaging (CLI flags, official Skua parity, starter DB, README, license)
 
-Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** ✅ → **Visual UI / Multi-Client / Asserts / Release Packaging**.
+Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** ✅ → **Visual UI (`SkuaSim.UI`)** ✅ → **Multi-Client (Army) / Asserts / Release Packaging**.
 
 ## Environment Discovered (2026-11-18)
 - **.NET SDK 10.0.400** installed.

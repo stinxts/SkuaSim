@@ -75,6 +75,20 @@
                                 </StackPanel>
                             </Grid>
                         </Border>
+
+                        <!-- AQW Live Stats & Combat Telemetry -->
+                        <Border Classes="SubCard">
+                            <StackPanel Spacing="4">
+                                <Grid ColumnDefinitions="*,Auto">
+                                    <TextBlock Text="AQW Stats &amp; Combat" Classes="MetricLabel" FontWeight="SemiBold" Foreground="#93C5FD" />
+                                    <TextBlock Grid.Column="1" Text="{Binding EffectiveDpsText}" FontSize="11" FontWeight="SemiBold" FontFamily="Consolas, monospace" Foreground="#FB923C" />
+                                </Grid>
+                                <TextBlock Text="{Binding PowerStatsText}" FontSize="11" FontFamily="Consolas, monospace" Foreground="#E2E8F0" />
+                                <TextBlock Text="{Binding SecondaryStatsText}" FontSize="11" FontFamily="Consolas, monospace" Foreground="#38BDF8" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding PrimaryStatsText}" FontSize="10" FontFamily="Consolas, monospace" Foreground="#94A3B8" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding CombatCountersText}" FontSize="10" FontFamily="Consolas, monospace" Foreground="#4ADE80" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                 </Border>
 

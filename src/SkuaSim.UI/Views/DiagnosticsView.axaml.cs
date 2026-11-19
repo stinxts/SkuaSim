@@ -17,11 +17,17 @@ public partial class DiagnosticsView : UserControl
     private void OnDataContextChanged(object? sender, EventArgs e)
     {
         if (_subscribedVm != null)
+        {
             _subscribedVm.FilteredLogs.CollectionChanged -= OnLogsCollectionChanged;
+            _subscribedVm.FilteredTraceEntries.CollectionChanged -= OnTraceCollectionChanged;
+        }
 
         _subscribedVm = DataContext as DiagnosticsViewModel;
         if (_subscribedVm != null)
+        {
             _subscribedVm.FilteredLogs.CollectionChanged += OnLogsCollectionChanged;
+            _subscribedVm.FilteredTraceEntries.CollectionChanged += OnTraceCollectionChanged;
+        }
     }
 
     private void OnLogsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -31,6 +37,16 @@ public partial class DiagnosticsView : UserControl
             vm.FilteredLogs.Count > 0)
         {
             LogsListBox.ScrollIntoView(vm.FilteredLogs[^1]);
+        }
+    }
+
+    private void OnTraceCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (_subscribedVm is { AutoScrollTrace: true } vm &&
+            e.Action == NotifyCollectionChangedAction.Add &&
+            vm.FilteredTraceEntries.Count > 0)
+        {
+            TraceListBox.ScrollIntoView(vm.FilteredTraceEntries[^1]);
         }
     }
 }

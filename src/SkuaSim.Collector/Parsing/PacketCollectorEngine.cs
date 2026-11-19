@@ -80,7 +80,8 @@ public sealed partial class PacketCollectorEngine
                 || _delta.Shops.Count > 0
                 || _delta.Quests.Count > 0
                 || _delta.Classes.Count > 0
-                || _delta.Enhancements.Count > 0;
+                || _delta.Enhancements.Count > 0
+                || _delta.Procs.Count > 0;
         }
     }
 
@@ -129,8 +130,19 @@ public sealed partial class PacketCollectorEngine
                     HandleMoveToArea(dataObj);
                     break;
                 case "ct":
-                    HandleCombatTick(dataObj);
-                    HandlePlayerCombatTick(dataObj);
+                    var procsRecordedThisTick = new HashSet<int>();
+                    HandleCombatTick(dataObj, procsRecordedThisTick);
+                    HandlePlayerCombatTick(dataObj, procsRecordedThisTick);
+                    SampleCombatPacketSchema(dataObj);
+                    break;
+                case "event":
+                    HandleZoneEventPacket(dataObj);
+                    break;
+                case "updateClass":
+                    HandleUpdateClassPacket(dataObj);
+                    break;
+                case "equipItem":
+                    HandleEquipItemPacket(dataObj);
                     break;
                 case "sAct":
                     HandleSkillActionsPacket(dataObj);
@@ -511,6 +523,7 @@ public sealed partial class PacketCollectorEngine
         _currentCell = "Enter";
         _currentPad = "Spawn";
         _mapMonsters.Clear();
+        _lastSelfHp = -1;
 
         var map = GetOrCreateMap(normMap);
         map.Visits++;
@@ -601,16 +614,18 @@ public sealed partial class PacketCollectorEngine
         }
     }
 
-    private void HandleCombatTick(JObject dataObj)
+    private void HandleCombatTick(JObject dataObj, HashSet<int> procsRecordedThisTick)
     {
         var now = DateTime.UtcNow;
+        var monsterAurasThisTick = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var monsterTargetsThisTick = new Dictionary<int, HashSet<string>>();
 
         // 1. Direct action array "a"
         if (dataObj["a"] is JArray aArray)
         {
             foreach (var act in aArray.OfType<JObject>())
             {
-                ProcessCombatAction(act, null, now);
+                ProcessCombatAction(act, null, now, monsterAurasThisTick, monsterTargetsThisTick, procsRecordedThisTick);
             }
         }
 
@@ -624,35 +639,41 @@ public sealed partial class PacketCollectorEngine
                 {
                     foreach (var act in innerActions.OfType<JObject>())
                     {
-                        ProcessCombatAction(act, outerCaster, now);
+                        ProcessCombatAction(act, outerCaster, now, monsterAurasThisTick, monsterTargetsThisTick, procsRecordedThisTick);
                     }
                 }
             }
         }
 
-        // 3. Animations / special boss messages "anims"
+        // 3. Monster attacks, dodges, misses & DoT/HoT ticks in "sara" (actionResult entries)
+        if (dataObj["sara"] is JArray saraArray)
+        {
+            foreach (var saraEntry in saraArray.OfType<JObject>())
+            {
+                var actionObj = saraEntry["actionResult"] as JObject ?? saraEntry;
+                var outerCaster = saraEntry["cInf"]?.ToString();
+                ProcessCombatAction(actionObj, outerCaster, now, monsterAurasThisTick, monsterTargetsThisTick, procsRecordedThisTick);
+            }
+        }
+
+        // Update AoE MaxTargetsHit across all distinct player targets hit by each monster in this tick
+        foreach (var (monMapId, targetSet) in monsterTargetsThisTick)
+        {
+            if (targetSet.Count > 0)
+            {
+                var mon = ResolveMonsterByMapId(monMapId);
+                if (mon != null && targetSet.Count > mon.Combat.MaxTargetsHit)
+                    mon.Combat.MaxTargetsHit = targetSet.Count;
+            }
+        }
+
+        // 4. Animations / special boss messages "anims" (captures non-generic animStr and msg)
         if (dataObj["anims"] is JArray animsArray)
         {
-            foreach (var anim in animsArray.OfType<JObject>())
-            {
-                var msg = anim["msg"]?.ToString();
-                if (string.IsNullOrWhiteSpace(msg))
-                    continue;
-
-                var cInf = anim["cInf"]?.ToString();
-                var targetMon = ResolveMonsterFromEntityRef(cInf) ?? GetMonstersInCell(_currentCell).FirstOrDefault();
-                if (targetMon != null)
-                {
-                    targetMon.SpecialMessages[msg] = targetMon.SpecialMessages.GetValueOrDefault(msg) + 1;
-                    if (msg.Contains("counter attack", StringComparison.OrdinalIgnoreCase))
-                    {
-                        targetMon.Combat.CounterAttacksObserved++;
-                    }
-                }
-            }
+            HandleCombatAnimations(animsArray, now, monsterAurasThisTick);
         }
 
-        // 4. Monster HP state updates "m"
+        // 5. Monster HP state updates "m"
         if (dataObj["m"] is JObject mObj)
         {
             foreach (var prop in mObj.Properties())
@@ -677,10 +698,17 @@ public sealed partial class PacketCollectorEngine
         }
     }
 
-    private void ProcessCombatAction(JObject act, string? fallbackCaster, DateTime now)
+    private void ProcessCombatAction(
+        JObject act,
+        string? fallbackCaster,
+        DateTime now,
+        HashSet<string> monsterAurasThisTick,
+        Dictionary<int, HashSet<string>> monsterTargetsThisTick,
+        HashSet<int> procsRecordedThisTick)
     {
         var cInf = act["cInf"]?.ToString() ?? fallbackCaster ?? string.Empty;
         var tInf = act["tInf"]?.ToString() ?? string.Empty;
+        var actionCmd = act["cmd"]?.ToString();
 
         // Check if this action is a monster death notification (typ == "m" && hp/intState)
         var typ = act["typ"]?.ToString();
@@ -696,17 +724,39 @@ public sealed partial class PacketCollectorEngine
         if (!CollectCombatDetails)
             return;
 
-        // Monster attacking a player
-        if (cInf.StartsWith("m:", StringComparison.OrdinalIgnoreCase) &&
-            tInf.StartsWith("p:", StringComparison.OrdinalIgnoreCase))
+        // Monster attacking one or more players (ignore pure aura entries & DoT/HoT ticks)
+        var targets = SplitEntityRefs(tInf);
+        var playerTargets = targets.Where(t => t.StartsWith("p:", StringComparison.OrdinalIgnoreCase)).ToList();
+        var rawType = act["type"]?.ToString();
+        var isDotHotTick = string.IsNullOrEmpty(rawType) && string.Equals(typ, "d", StringComparison.OrdinalIgnoreCase);
+
+        if (!IsAuraOnlyAction(act) &&
+            !isDotHotTick &&
+            cInf.StartsWith("m:", StringComparison.OrdinalIgnoreCase) &&
+            playerTargets.Count > 0)
         {
             if (int.TryParse(cInf.AsSpan(2), out var monMapId))
             {
                 var mon = ResolveMonsterByMapId(monMapId);
                 if (mon != null)
                 {
-                    var hitType = (act["type"]?.ToString() ?? "hit").ToLowerInvariant();
-                    var hp = ParseInt(act["hp"]);
+                    var hitType = (rawType ?? "hit").ToLowerInvariant();
+                    var hp = ParseInt(act["hp"] ?? act["d"]);
+
+                    // Ignore non-damaging "none" buff/cast markers with 0 hp
+                    if (hitType == "none" && hp == 0)
+                        goto ProcessAuras;
+
+                    if (!monsterTargetsThisTick.TryGetValue(monMapId, out var tSet))
+                    {
+                        tSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        monsterTargetsThisTick[monMapId] = tSet;
+                    }
+                    foreach (var pt in playerTargets)
+                        tSet.Add(pt);
+
+                    if (playerTargets.Count > mon.Combat.MaxTargetsHit)
+                        mon.Combat.MaxTargetsHit = playerTargets.Count;
 
                     mon.Combat.AttacksObserved++;
                     switch (hitType)
@@ -760,61 +810,18 @@ public sealed partial class PacketCollectorEngine
             }
         }
 
-        // Auras applied in this action
+        ProcessAuras:
+        // Auras applied in this action (monster, player/party, and weapon procs)
         if (act["aura"] is JObject singleAura)
         {
-            ProcessAuraObject(singleAura, cInf, tInf);
+            ProcessAuraObjectEnhanced(singleAura, cInf, tInf, actionCmd, now, monsterAurasThisTick, procsRecordedThisTick);
         }
         if (act["auras"] is JArray aurasArray)
         {
             foreach (var auraObj in aurasArray.OfType<JObject>())
             {
-                ProcessAuraObject(auraObj, cInf, tInf);
+                ProcessAuraObjectEnhanced(auraObj, cInf, tInf, actionCmd, now, monsterAurasThisTick, procsRecordedThisTick);
             }
-        }
-    }
-
-    private void ProcessAuraObject(JObject auraObj, string cInf, string tInf)
-    {
-        var auraName = auraObj["nam"]?.ToString();
-        if (string.IsNullOrWhiteSpace(auraName))
-            return;
-
-        // Only record auras when a monster is the caster or target (or if it's a Counter Attack aura)
-        var monster = ResolveMonsterFromEntityRef(cInf) ?? ResolveMonsterFromEntityRef(tInf);
-        if (monster == null && auraName.Equals("Counter Attack", StringComparison.OrdinalIgnoreCase))
-        {
-            monster = GetMonstersInCell(_currentCell).FirstOrDefault();
-        }
-        if (monster == null)
-            return;
-
-        if (!monster.Auras.TryGetValue(auraName, out var auraStat))
-        {
-            auraStat = new CapturedAuraStat { Name = auraName };
-            monster.Auras[auraName] = auraStat;
-        }
-
-        auraStat.TargetType = tInf.StartsWith("m:", StringComparison.OrdinalIgnoreCase) ? "monster" : "player";
-        var cat = auraObj["cat"]?.ToString();
-        if (!string.IsNullOrWhiteSpace(cat))
-            auraStat.Category = cat;
-
-        var dur = ParseInt(auraObj["dur"]);
-        if (dur > 0)
-            auraStat.DurationSeconds = dur;
-
-        if (auraObj["val"] != null && float.TryParse(auraObj["val"]?.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var val))
-        {
-            auraStat.MinValue = auraStat.MinValue.HasValue ? Math.Min(auraStat.MinValue.Value, val) : val;
-            auraStat.MaxValue = auraStat.MaxValue.HasValue ? Math.Max(auraStat.MaxValue.Value, val) : val;
-        }
-
-        auraStat.TimesSeen++;
-        if (auraName.Equals("Counter Attack", StringComparison.OrdinalIgnoreCase))
-        {
-            auraStat.IsCounterAttack = true;
-            monster.Combat.CounterAttacksObserved++;
         }
     }
 

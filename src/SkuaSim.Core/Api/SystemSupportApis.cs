@@ -168,8 +168,8 @@ public sealed class ManagerApi : ApiBase
     public bool ScriptRunning => !Ctx.StopRequested;
     public string LoadedScript => Ctx.LoadedScriptPath ?? "SimScript.cs";
     public string CompiledScript => LoadedScript;
-    public IScriptOptionContainer Config { get => Bot.Config; set { } }
-    public IScriptOptionContainer RunningConfig => Bot.Config;
+    public IScriptOptionContainer Config { get => Bot.Config!; set { } }
+    public IScriptOptionContainer RunningConfig => Bot.Config!;
 
     public Task RestartScriptAsync()
     {

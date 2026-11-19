@@ -9,17 +9,34 @@ public sealed partial class PacketCollectorEngine
 {
     // Strictly ephemeral in-memory player state (NEVER persisted to GameDatabase / disk).
     private int _selfPlayerEntityId;
+    private string _selfUsername = string.Empty;
     private string _currentClassName = string.Empty;
     private int _currentLevel;
     private int _currentMaxHealth;
     private int _weaponEnhPattern;
     private int _weaponEnhLevel;
+    private int _weaponProcId;
     private int _classEnhPattern;
     private int _classEnhLevel;
     private int _helmEnhPattern;
     private int _helmEnhLevel;
     private int _capeEnhPattern;
     private int _capeEnhLevel;
+    private bool _classSyncPending;
+    private DateTime _classSyncPendingSinceUtc = DateTime.MinValue;
+
+    private bool IsClassSyncPending()
+    {
+        if (!_classSyncPending)
+            return false;
+        // Safety auto-clear after 2s so a missed updateClass packet never stalls collection
+        if ((DateTime.UtcNow - _classSyncPendingSinceUtc).TotalSeconds > 2.0)
+        {
+            _classSyncPending = false;
+            return false;
+        }
+        return true;
+    }
 
     /// <summary>
     /// Updates ephemeral combat context so outgoing/incoming combat events, stat updates,
@@ -38,14 +55,24 @@ public sealed partial class PacketCollectorEngine
         int helmEnhPattern = 0,
         int helmEnhLevel = 0,
         int capeEnhPattern = 0,
-        int capeEnhLevel = 0)
+        int capeEnhLevel = 0,
+        string? selfUsername = null,
+        int weaponProcId = 0)
     {
         lock (_sync)
         {
             if (selfEntityId is > 0)
                 _selfPlayerEntityId = selfEntityId.Value;
+            if (!string.IsNullOrWhiteSpace(selfUsername))
+                _selfUsername = selfUsername.Trim();
             if (!string.IsNullOrWhiteSpace(className))
-                _currentClassName = className.Trim();
+            {
+                var trimmed = className.Trim();
+                if (!string.Equals(_currentClassName, trimmed, StringComparison.OrdinalIgnoreCase))
+                    _lastSelfHp = -1;
+                _currentClassName = trimmed;
+                _classSyncPending = false;
+            }
             if (level > 0)
                 _currentLevel = Math.Clamp(level, 1, 100);
             if (maxHealth > 0)
@@ -53,6 +80,7 @@ public sealed partial class PacketCollectorEngine
 
             _weaponEnhPattern = Math.Max(0, weaponEnhPattern);
             _weaponEnhLevel = Math.Max(0, weaponEnhLevel);
+            _weaponProcId = Math.Max(0, weaponProcId);
             _classEnhPattern = Math.Max(0, classEnhPattern);
             _classEnhLevel = Math.Max(0, classEnhLevel);
             _helmEnhPattern = Math.Max(0, helmEnhPattern);
@@ -80,14 +108,17 @@ public sealed partial class PacketCollectorEngine
         int helmEnhPattern = 0,
         int helmEnhLevel = 0,
         int capeEnhPattern = 0,
-        int capeEnhLevel = 0)
+        int capeEnhLevel = 0,
+        string? selfUsername = null,
+        int weaponProcId = 0)
     {
         SetPlayerCombatContext(
             selfEntityId, className, level, maxHealth,
             weaponEnhPattern, weaponEnhLevel,
             classEnhPattern, classEnhLevel,
             helmEnhPattern, helmEnhLevel,
-            capeEnhPattern, capeEnhLevel);
+            capeEnhPattern, capeEnhLevel,
+            selfUsername, weaponProcId);
 
         lock (_sync)
         {
@@ -156,6 +187,80 @@ public sealed partial class PacketCollectorEngine
         }
     }
 
+    internal void HandleUpdateClassPacket(JObject dataObj)
+    {
+        var uid = ParseInt(dataObj["uid"]);
+        if (uid > 0 && _selfPlayerEntityId > 0 && uid != _selfPlayerEntityId)
+            return;
+
+        var className = dataObj["sClassName"]?.ToString()
+                     ?? dataObj["strClassName"]?.ToString()
+                     ?? dataObj["sClass"]?.ToString()
+                     ?? dataObj["sName"]?.ToString();
+
+        if (!string.IsNullOrWhiteSpace(className))
+        {
+            var trimmed = className.Trim();
+            if (!string.Equals(_currentClassName, trimmed, StringComparison.OrdinalIgnoreCase))
+            {
+                _currentClassName = trimmed;
+                _lastSelfHp = -1;
+            }
+            _classSyncPending = false;
+        }
+
+        SchemaSampler.TryCapture("updateClass_sample", "updateClass", dataObj, _selfPlayerEntityId, _selfUsername, _currentMapName);
+    }
+
+    internal void HandleEquipItemPacket(JObject dataObj)
+    {
+        var uid = ParseInt(dataObj["uid"]);
+        if (uid > 0 && _selfPlayerEntityId > 0 && uid != _selfPlayerEntityId)
+            return;
+
+        var slot = dataObj["strES"]?.ToString() ?? dataObj["sES"]?.ToString() ?? string.Empty;
+        var enhPat = ParseInt(dataObj["EnhPatternID"], -1);
+        var enhLvl = ParseInt(dataObj["iLvl"], -1);
+        var procId = ParseInt(dataObj["ProcID"], -1);
+
+        if (slot.Equals("ar", StringComparison.OrdinalIgnoreCase))
+        {
+            var name = dataObj["sName"]?.ToString() ?? dataObj["strName"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                _currentClassName = name.Trim();
+                _classSyncPending = false;
+            }
+            else
+            {
+                // Class swap started; pause class attribution briefly until updateClass / live snapshot provides the new class name
+                _classSyncPending = true;
+                _classSyncPendingSinceUtc = DateTime.UtcNow;
+            }
+            _lastSelfHp = -1;
+            if (enhPat >= 0) _classEnhPattern = enhPat;
+            if (enhLvl > 0) _classEnhLevel = enhLvl;
+        }
+        else if (slot.Equals("Weapon", StringComparison.OrdinalIgnoreCase))
+        {
+            if (enhPat >= 0) _weaponEnhPattern = enhPat;
+            if (enhLvl > 0) _weaponEnhLevel = enhLvl;
+            if (procId >= 0) _weaponProcId = procId;
+        }
+        else if (slot.Equals("he", StringComparison.OrdinalIgnoreCase))
+        {
+            if (enhPat >= 0) _helmEnhPattern = enhPat;
+            if (enhLvl > 0) _helmEnhLevel = enhLvl;
+        }
+        else if (slot.Equals("ba", StringComparison.OrdinalIgnoreCase))
+        {
+            if (enhPat >= 0) _capeEnhPattern = enhPat;
+            if (enhLvl > 0) _capeEnhLevel = enhLvl;
+        }
+
+        SchemaSampler.TryCapture("equipItem_sample", "equipItem", dataObj, _selfPlayerEntityId, _selfUsername, _currentMapName);
+    }
+
     internal void HandleSkillActionsPacket(JObject dataObj)
     {
         var actions = dataObj["actions"] as JObject;
@@ -164,9 +269,18 @@ public sealed partial class PacketCollectorEngine
 
         lock (_sync)
         {
-            var className = dataObj["sClass"]?.ToString();
-            if (string.IsNullOrWhiteSpace(className))
-                className = _currentClassName;
+            var explicitClass = dataObj["sClass"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(explicitClass))
+            {
+                _currentClassName = explicitClass.Trim();
+                _classSyncPending = false;
+            }
+            else if (IsClassSyncPending())
+            {
+                return;
+            }
+
+            var className = !string.IsNullOrWhiteSpace(explicitClass) ? explicitClass : _currentClassName;
             if (string.IsNullOrWhiteSpace(className))
                 return;
 
@@ -229,6 +343,8 @@ public sealed partial class PacketCollectorEngine
                 if (passives.Count > 0)
                     cls.Passives = passives;
             }
+
+            SchemaSampler.TryCapture("sAct_sample", "sAct", dataObj, _selfPlayerEntityId, _selfUsername, _currentMapName);
         }
     }
 
@@ -240,7 +356,11 @@ public sealed partial class PacketCollectorEngine
 
         lock (_sync)
         {
-            if (string.IsNullOrWhiteSpace(_currentClassName) || _currentLevel <= 0)
+            var uid = ParseInt(dataObj["uid"]);
+            if (uid > 0 && _selfPlayerEntityId > 0 && uid != _selfPlayerEntityId)
+                return;
+
+            if (IsClassSyncPending() || string.IsNullOrWhiteSpace(_currentClassName) || _currentLevel <= 0)
                 return;
 
             var cls = GetOrCreateClassDelta(_currentClassName);
@@ -260,64 +380,110 @@ public sealed partial class PacketCollectorEngine
                 critChance: ParseDoubleSafe(sta["$tcr"], 0),
                 critMult: ParseDoubleSafe(sta["$scm"], 1.5),
                 evasionChance: ParseDoubleSafe(sta["$tdo"], 0));
+
+            SchemaSampler.TryCapture("stu_sample", "stu", dataObj, _selfPlayerEntityId, _selfUsername, _currentMapName);
         }
     }
 
-    internal void HandlePlayerCombatTick(JObject dataObj)
+    internal void HandlePlayerCombatTick(JObject dataObj, HashSet<int> procsRecordedThisTick)
     {
         if (!CollectCombatDetails)
             return;
 
         lock (_sync)
         {
-            if (_selfPlayerEntityId <= 0 || string.IsNullOrWhiteSpace(_currentClassName))
+            if (IsClassSyncPending() ||
+                (_selfPlayerEntityId <= 0 && string.IsNullOrWhiteSpace(_selfUsername)) ||
+                string.IsNullOrWhiteSpace(_currentClassName))
                 return;
 
-            var selfRef = $"p:{_selfPlayerEntityId}";
             var cls = GetOrCreateClassDelta(_currentClassName);
             var level = Math.Max(1, _currentLevel);
+            var now = DateTime.UtcNow;
+            var sawExplicitHeal = false;
+            var sawExplicitMonsterDmgToSelf = false;
+            var sawSelfInflictedDmg = false;
+            var hasSelfSarsaCast = false;
+            var hasSaraInTick = dataObj["sara"] is JArray sArr && sArr.Count > 0;
 
             if (dataObj["a"] is JArray aArr)
             {
                 foreach (var act in aArr.OfType<JObject>())
-                    ProcessPlayerCombatEntry(act, null, selfRef, cls, level);
+                    ProcessPlayerCombatEntry(act, null, 0, cls, level, now, procsRecordedThisTick, ref sawExplicitHeal, ref sawExplicitMonsterDmgToSelf, ref sawSelfInflictedDmg);
             }
 
-            // Newer AQW combat payloads may place nested "a" under "sarsa"
+            // Player skill action results under "sarsa"
             if (dataObj["sarsa"] is JArray sarsaArr)
             {
                 foreach (var entry in sarsaArr.OfType<JObject>())
                 {
                     var caster = entry["cInf"]?.ToString();
+                    var outerActId = ParseInt(entry["actID"], 0);
+                    if (!string.IsNullOrWhiteSpace(caster) && IsSelfEntityRef(caster))
+                        hasSelfSarsaCast = true;
                     if (entry["a"] is JArray nested)
                     {
                         foreach (var act in nested.OfType<JObject>())
-                            ProcessPlayerCombatEntry(act, caster, selfRef, cls, level);
+                            ProcessPlayerCombatEntry(act, caster, outerActId, cls, level, now, procsRecordedThisTick, ref sawExplicitHeal, ref sawExplicitMonsterDmgToSelf, ref sawSelfInflictedDmg);
                     }
                 }
             }
+
+            // Monster attacks, dodges, misses & DoT/HoT ticks under "sara" (actionResult entries)
+            if (dataObj["sara"] is JArray saraArr)
+            {
+                foreach (var entry in saraArr.OfType<JObject>())
+                {
+                    var act = entry["actionResult"] as JObject ?? entry;
+                    var outerCaster = entry["cInf"]?.ToString();
+                    ProcessPlayerCombatEntry(act, outerCaster, 0, cls, level, now, procsRecordedThisTick, ref sawExplicitHeal, ref sawExplicitMonsterDmgToSelf, ref sawSelfInflictedDmg);
+                }
+            }
+
+            // Fallback / complement using ct.p player HP deltas ONLY when explicit actions did not already cover the tick
+            ProcessPlayerHpDeltasFromP(dataObj, cls, level, now, sawExplicitHeal, sawExplicitMonsterDmgToSelf, sawSelfInflictedDmg, hasSelfSarsaCast, hasSaraInTick);
         }
     }
 
-    private static void ProcessPlayerCombatEntry(
+    private void ProcessPlayerCombatEntry(
         JObject act,
         string? fallbackCaster,
-        string selfRef,
+        int outerActId,
         CapturedClassProfile cls,
-        int level)
+        int level,
+        DateTime now,
+        HashSet<int> procsRecordedThisTick,
+        ref bool sawExplicitHeal,
+        ref bool sawExplicitMonsterDmgToSelf,
+        ref bool sawSelfInflictedDmg)
     {
+        if (IsAuraOnlyAction(act))
+            return;
+
         var cInf = act["cInf"]?.ToString() ?? fallbackCaster ?? string.Empty;
         var tInf = act["tInf"]?.ToString() ?? string.Empty;
         if (string.IsNullOrWhiteSpace(cInf) || string.IsNullOrWhiteSpace(tInf))
             return;
 
-        var hitType = (act["type"]?.ToString() ?? "hit").ToLowerInvariant();
-        var hp = ParseInt(act["hp"]);
-        var now = DateTime.UtcNow;
+        var targets = SplitEntityRefs(tInf);
+        if (targets.Length == 0)
+            return;
 
-        // 1. Outgoing attacks from self player to a monster
-        if (string.Equals(cInf, selfRef, StringComparison.OrdinalIgnoreCase) &&
-            tInf.StartsWith("m:", StringComparison.OrdinalIgnoreCase))
+        var hp = ParseInt(act["hp"] ?? act["d"]);
+        var rawType = act["type"]?.ToString();
+        var typ = act["typ"]?.ToString();
+        // AQW sends HoT/DoT ticks in sara[].actionResult with "typ": "d" (no "type" field)
+        var isDotHotTick = string.IsNullOrEmpty(rawType) && string.Equals(typ, "d", StringComparison.OrdinalIgnoreCase);
+        var hitType = isDotHotTick
+            ? (hp < 0 ? "hot" : "dot")
+            : (rawType ?? "hit").ToLowerInvariant();
+
+        if (hitType == "none" && hp == 0)
+            return;
+
+        // 1. Outgoing attacks from self player to one or more monsters
+        var monsterTargetsCount = targets.Count(t => t.StartsWith("m:", StringComparison.OrdinalIgnoreCase));
+        if (IsSelfEntityRef(cInf) && monsterTargetsCount > 0)
         {
             cls.LastSeenUtc = now;
             if (hitType is "d" or "dodge" or "m" or "miss")
@@ -335,14 +501,28 @@ public sealed partial class PacketCollectorEngine
                 cls.Combat.LevelSumForDamage += level;
                 if (hp > cls.Combat.MaxSingleHit)
                     cls.Combat.MaxSingleHit = hp;
+
+                // Weapon procs arrive with actRef="p<procId>" and actID=-1 (do not inflate denominator hits;
+                // also catch aura-less procs like Health Vamp/Mana Vamp/Powerword Die when not already logged by aura)
+                var procFromActRef = TryParseProcIdFromActRef(act["actRef"]?.ToString());
+                var isWeaponProcAction = procFromActRef > 0 || outerActId == -1;
+                if (!isWeaponProcAction && !isDotHotTick)
+                {
+                    RecordProcHitEquipped();
+                }
+                else if (procFromActRef > 0 && procsRecordedThisTick.Add(procFromActRef))
+                {
+                    RecordProcTriggerDelta(procFromActRef, WeaponProcCatalog.GetProcName(procFromActRef), 0, now);
+                }
             }
             return;
         }
 
-        // 2. Healing received/cast by self player (AQW sends negative hp or type="heal" targeting player)
-        if (string.Equals(tInf, selfRef, StringComparison.OrdinalIgnoreCase) &&
+        // 2. Healing received/cast targeting self player (AQW sends negative hp, type="heal"/"hot", or typ="d" with hp < 0)
+        var targetsSelf = targets.Any(IsSelfEntityRef);
+        if (targetsSelf &&
             cInf.StartsWith("p:", StringComparison.OrdinalIgnoreCase) &&
-            (hitType == "heal" || hp < 0))
+            (hitType is "heal" or "hot" || hp < 0))
         {
             var healed = Math.Abs(hp);
             if (healed > 0)
@@ -351,21 +531,56 @@ public sealed partial class PacketCollectorEngine
                 cls.Combat.HealEvents++;
                 cls.Combat.TotalHealingDone += healed;
                 cls.Combat.LevelSumForHeal += level;
+                sawExplicitHeal = true;
             }
             return;
         }
 
-        // 3. Incoming monster attacks against self player (for class dodge/mitigation rates)
-        if (cInf.StartsWith("m:", StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(tInf, selfRef, StringComparison.OrdinalIgnoreCase))
+        // 2b. Self-inflicted damage / self-DoT (e.g. VHL Shackle/Unshackle HP sacrifice) — never attribute to monsters!
+        if (targetsSelf && IsSelfEntityRef(cInf) && hp > 0)
+        {
+            sawSelfInflictedDmg = true;
+            return;
+        }
+
+        // 3. Incoming monster attacks against self player (supports multi-target comma-separated tInf and sara[].actionResult)
+        if (cInf.StartsWith("m:", StringComparison.OrdinalIgnoreCase) && targetsSelf)
         {
             cls.LastSeenUtc = now;
+            if (isDotHotTick)
+            {
+                if (hp > 0)
+                {
+                    cls.Combat.TotalDamageTaken += hp;
+                    sawExplicitMonsterDmgToSelf = true;
+                }
+                return;
+            }
+
             cls.Combat.AttacksTaken++;
             if (hitType is "d" or "dodge" or "m" or "miss")
+            {
                 cls.Combat.DodgesTaken++;
+            }
             else if (hp > 0)
+            {
                 cls.Combat.TotalDamageTaken += hp;
+                sawExplicitMonsterDmgToSelf = true;
+            }
         }
+    }
+
+    private static int TryParseProcIdFromActRef(string? actRef)
+    {
+        if (string.IsNullOrWhiteSpace(actRef) || actRef.Length < 2)
+            return 0;
+        if ((actRef[0] == 'p' || actRef[0] == 'P') &&
+            int.TryParse(actRef.AsSpan(1), out var procId) &&
+            procId >= 2 && procId <= 20)
+        {
+            return procId;
+        }
+        return 0;
     }
 
     private CapturedClassProfile GetOrCreateClassDelta(string className)
@@ -406,8 +621,7 @@ public sealed partial class PacketCollectorEngine
         cls.SamplesObserved++;
         cls.LastSeenUtc = DateTime.UtcNow;
 
-        if (string.IsNullOrWhiteSpace(cls.InferredStatModel))
-            cls.InferredStatModel = InferStatModel(intl, str, dex, wis, lck, end);
+        cls.InferredStatModel = InferStatModel(intl, str, dex, wis, lck, end);
 
         var sig = $"W{_weaponEnhPattern}:{_weaponEnhLevel}|C{_classEnhPattern}:{_classEnhLevel}|H{_helmEnhPattern}:{_helmEnhLevel}|K{_capeEnhPattern}:{_capeEnhLevel}";
         cls.StatsByLevel[level] = new CapturedLevelStatSnapshot
