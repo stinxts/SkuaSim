@@ -20,6 +20,22 @@ public sealed partial class SimWorld
     public long TotalDamageDealt { get; private set; }
     public long TotalHealingDone { get; private set; }
 
+    public bool XpBoostActive { get; set; }
+    public bool ClassBoostActive { get; set; }
+    public bool GoldBoostActive { get; set; }
+    public bool RepBoostActive { get; set; }
+    public bool ServerBoostActive { get; set; }
+    public int ClassPoints { get; private set; }
+
+    public double EffectiveXpMultiplier =>
+        (CombatProfile?.GearBoosts.XpMultiplier ?? 1.0) * (XpBoostActive ? 2.0 : 1.0) * (ServerBoostActive ? 2.0 : 1.0);
+    public double EffectiveClassPointsMultiplier =>
+        (CombatProfile?.GearBoosts.ClassPointsMultiplier ?? 1.0) * (ClassBoostActive ? 2.0 : 1.0) * (ServerBoostActive ? 2.0 : 1.0);
+    public double EffectiveGoldMultiplier =>
+        (CombatProfile?.GearBoosts.GoldMultiplier ?? 1.0) * (GoldBoostActive ? 2.0 : 1.0) * (ServerBoostActive ? 2.0 : 1.0);
+    public double EffectiveRepMultiplier =>
+        (CombatProfile?.GearBoosts.RepMultiplier ?? 1.0) * (RepBoostActive ? 2.0 : 1.0) * (ServerBoostActive ? 2.0 : 1.0);
+
     internal static string InferDefaultItemGroup(string? category) =>
         EquipGroup(category) == "weapon" ? "Weapon" : "None";
 
@@ -156,23 +172,183 @@ public sealed partial class SimWorld
         }
     }
 
-    private int RollCombatDamageTick(out bool isCrit)
+    private int RollCombatDamageTick(SimMonster? target, out bool isCrit)
     {
+        var profile = CombatProfile;
+        var raceMult = profile.GearBoosts.GetRaceMultiplier(target?.Race);
+
         if (_ctx.Scenario.Player.DamagePerSecond.HasValue)
         {
             var overrideDps = Math.Max(1, _ctx.Scenario.Player.DamagePerSecond.Value);
-            isCrit = _ctx.Rng.NextDouble() < CombatProfile.Stats.CriticalChance;
-            return Math.Max(1, (int)(overrideDps * (0.85 + _ctx.Rng.NextDouble() * 0.3)));
+            isCrit = _ctx.Rng.NextDouble() < profile.Stats.CriticalChance;
+            var dmgAllMult = profile.GearBoosts.DamageAllMultiplier;
+            return Math.Max(1, (int)Math.Round(overrideDps * dmgAllMult * raceMult * (0.85 + _ctx.Rng.NextDouble() * 0.3)));
         }
 
-        var critChance = CombatProfile.Stats.CriticalChance;
-        var critMult = Math.Max(1.0, CombatProfile.Stats.CriticalMultiplier);
+        var critChance = profile.Stats.CriticalChance;
+        var critMult = Math.Max(1.0, profile.Stats.CriticalMultiplier);
         isCrit = _ctx.Rng.NextDouble() < critChance;
 
         var expectedCritScale = 1.0 + critChance * (critMult - 1.0);
-        var baseTick = CombatProfile.EffectiveDps / Math.Max(1.0, expectedCritScale);
+        var baseTick = (profile.EffectiveDps * raceMult) / Math.Max(1.0, expectedCritScale);
         var variance = baseTick * (0.85 + _ctx.Rng.NextDouble() * 0.30);
         return Math.Max(1, (int)Math.Round(isCrit ? variance * critMult : variance));
+    }
+
+    private static readonly int[] ClassRankThresholds = { 0, 0, 900, 3600, 9000, 18000, 31500, 50400, 75600, 108000, 302500 };
+
+    internal void GainClassPoints(int baseCp)
+    {
+        if (baseCp <= 0 || ClassRank >= 10)
+            return;
+
+        var gained = (int)Math.Round(baseCp * EffectiveClassPointsMultiplier);
+        if (gained <= 0)
+            return;
+
+        if (ClassPoints < ClassRankThresholds[Math.Clamp(ClassRank, 1, 10)])
+            ClassPoints = ClassRankThresholds[Math.Clamp(ClassRank, 1, 10)];
+
+        ClassPoints = Math.Min(302500, ClassPoints + gained);
+        while (ClassRank < 10 && ClassPoints >= ClassRankThresholds[ClassRank + 1])
+        {
+            ClassRank++;
+            if (CurrentClass != null)
+                CurrentClass.Quantity = ClassPoints;
+            RecalculateStats();
+            Trace.World($"Class rank up! {CurrentClass?.Name ?? "Class"} reached Rank {ClassRank}.");
+        }
+        if (CurrentClass != null && CurrentClass.Quantity < ClassPoints)
+            CurrentClass.Quantity = ClassPoints;
+    }
+
+    internal void ApplyScenarioBoostsAndEnhancements()
+    {
+        var s = _ctx.Scenario;
+        XpBoostActive = s.Boosts.XpBoost;
+        ClassBoostActive = s.Boosts.ClassPointsBoost;
+        GoldBoostActive = s.Boosts.GoldBoost;
+        RepBoostActive = s.Boosts.RepBoost;
+        ServerBoostActive = s.Boosts.ServerBoost;
+
+        var hasAwe = s.Enhancements.UnlockedAwe.Count > 0;
+        var hasForge = s.Enhancements.UnlockedForge.Count > 0;
+
+        void MarkQuestUnlocked(int questId)
+        {
+            if (questId <= 0)
+                return;
+            CompletedQuests.Add(questId);
+            var q = _ctx.Catalog.FindQuest(questId);
+            if (q != null && q.Slot >= 0)
+                SlotProgress[q.Slot] = Math.Max(SlotProgress.GetValueOrDefault(q.Slot), q.Value);
+        }
+
+        if (hasAwe)
+            MarkQuestUnlocked(Scenarios.EnhancementUnlockCatalog.AweUnlockQuestId);
+
+        foreach (var name in s.Enhancements.UnlockedAwe.Concat(s.Enhancements.UnlockedForge))
+        {
+            var info = Scenarios.EnhancementUnlockCatalog.Find(name);
+            if (info == null)
+                continue;
+            MarkQuestUnlocked(info.QuestId);
+
+            if (!string.IsNullOrWhiteSpace(info.RequiredFaction) && info.RequiredFactionRank > 0)
+            {
+                var fac = Factions.FirstOrDefault(f => Eq(f.Name, info.RequiredFaction));
+                if (fac == null)
+                {
+                    Factions.Add(new Skua.Core.Models.Factions.Faction
+                    {
+                        ID = Math.Abs(info.RequiredFaction.GetHashCode() % 1000) + 100,
+                        Name = info.RequiredFaction,
+                        Rank = info.RequiredFactionRank,
+                        TotalRep = RepForRank(info.RequiredFactionRank),
+                        Rep = 0,
+                        RequiredRep = RepForRank(info.RequiredFactionRank + 1) - RepForRank(info.RequiredFactionRank)
+                    });
+                }
+                else if (fac.Rank < info.RequiredFactionRank)
+                {
+                    fac.Rank = info.RequiredFactionRank;
+                    fac.TotalRep = Math.Max(fac.TotalRep, RepForRank(info.RequiredFactionRank));
+                }
+            }
+        }
+
+        // Apply real AQW boosted items & unlocked Awe/Forge starting loadouts to equipped slots
+        var hasGearBoosts = s.Boosts.EquipmentBoosts.Any(b => !string.IsNullOrEmpty(Scenarios.AqwBoostGearCatalog.ResolveMeta(b)));
+        var hasEnhUnlocks = hasAwe || hasForge;
+
+        if (!hasGearBoosts && !hasEnhUnlocks)
+            return;
+
+        var className = CurrentClass?.Name ?? s.Player.Class ?? "Warrior";
+        var (basePat, weapPat, procId, helmPat, capePat) = StatEngine.PickStartingEnhancementsForClass(className, _ctx.Catalog, s.Enhancements);
+        var enhLvl = Math.Clamp(Level, 1, 100);
+
+        if (CurrentClass != null && hasEnhUnlocks && CurrentClass.EnhancementLevel <= 0)
+        {
+            CurrentClass.EnhancementPatternID = basePat;
+            CurrentClass.EnhancementLevel = enhLvl;
+        }
+
+        void EnsureVirtualGearSlot(string slot, string category, int patId, int proc)
+        {
+            var group = EquipGroup(category);
+            var equippedItem = Inventory.FirstOrDefault(i => i.Equipped && EquipGroup(i.CategoryString) == group);
+            var slotBoost = s.Boosts.EquipmentBoosts.FirstOrDefault(b => b.Slot.Equals(slot, StringComparison.OrdinalIgnoreCase));
+            var boostMeta = slotBoost != null ? Scenarios.AqwBoostGearCatalog.ResolveMeta(slotBoost) : string.Empty;
+
+            if (equippedItem == null && (hasEnhUnlocks || !string.IsNullOrEmpty(boostMeta)))
+            {
+                var itemName = slotBoost != null
+                    ? Scenarios.AqwBoostGearCatalog.ResolveItemName(slotBoost)
+                    : $"Simulated {slot}";
+                var itemCat = slotBoost != null
+                    ? Scenarios.AqwBoostGearCatalog.ResolveCategory(slotBoost, category)
+                    : category;
+                var catalogMatch = _ctx.Catalog.FindItem(itemName);
+                var info = new Data.ItemInfo
+                {
+                    ID = catalogMatch?.ID ?? SynthesizedItemId("simgear:" + itemName),
+                    Name = itemName,
+                    MaxStack = 1,
+                    Category = itemCat,
+                    ItemGroup = slot == "Weapon" ? "Weapon" : "None",
+                    Meta = boostMeta,
+                    EnhancementPatternID = hasEnhUnlocks ? patId : 0,
+                    ProcID = hasEnhUnlocks ? proc : 0,
+                    Source = catalogMatch != null ? Data.DataSource.Captured : Data.DataSource.Scenario
+                };
+                equippedItem = NewInventoryItem(info, 1);
+                equippedItem.EnhancementPatternID = hasEnhUnlocks ? patId : 0;
+                equippedItem.EnhancementLevel = hasEnhUnlocks && patId > 0 ? enhLvl : 0;
+                equippedItem.ProcID = hasEnhUnlocks ? proc : 0;
+                equippedItem.Meta = boostMeta;
+                Inventory.Add(equippedItem);
+                EquipInternal(equippedItem, log: false);
+            }
+            else if (equippedItem != null)
+            {
+                if (!string.IsNullOrEmpty(boostMeta))
+                    equippedItem.Meta = string.IsNullOrWhiteSpace(equippedItem.Meta) ? boostMeta : $"{equippedItem.Meta},{boostMeta}";
+                if (hasEnhUnlocks && equippedItem.EnhancementLevel <= 0 && patId > 0)
+                {
+                    equippedItem.EnhancementPatternID = patId;
+                    equippedItem.EnhancementLevel = enhLvl;
+                    if (proc > 0 && equippedItem.ProcID <= 0)
+                        equippedItem.ProcID = proc;
+                }
+            }
+        }
+
+        EnsureVirtualGearSlot("Weapon", "Sword", weapPat, procId);
+        EnsureVirtualGearSlot("Armor", "Armor", 0, 0);
+        EnsureVirtualGearSlot("Helm", "Helm", helmPat, 0);
+        EnsureVirtualGearSlot("Cape", "Cape", capePat, 0);
+        EnsureVirtualGearSlot("Pet", "Pet", 0, 0);
     }
 
     private void ApplyCombatSustain(int damageDealt)

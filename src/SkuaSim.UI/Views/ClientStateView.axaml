@@ -5,23 +5,23 @@
              x:Class="SkuaSim.UI.Views.ClientStateView"
              x:DataType="vm:ClientStateViewModel">
 
-    <Grid ColumnDefinitions="390,*" ColumnSpacing="10">
+    <Grid ColumnDefinitions="0.35*,5,0.65*">
         <!-- Left Column: Live Client ("Skua without Flash") -->
-        <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto">
-            <StackPanel Spacing="10">
+        <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" MinWidth="310">
+            <StackPanel Spacing="10" Margin="0,0,6,0">
                 <!-- Location & Target Card -->
                 <Border Classes="Card">
                     <StackPanel Spacing="6">
                         <Grid ColumnDefinitions="*,Auto">
                             <TextBlock Text="Map &amp; Location" Classes="SectionTitle" />
-                            <TextBlock Grid.Column="1" Text="{Binding MapSource}" Classes="MetricLabel" />
+                            <TextBlock Grid.Column="1" Text="{Binding MapSource}" Classes="MetricLabel" VerticalAlignment="Center" />
                         </Grid>
-                        <TextBlock Text="{Binding MapBanner}" FontSize="17" FontWeight="Bold" Foreground="#F8FAFC" />
-                        <TextBlock Text="{Binding CellPadText}" FontSize="12" Foreground="#CBD5E1" />
+                        <TextBlock Text="{Binding MapBanner}" Classes="DisplayTitle" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{Binding CellPadText}" Classes="BodyText" Foreground="#CBD5E1" />
                         <Border Classes="SubCard" Margin="0,2,0,0">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <TextBlock Text="Target:" Classes="MetricLabel" VerticalAlignment="Center" />
-                                <TextBlock Text="{Binding TargetText}" FontSize="12" FontWeight="SemiBold" Foreground="#FCA5A5" VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding TargetText}" Classes="MetricValue" Foreground="#FCA5A5" VerticalAlignment="Center" />
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -30,32 +30,32 @@
                 <!-- Player Card -->
                 <Border Classes="Card">
                     <StackPanel Spacing="8">
-                        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
-                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-                                <TextBlock Text="{Binding Username}" FontSize="15" FontWeight="Bold" />
-                                <TextBlock Text="{Binding LevelText}" FontSize="13" Foreground="#38BDF8" VerticalAlignment="Center" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding Username}" Classes="DisplayTitle" />
+                                <TextBlock Text="{Binding LevelText}" Classes="SectionTitle" Foreground="#38BDF8" VerticalAlignment="Center" />
                             </StackPanel>
-                            <TextBlock Grid.Column="1" Text="{Binding PlayerStatusBadge}" FontSize="11" FontWeight="SemiBold" Foreground="#4ADE80" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" Text="{Binding PlayerStatusBadge}" Classes="BadgeText" Foreground="#4ADE80" VerticalAlignment="Center" />
                         </Grid>
 
                         <StackPanel Spacing="3">
                             <Grid ColumnDefinitions="Auto,*">
                                 <TextBlock Text="HP" Classes="MetricLabel" VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="1" Text="{Binding HpText}" HorizontalAlignment="Right" FontSize="11" FontFamily="Consolas, monospace" />
+                                <TextBlock Grid.Column="1" Text="{Binding HpText}" HorizontalAlignment="Right" Classes="MonoText" />
                             </Grid>
                             <ProgressBar Minimum="0" Maximum="{Binding MaxHealth}" Value="{Binding Health}" Height="10" Foreground="#22C55E" Background="#0F172A" />
                         </StackPanel>
 
-                        <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" RowSpacing="6" ColumnSpacing="10">
-                            <StackPanel Grid.Row="0" Grid.Column="0">
+                        <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
+                            <StackPanel Grid.Column="0" Spacing="2">
                                 <TextBlock Text="Class" Classes="MetricLabel" />
                                 <TextBlock Text="{Binding EquippedClass}" Classes="MetricValue" TextTrimming="CharacterEllipsis" />
-                                <TextBlock Text="{Binding ClassRankText}" FontSize="11" Foreground="#94A3B8" />
+                                <TextBlock Text="{Binding ClassRankText}" Classes="MetricLabel" />
                             </StackPanel>
-                            <StackPanel Grid.Row="0" Grid.Column="1">
+                            <StackPanel Grid.Column="1" Spacing="2">
                                 <TextBlock Text="Currency" Classes="MetricLabel" />
-                                <TextBlock Text="{Binding GoldText}" FontSize="13" FontWeight="SemiBold" Foreground="#FACC15" />
-                                <TextBlock Text="{Binding CoinsText}" FontSize="11" Foreground="#38BDF8" />
+                                <TextBlock Text="{Binding GoldText}" Classes="MetricValue" Foreground="#FACC15" />
+                                <TextBlock Text="{Binding CoinsText}" Classes="MetricLabel" Foreground="#38BDF8" />
                             </StackPanel>
                         </Grid>
 
@@ -80,13 +80,13 @@
                         <Border Classes="SubCard">
                             <StackPanel Spacing="4">
                                 <Grid ColumnDefinitions="*,Auto">
-                                    <TextBlock Text="AQW Stats &amp; Combat" Classes="MetricLabel" FontWeight="SemiBold" Foreground="#93C5FD" />
-                                    <TextBlock Grid.Column="1" Text="{Binding EffectiveDpsText}" FontSize="11" FontWeight="SemiBold" FontFamily="Consolas, monospace" Foreground="#FB923C" />
+                                    <TextBlock Text="AQW Stats &amp; Combat" Classes="MetricLabel" FontWeight="SemiBold" Foreground="#93C5FD" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding EffectiveDpsText}" Classes="MonoText" FontWeight="SemiBold" Foreground="#FB923C" />
                                 </Grid>
-                                <TextBlock Text="{Binding PowerStatsText}" FontSize="11" FontFamily="Consolas, monospace" Foreground="#E2E8F0" />
-                                <TextBlock Text="{Binding SecondaryStatsText}" FontSize="11" FontFamily="Consolas, monospace" Foreground="#38BDF8" TextWrapping="Wrap" />
-                                <TextBlock Text="{Binding PrimaryStatsText}" FontSize="10" FontFamily="Consolas, monospace" Foreground="#94A3B8" TextWrapping="Wrap" />
-                                <TextBlock Text="{Binding CombatCountersText}" FontSize="10" FontFamily="Consolas, monospace" Foreground="#4ADE80" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding PowerStatsText}" Classes="MonoText" Foreground="#E2E8F0" />
+                                <TextBlock Text="{Binding SecondaryStatsText}" Classes="MonoText" Foreground="#38BDF8" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding PrimaryStatsText}" Classes="MonoText" Foreground="#94A3B8" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding CombatCountersText}" Classes="MonoText" Foreground="#4ADE80" TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -102,12 +102,12 @@
                                     <Border Classes="SubCard" Margin="0,0,0,6">
                                         <StackPanel Spacing="4">
                                             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="12" TextTrimming="CharacterEllipsis" />
-                                                <TextBlock Grid.Column="1" Text="{Binding Badges}" FontSize="11" Foreground="#F59E0B" />
+                                                <TextBlock Text="{Binding Name}" Classes="MetricValue" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Grid.Column="1" Text="{Binding Badges}" Classes="BadgeText" Foreground="{Binding BadgeForeground}" VerticalAlignment="Center" />
                                             </Grid>
                                             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                                                 <ProgressBar Minimum="0" Maximum="100" Value="{Binding HpPercent}" Height="7" Foreground="#EF4444" Background="#0F172A" VerticalAlignment="Center" />
-                                                <TextBlock Grid.Column="1" Text="{Binding HpText}" FontSize="11" FontFamily="Consolas, monospace" Foreground="#CBD5E1" />
+                                                <TextBlock Grid.Column="1" Text="{Binding HpText}" Classes="MonoText" Foreground="#CBD5E1" />
                                             </Grid>
                                         </StackPanel>
                                     </Border>
@@ -125,9 +125,9 @@
                         <ItemsControl ItemsSource="{Binding PendingDrops}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="models:ItemRowItem">
-                                    <Grid ColumnDefinitions="*,Auto" Margin="0,2">
-                                        <TextBlock Text="{Binding Name}" FontSize="12" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Grid.Column="1" Text="{Binding QuantityText}" FontSize="12" FontFamily="Consolas, monospace" Foreground="#4ADE80" />
+                                    <Grid ColumnDefinitions="*,Auto" Margin="0,2" ColumnSpacing="8">
+                                        <TextBlock Text="{Binding Name}" Classes="BodyText" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="1" Text="{Binding QuantityText}" Classes="MonoText" Foreground="#4ADE80" />
                                     </Grid>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
@@ -138,8 +138,15 @@
             </StackPanel>
         </ScrollViewer>
 
+        <GridSplitter Grid.Column="1"
+                      ResizeDirection="Columns"
+                      Width="5"
+                      Background="#263242"
+                      CornerRadius="2"
+                      VerticalAlignment="Stretch" />
+
         <!-- Right Column: Containers, Quests, Factions, Maps -->
-        <Border Grid.Column="1" Classes="Card" Padding="6">
+        <Border Grid.Column="2" Classes="Card" Padding="6">
             <TabControl>
                 <!-- Inventory -->
                 <TabItem Header="{Binding InventoryHeader}">
@@ -148,11 +155,11 @@
                         <ListBox Grid.Row="1" ItemsSource="{Binding FilteredInventory}" Background="Transparent" BorderThickness="0">
                             <ListBox.ItemTemplate>
                                 <DataTemplate x:DataType="models:ItemRowItem">
-                                    <Grid ColumnDefinitions="70,*,Auto,Auto" ColumnSpacing="10">
-                                        <TextBlock Grid.Column="0" Text="{Binding Id}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center" />
-                                        <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Grid.Column="2" Text="EQUIPPED" FontSize="10" FontWeight="Bold" Foreground="#4ADE80" IsVisible="{Binding Equipped}" VerticalAlignment="Center" />
-                                        <TextBlock Grid.Column="3" Text="{Binding QuantityText}" FontFamily="Consolas, monospace" FontSize="12" Foreground="#E2E8F0" VerticalAlignment="Center" />
+                                    <Grid ColumnDefinitions="76,*,Auto,Auto" ColumnSpacing="10">
+                                        <TextBlock Grid.Column="0" Text="{Binding Id}" Classes="MonoText" Foreground="#94A3B8" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="{Binding Name}" Classes="BodyText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="2" Text="EQUIPPED" Classes="BadgeText" Foreground="#4ADE80" IsVisible="{Binding Equipped}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="3" Text="{Binding QuantityText}" Classes="MonoText" VerticalAlignment="Center" />
                                     </Grid>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
@@ -165,10 +172,10 @@
                     <ListBox ItemsSource="{Binding BankItems}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
                         <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="models:ItemRowItem">
-                                <Grid ColumnDefinitions="70,*,Auto" ColumnSpacing="10">
-                                    <TextBlock Grid.Column="0" Text="{Binding Id}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Grid.Column="2" Text="{Binding QuantityText}" FontFamily="Consolas, monospace" FontSize="12" VerticalAlignment="Center" />
+                                <Grid ColumnDefinitions="76,*,Auto" ColumnSpacing="10">
+                                    <TextBlock Grid.Column="0" Text="{Binding Id}" Classes="MonoText" Foreground="#94A3B8" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" Classes="BodyText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="2" Text="{Binding QuantityText}" Classes="MonoText" VerticalAlignment="Center" />
                                 </Grid>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
@@ -180,10 +187,10 @@
                     <ListBox ItemsSource="{Binding TempInventoryItems}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
                         <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="models:ItemRowItem">
-                                <Grid ColumnDefinitions="70,*,Auto" ColumnSpacing="10">
-                                    <TextBlock Grid.Column="0" Text="{Binding Id}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Grid.Column="2" Text="{Binding QuantityText}" FontFamily="Consolas, monospace" FontSize="12" VerticalAlignment="Center" />
+                                <Grid ColumnDefinitions="76,*,Auto" ColumnSpacing="10">
+                                    <TextBlock Grid.Column="0" Text="{Binding Id}" Classes="MonoText" Foreground="#94A3B8" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" Classes="BodyText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="2" Text="{Binding QuantityText}" Classes="MonoText" VerticalAlignment="Center" />
                                 </Grid>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
@@ -195,10 +202,10 @@
                     <ListBox ItemsSource="{Binding HouseItems}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
                         <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="models:ItemRowItem">
-                                <Grid ColumnDefinitions="70,*,Auto" ColumnSpacing="10">
-                                    <TextBlock Grid.Column="0" Text="{Binding Id}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Grid.Column="2" Text="{Binding QuantityText}" FontFamily="Consolas, monospace" FontSize="12" VerticalAlignment="Center" />
+                                <Grid ColumnDefinitions="76,*,Auto" ColumnSpacing="10">
+                                    <TextBlock Grid.Column="0" Text="{Binding Id}" Classes="MonoText" Foreground="#94A3B8" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" Classes="BodyText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="2" Text="{Binding QuantityText}" Classes="MonoText" VerticalAlignment="Center" />
                                 </Grid>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
@@ -210,11 +217,11 @@
                     <ListBox ItemsSource="{Binding Quests}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
                         <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="models:QuestRowItem">
-                                <Grid ColumnDefinitions="68,*,130,90" ColumnSpacing="10">
-                                    <TextBlock Grid.Column="0" Text="{Binding Id, StringFormat='#{0}'}" FontFamily="Consolas, monospace" FontSize="12" Foreground="#94A3B8" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Grid.Column="2" Text="{Binding StatusText}" FontSize="11" FontWeight="SemiBold" Foreground="#38BDF8" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Column="3" Text="{Binding TurnInsText}" FontFamily="Consolas, monospace" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                <Grid ColumnDefinitions="74,*,136,96" ColumnSpacing="10">
+                                    <TextBlock Grid.Column="0" Text="{Binding Id, StringFormat='#{0}'}" Classes="MonoText" Foreground="#94A3B8" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" Classes="BodyText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="2" Text="{Binding StatusText}" Classes="MetricValue" Foreground="#38BDF8" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="3" Text="{Binding TurnInsText}" Classes="MonoText" HorizontalAlignment="Right" VerticalAlignment="Center" />
                                 </Grid>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
@@ -226,10 +233,10 @@
                     <ListBox ItemsSource="{Binding Factions}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
                         <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="models:FactionRowItem">
-                                <Grid ColumnDefinitions="*,90,Auto" ColumnSpacing="10">
-                                    <TextBlock Grid.Column="0" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Column="1" Text="{Binding RankText}" FontSize="12" FontWeight="SemiBold" Foreground="#FACC15" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Column="2" Text="{Binding RepText}" FontFamily="Consolas, monospace" FontSize="11" Foreground="#CBD5E1" VerticalAlignment="Center" />
+                                <Grid ColumnDefinitions="*,96,Auto" ColumnSpacing="10">
+                                    <TextBlock Grid.Column="0" Text="{Binding Name}" Classes="BodyText" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding RankText}" Classes="MetricValue" Foreground="#FACC15" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="2" Text="{Binding RepText}" Classes="MonoText" Foreground="#CBD5E1" VerticalAlignment="Center" />
                                 </Grid>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
@@ -241,7 +248,7 @@
                     <ListBox ItemsSource="{Binding MapsVisited}" Background="Transparent" BorderThickness="0" Margin="0,6,0,0">
                         <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="x:String">
-                                <TextBlock Text="{Binding .}" FontFamily="Consolas, monospace" FontSize="12" />
+                                <TextBlock Text="{Binding .}" Classes="MonoText" />
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>

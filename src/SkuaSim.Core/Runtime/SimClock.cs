@@ -150,7 +150,9 @@ public sealed class SimClock : SkuaSim.Runtime.ISimTimeSource
     public string Format(long? ms = null)
     {
         var t = TimeSpan.FromMilliseconds(ms ?? NowMs);
-        return $"{(int)t.TotalHours:00}:{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds:000}";
+        return t.Days > 0
+            ? $"{t.Days}d {t.Hours:00}:{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds:000}"
+            : $"{(int)t.TotalHours:00}:{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds:000}";
     }
 
     public void Pause()

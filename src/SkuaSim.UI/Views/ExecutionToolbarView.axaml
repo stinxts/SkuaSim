@@ -11,53 +11,66 @@
             <Border Classes="WarningCard" IsVisible="{Binding !IsSkuaConfigured}">
                 <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
                     <StackPanel Spacing="2">
-                        <TextBlock Text="Skua / VibeSkua Installation Required" FontWeight="SemiBold" Foreground="#FBBF24" />
-                        <TextBlock Text="{Binding SkuaSetupWarning}" TextWrapping="Wrap" FontSize="12" Foreground="#FDE68A" />
+                        <TextBlock Text="Skua / VibeSkua Installation Required" Classes="SectionTitle" Foreground="#FBBF24" />
+                        <TextBlock Text="{Binding SkuaSetupWarning}" Classes="BodyText" TextWrapping="Wrap" Foreground="#FDE68A" />
                     </StackPanel>
                     <Button Grid.Column="1" Content="Select Skua Folder..." Command="{Binding BrowseSkuaFolderCommand}" VerticalAlignment="Center" />
                 </Grid>
             </Border>
 
-            <!-- Row 1: Script selection and quick search -->
-            <Grid ColumnDefinitions="Auto,*,Auto,240,Auto,Auto" ColumnSpacing="8">
-                <TextBlock Text="Script (.cs):" VerticalAlignment="Center" Classes="MetricLabel" />
+            <!-- Row 1: Script selection, quick filter, Display Resolution/Scale, and workspace tools -->
+            <Grid ColumnDefinitions="Auto,*,Auto,230,Auto,Auto,Auto,Auto" ColumnSpacing="8">
+                <TextBlock Grid.Column="0" Text="Script (.cs):" VerticalAlignment="Center" Classes="MetricLabel" />
                 <TextBox Grid.Column="1"
                          Text="{Binding ScriptPathText}"
                          PlaceholderText="Path to any Skua .cs script..."
                          VerticalAlignment="Center" />
                 <Button Grid.Column="2" Content="Browse..." Command="{Binding BrowseScriptCommand}" />
 
-                <StackPanel Grid.Column="3" Orientation="Vertical" Spacing="2">
-                    <TextBox Text="{Binding ScriptSearchText}"
-                             PlaceholderText="Filter Scripts\ folder..."
-                             FontSize="11"
-                             Padding="6,4" />
-                    <ComboBox ItemsSource="{Binding FilteredScripts}"
+                <Grid Grid.Column="3" ColumnDefinitions="*,*" ColumnSpacing="4">
+                    <TextBox Grid.Column="0"
+                             Text="{Binding ScriptSearchText}"
+                             PlaceholderText="Filter..." />
+                    <ComboBox Grid.Column="1"
+                              ItemsSource="{Binding FilteredScripts}"
                               SelectedItem="{Binding SelectedScript}"
                               HorizontalAlignment="Stretch"
-                              PlaceholderText="Quick pick from Scripts\...">
+                              PlaceholderText="Scripts\...">
                         <ComboBox.ItemTemplate>
                             <DataTemplate x:DataType="models:ScriptEntry">
-                                <TextBlock Text="{Binding DisplayName}" FontSize="12" />
+                                <TextBlock Text="{Binding DisplayName}" Classes="BodyText" />
                             </DataTemplate>
                         </ComboBox.ItemTemplate>
                     </ComboBox>
-                </StackPanel>
+                </Grid>
 
-                <Button Grid.Column="4" Content="Refresh" Command="{Binding RefreshWorkspaceCommand}" ToolTip.Tip="Rescan Scripts\ and scenarios\" />
-                <Button Grid.Column="5" Content="Skua Dir..." Command="{Binding BrowseSkuaFolderCommand}" ToolTip.Tip="{Binding ClientFlavorText}" />
+                <TextBlock Grid.Column="4" Text="Display:" VerticalAlignment="Center" Classes="MetricLabel" Margin="4,0,0,0" />
+                <ComboBox Grid.Column="5"
+                          Width="136"
+                          ItemsSource="{Binding DisplayScalePresets}"
+                          SelectedItem="{Binding SelectedDisplayScale}"
+                          ToolTip.Tip="Adaptive UI scaling preset for HD, Full-HD, 2K, 4K, and 8K displays">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate x:DataType="models:DisplayScalePreset">
+                            <TextBlock Text="{Binding Label}" Classes="BodyText" />
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+
+                <Button Grid.Column="6" Content="Refresh" Command="{Binding RefreshWorkspaceCommand}" ToolTip.Tip="Rescan Scripts\, scenarios\, and databank classes" />
+                <Button Grid.Column="7" Content="Skua Dir..." Command="{Binding BrowseSkuaFolderCommand}" ToolTip.Tip="{Binding ClientFlavorText}" />
             </Grid>
 
-            <!-- Row 2: Scenario, Seed, Speed, and Execution Buttons -->
-            <Grid ColumnDefinitions="Auto,220,*,Auto,Auto,76,Auto,135,Auto,Auto,Auto,Auto" ColumnSpacing="8">
-                <TextBlock Text="Scenario:" VerticalAlignment="Center" Classes="MetricLabel" />
+            <!-- Row 2: Scenario, Seed, Virtual Duration, Speed, and Execution Buttons -->
+            <Grid ColumnDefinitions="Auto,190,*,Auto,Auto,68,Auto,Auto,Auto,126,Auto,Auto,Auto,Auto" ColumnSpacing="6">
+                <TextBlock Grid.Column="0" Text="Scenario:" VerticalAlignment="Center" Classes="MetricLabel" />
                 <ComboBox Grid.Column="1"
                           ItemsSource="{Binding AvailableScenarios}"
                           SelectedItem="{Binding SelectedScenario}"
                           HorizontalAlignment="Stretch">
                     <ComboBox.ItemTemplate>
                         <DataTemplate x:DataType="models:ScenarioEntry">
-                            <TextBlock Text="{Binding DisplayName}" FontSize="12" />
+                            <TextBlock Text="{Binding DisplayName}" Classes="BodyText" />
                         </DataTemplate>
                     </ComboBox.ItemTemplate>
                 </ComboBox>
@@ -71,57 +84,80 @@
                 <TextBlock Grid.Column="4" Text="Seed:" VerticalAlignment="Center" Classes="MetricLabel" Margin="4,0,0,0" />
                 <TextBox Grid.Column="5" Text="{Binding SeedText}" HorizontalContentAlignment="Center" VerticalAlignment="Center" />
 
-                <TextBlock Grid.Column="6" Text="Speed:" VerticalAlignment="Center" Classes="MetricLabel" Margin="4,0,0,0" />
-                <ComboBox Grid.Column="7"
+                <TextBlock Grid.Column="6" Text="Virtual Limit:" VerticalAlignment="Center" Classes="MetricLabel" Margin="4,0,0,0" />
+                <StackPanel Grid.Column="7" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                    <ComboBox Width="134"
+                              ItemsSource="{Binding VirtualDurationPresets}"
+                              SelectedItem="{Binding SelectedVirtualDuration}"
+                              ToolTip.Tip="Maximum virtual time for long scripts (minutes, hours, days, weeks, or Unlimited)">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="models:VirtualDurationPreset">
+                                <TextBlock Text="{Binding Label}" Classes="BodyText" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <TextBox Width="58"
+                             Text="{Binding CustomVirtualAmountText}"
+                             HorizontalContentAlignment="Center"
+                             IsVisible="{Binding IsCustomVirtualDuration}"
+                             ToolTip.Tip="Custom virtual duration value (0 = Unlimited)" />
+                    <ComboBox Width="92"
+                              ItemsSource="{Binding CustomDurationUnits}"
+                              SelectedItem="{Binding CustomVirtualUnit}"
+                              IsVisible="{Binding IsCustomVirtualDuration}" />
+                </StackPanel>
+
+                <TextBlock Grid.Column="8" Text="Speed:" VerticalAlignment="Center" Classes="MetricLabel" Margin="4,0,0,0" />
+                <ComboBox Grid.Column="9"
                           ItemsSource="{Binding SpeedPresets}"
                           SelectedItem="{Binding SelectedSpeed}"
                           HorizontalAlignment="Stretch">
                     <ComboBox.ItemTemplate>
                         <DataTemplate x:DataType="models:SpeedPreset">
-                            <TextBlock Text="{Binding Label}" FontSize="12" />
+                            <TextBlock Text="{Binding Label}" Classes="BodyText" />
                         </DataTemplate>
                     </ComboBox.ItemTemplate>
                 </ComboBox>
 
-                <Button Grid.Column="8" Content="Compile" Command="{Binding CompileCommand}" Padding="12,6" />
-                <Button Grid.Column="9" Classes="Primary" Content="Run" Command="{Binding RunCommand}" Padding="16,6" />
-                <Button Grid.Column="10" Content="{Binding PauseResumeLabel}" Command="{Binding PauseResumeCommand}" Padding="12,6" />
-                <Button Grid.Column="11" Classes="Danger" Content="Stop" Command="{Binding StopCommand}" Padding="12,6" />
+                <Button Grid.Column="10" Content="Compile" Command="{Binding CompileCommand}" Padding="12,5" />
+                <Button Grid.Column="11" Classes="Primary" Content="Run" Command="{Binding RunCommand}" Padding="16,5" />
+                <Button Grid.Column="12" Content="{Binding PauseResumeLabel}" Command="{Binding PauseResumeCommand}" Padding="12,5" />
+                <Button Grid.Column="13" Classes="Danger" Content="Stop" Command="{Binding StopCommand}" Padding="12,5" />
             </Grid>
 
             <!-- Row 3: Live Telemetry Bar -->
-            <Border Classes="SubCard" Padding="8,6">
-                <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="18">
+            <Border Classes="SubCard" Padding="10,6">
+                <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="16">
                     <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                         <TextBlock Text="Status:" Classes="MetricLabel" VerticalAlignment="Center" />
-                        <TextBlock Text="{Binding StatusText}" FontWeight="SemiBold" Foreground="#38BDF8" VerticalAlignment="Center" />
-                        <TextBlock Text="|" Foreground="#334155" VerticalAlignment="Center" />
-                        <TextBlock Text="{Binding ClientFlavorText}" Classes="MetricLabel" VerticalAlignment="Center" MaxWidth="320" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{Binding StatusText}" Classes="MetricValue" Foreground="#38BDF8" VerticalAlignment="Center" />
+                        <TextBlock Text="|" Classes="MetricLabel" Foreground="#334155" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding ClientFlavorText}" Classes="MetricLabel" VerticalAlignment="Center" MaxWidth="340" TextTrimming="CharacterEllipsis" />
                     </StackPanel>
 
                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
                         <TextBlock Text="Virtual:" Classes="MetricLabel" VerticalAlignment="Center" />
-                        <TextBlock Text="{Binding VirtualClockText}" FontFamily="Consolas, monospace" FontWeight="SemiBold" Foreground="#4ADE80" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding VirtualClockText}" Classes="MonoText" FontWeight="SemiBold" Foreground="#4ADE80" VerticalAlignment="Center" />
                     </StackPanel>
 
                     <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
                         <TextBlock Text="Real:" Classes="MetricLabel" VerticalAlignment="Center" />
-                        <TextBlock Text="{Binding RealTimeText}" FontFamily="Consolas, monospace" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding RealTimeText}" Classes="MonoText" VerticalAlignment="Center" />
                     </StackPanel>
 
                     <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
                         <TextBlock Text="Paused:" Classes="MetricLabel" VerticalAlignment="Center" />
-                        <TextBlock Text="{Binding PausedTimeText}" FontFamily="Consolas, monospace" Foreground="#FBBF24" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding PausedTimeText}" Classes="MonoText" Foreground="#FBBF24" VerticalAlignment="Center" />
                     </StackPanel>
 
                     <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
                         <TextBlock Text="APIs:" Classes="MetricLabel" VerticalAlignment="Center" />
-                        <TextBlock Text="{Binding ApiCallsText}" FontFamily="Consolas, monospace" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding ApiCallsText}" Classes="MonoText" VerticalAlignment="Center" />
                     </StackPanel>
 
                     <StackPanel Grid.Column="5" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center" MaxWidth="260">
                         <TextBlock Text="Last:" Classes="MetricLabel" VerticalAlignment="Center" />
-                        <TextBlock Text="{Binding LastApiCallText}" FontFamily="Consolas, monospace" Foreground="#CBD5E1" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding LastApiCallText}" Classes="MonoText" Foreground="#CBD5E1" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
                     </StackPanel>
                 </Grid>
             </Border>

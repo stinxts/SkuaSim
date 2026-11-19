@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using SkuaSim.Core.Compilation;
+using SkuaSim.Core.Data;
 using SkuaSim.Core.Hosting;
 using SkuaSim.Core.Runtime;
 using SkuaSim.Core.Scenarios;
+using SkuaSim.Core.World;
 
 var installation = SkuaInstallation.Detect();
 SkuaAssemblyResolver.Register(installation.ProbeDirectories);
@@ -36,6 +38,7 @@ internal static class CoreTests
             TestStatProgressionAndEnhancements(runner, tempDir);
             TestClassCombatDodgeCritHealAndDeterminism(runner, tempDir);
             TestCatalogClassCalibration(installation, tempDir);
+            TestBoostsEnhancementUnlocksAndLongVirtualDuration(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -190,7 +193,45 @@ internal static class CoreTests
         File.WriteAllText(brokenScript, "public class BrokenBot { public void ScriptMain(IScriptInterface bot) { int x = ; } }");
         var brokenInspection = runner.InspectScript(brokenScript);
         Assert(!brokenInspection.Success && brokenInspection.CompileResult.Errors.Count > 0, "Expected compile errors for BrokenBot");
-        Console.WriteLine($"   OK: Discovered {inspection.Options.Count} option(s), storage='{inspection.OptionsStorage}', and compile diagnostics work cleanly");
+
+        // Also test Skua MultiOptions ordering + whitespace section headers (" ")
+        var multiScript = Path.Combine(tempDir, "MultiOptionsBot.cs");
+        File.WriteAllText(multiScript, """
+        using System.Collections.Generic;
+        using Skua.Core.Interfaces;
+        using Skua.Core.Options;
+
+        public class MultiOptionsBot
+        {
+            public string OptionsStorage = "MultiTest";
+            public string[] MultiOptions = { "Generic", "Select" };
+
+            // Declared intentionally AFTER Select in MultiOptions order to verify MultiOptions ordering
+            public List<IOption> Select = new()
+            {
+                new Option<bool>("1001", "Buy Sword", "Mode [select] only", false)
+            };
+
+            public List<IOption> Generic = new()
+            {
+                new Option<bool>("SkipOptions", "Skip options", "Skip popup", false),
+                new Option<string>(" ", "Mode Explanation [all]", "Gets all items", "click here")
+            };
+
+            public void ScriptMain(IScriptInterface bot) { }
+        }
+        """);
+        var multiInspection = runner.InspectScript(multiScript);
+        Assert(multiInspection.Success, $"MultiOptions inspect failed: {multiInspection.ErrorMessage}");
+        Assert(multiInspection.Options.Count == 3, $"Expected 3 multi options (including header), got {multiInspection.Options.Count}");
+        Assert(multiInspection.Options[0].Category == "Generic" && multiInspection.Options[0].Name == "SkipOptions",
+            $"Expected Generic first per MultiOptions order, got {multiInspection.Options[0].Category}/{multiInspection.Options[0].Name}");
+        Assert(multiInspection.Options[1].IsHeader && multiInspection.Options[1].DisplayName == "Mode Explanation [all]",
+            "Expected whitespace option to be flagged IsHeader=true");
+        Assert(multiInspection.Options[2].Category == "Select" && multiInspection.Options[2].ValueType == "System.Boolean",
+            "Expected Select boolean option second");
+
+        Console.WriteLine($"   OK: Discovered {inspection.Options.Count} option(s), MultiOptions ordering & headers verified, compile diagnostics clean");
     }
 
     private static void TestSessionPauseResumeAndLiveSnapshot(SimulationRunner runner, string tempDir)
@@ -794,6 +835,109 @@ internal static class CoreTests
             "Expected Bot.Player.Skills to populate from captured Collector sAct skills");
         Assert(rep.FinalState.EvasionChance > 0.35, $"Expected blended Dodge Melee evasion (>0.35), got {rep.FinalState.EvasionChance:F2}");
         Console.WriteLine($"   OK: Custom captured skills & Dodge calibration verified (Evasion={rep.FinalState.EvasionChance:F2})");
+    }
+
+    private static void TestBoostsEnhancementUnlocksAndLongVirtualDuration(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("11. Testing Equipment/Consumable Boosts, Awe/Forge Unlock Quests & Unlimited/Multi-Day Virtual Clock...");
+
+        var boostScript = Path.Combine(tempDir, "BoostAndUnlockBot.cs");
+        File.WriteAllText(boostScript, """
+        using System.Linq;
+        using Skua.Core.Interfaces;
+        using Skua.Core.Models;
+        using Skua.Core.Models.Items;
+
+        public class BoostAndUnlockBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                var grimRank = bot.Reputation.GetRank("Grimskull Trolling");
+                var weap = bot.Inventory.Items.FirstOrDefault(i => i.Equipped && i.ItemGroup == "Weapon");
+                var armor = bot.Inventory.Items.FirstOrDefault(i => i.Equipped && i.Category == ItemCategory.Armor);
+                var helm = bot.Inventory.Items.FirstOrDefault(i => i.Equipped && i.Category == ItemCategory.Helm);
+                var xpBoostOn = bot.Boosts.UseExperienceBoost;
+                bot.Log($"UNLOCKS GrimRank={grimRank} Weap={weap?.Name} WeapMeta={weap?.Meta} Armor={armor?.Name} Helm={helm?.Name} XpBoost={xpBoostOn}");
+
+                // Advance > 2 days of virtual time to verify multi-day formatting & unlimited mode
+                bot.Sleep(2 * 24 * 60 * 60 * 1000 + 3_600_000);
+            }
+        }
+        """);
+
+        var boostedScenario = new Scenario
+        {
+            Name = "Endgame Boosts + Unlocks + Unlimited Virtual",
+            Seed = 7,
+            Player = new PlayerSetup { Level = 100, Class = "Void Highlord", ClassRank = 10 },
+            Boosts = new BoostsSetup
+            {
+                XpBoost = true,
+                GoldBoost = true,
+                ClassPointsBoost = true,
+                RepBoost = true,
+                ServerBoost = true,
+                EquipmentBoosts = new List<GearSlotBoostSetup>
+                {
+                    new() { Slot = "Weapon", ItemName = "Necrotic Sword of Doom", Meta = "dmgAll:1.51" },
+                    new() { Slot = "Armor", ItemName = "Radiant Goddess of War" },
+                    new() { Slot = "Helm", ItemName = "Head of the Legion Beast" },
+                    new() { Slot = "Cape", ItemName = "Awescended Omni Wings" },
+                    new() { Slot = "Pet", ItemName = "Polly Roger" }
+                }
+            },
+            Enhancements = new EnhancementsSetup
+            {
+                UnlockedAwe = new List<string> { "Spiral Carve", "Awe Blast" },
+                UnlockedForge = new List<string> { "Valiance", "Dauntless", "Anima", "Vainglory", "Hearty" }
+            },
+            Limits = new LimitsSetup { MaxVirtualMinutes = 0, MaxRealSeconds = 20 } // 0 = Unlimited virtual time!
+        };
+
+        // Verify AQW highest-in-category stacking across multi-boost real AQW gear via StatEngine preview
+        var preview = StatEngine.PreviewScenarioStats(boostedScenario, GameDataCatalog.Load(null, null));
+        Assert(Math.Abs(preview.GearBoosts.DamageAllMultiplier - 1.51) < 0.001, $"Expected NSoD dmgAll 1.51, got {preview.GearBoosts.DamageAllMultiplier}");
+        Assert(Math.Abs(preview.GearBoosts.RaceDamageMultipliers["Undead"] - 1.50) < 0.001, $"Expected RGoW Undead 1.50 (overriding HotLB 1.40 & Polly 1.30), got {preview.GearBoosts.RaceDamageMultipliers["Undead"]}");
+        Assert(Math.Abs(preview.GearBoosts.XpMultiplier - 1.30) < 0.001, $"Expected HotLB XP 1.30, got {preview.GearBoosts.XpMultiplier}");
+        Assert(Math.Abs(preview.GearBoosts.ClassPointsMultiplier - 1.50) < 0.001, $"Expected RGoW/Awescended CP 1.50, got {preview.GearBoosts.ClassPointsMultiplier}");
+        Assert(Math.Abs(preview.GearBoosts.RepMultiplier - 1.50) < 0.001, $"Expected RGoW/Awescended Rep 1.50, got {preview.GearBoosts.RepMultiplier}");
+        Assert(Math.Abs(preview.GearBoosts.GoldMultiplier - 1.30) < 0.001, $"Expected Gold 1.30, got {preview.GearBoosts.GoldMultiplier}");
+
+        var plainScenario = new Scenario
+        {
+            Name = "Plain VHL No Boosts",
+            Seed = 7,
+            Player = new PlayerSetup { Level = 100, Class = "Void Highlord", ClassRank = 10 },
+            Limits = new LimitsSetup { MaxVirtualMinutes = 60, MaxRealSeconds = 20 }
+        };
+
+        var repBoosted = runner.Run(new SimulationRunOptions { ScriptPath = boostScript, Scenario = boostedScenario });
+        var repPlain = runner.Run(new SimulationRunOptions { ScriptPath = boostScript, Scenario = plainScenario });
+
+        Assert(repBoosted.Outcome == SimulationOutcome.Completed, $"Boosted unlimited run failed: {repBoosted.ExceptionText ?? repBoosted.StopReason}");
+        Assert(repBoosted.VirtualDuration.TotalDays >= 2.0, $"Expected >2 virtual days in unlimited mode, got {repBoosted.VirtualDuration}");
+        Assert(repBoosted.FinalState.CompletedQuests.Contains(2937) &&
+               repBoosted.FinalState.CompletedQuests.Contains(8741) &&
+               repBoosted.FinalState.CompletedQuests.Contains(9172) &&
+               repBoosted.FinalState.CompletedQuests.Contains(9466),
+            "Expected Awe (#2937) and Forge (#8741 Valiance, #9172 Dauntless, #9466 Hearty) quests auto-unlocked");
+        Assert(repBoosted.ScriptLogs.Any(l =>
+                l.Text.Contains("GrimRank=7") &&
+                l.Text.Contains("Weap=Necrotic Sword of Doom") &&
+                l.Text.Contains("WeapMeta=dmgAll:1.51") &&
+                l.Text.Contains("Armor=Radiant Goddess of War") &&
+                l.Text.Contains("Helm=Head of the Legion Beast") &&
+                l.Text.Contains("XpBoost=True")),
+            $"Expected real AQW boosted items & GrimRank=7 in logs, got: {string.Join(" | ", repBoosted.ScriptLogs.Select(l => l.Text))}");
+        Assert(repBoosted.FinalState.EffectiveDps > repPlain.FinalState.EffectiveDps * 1.4,
+            $"Expected +51% dmgAll & Forge enhancements to raise DPS significantly (Boosted={repBoosted.FinalState.EffectiveDps:F0} vs Plain={repPlain.FinalState.EffectiveDps:F0})");
+
+        // Verify SimClock multi-day formatting
+        var clk = new SimClock(new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+        var formatted2Days = clk.Format(2L * 24 * 60 * 60 * 1000 + 3_600_000);
+        Assert(formatted2Days == "2d 01:00:00.000", $"Unexpected multi-day clock format: {formatted2Days}");
+
+        Console.WriteLine($"   OK: Boosts/Unlocks/Unlimited verified (DPS {repPlain.FinalState.EffectiveDps:F0} -> {repBoosted.FinalState.EffectiveDps:F0}, Clock={formatted2Days})");
     }
 
     private static bool SpinWaitUntil(Func<bool> predicate, TimeSpan timeout)

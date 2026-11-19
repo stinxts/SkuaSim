@@ -4,9 +4,9 @@
         xmlns:views="using:SkuaSim.UI.Views"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="1360" d:DesignHeight="860"
-        Width="1360" Height="860"
-        MinWidth="1024" MinHeight="680"
+        mc:Ignorable="d" d:DesignWidth="1360" d:DesignHeight="840"
+        Width="1360" Height="840"
+        MinWidth="960" MinHeight="620"
         x:Class="SkuaSim.UI.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Icon="/Assets/avalonia-logo.ico"
@@ -16,25 +16,31 @@
         <vm:MainViewModel />
     </Design.DataContext>
 
-    <Grid RowDefinitions="Auto,*,5,240" Margin="10" RowSpacing="8">
-        <views:ExecutionToolbarView Grid.Row="0" />
+    <LayoutTransformControl>
+        <LayoutTransformControl.LayoutTransform>
+            <ScaleTransform ScaleX="{Binding UiScale}" ScaleY="{Binding UiScale}" />
+        </LayoutTransformControl.LayoutTransform>
 
-        <TabControl Grid.Row="1" SelectedIndex="{Binding WorkspaceTabIndex}" Padding="0,6,0,0">
-            <TabItem Header="Live Client">
-                <views:ClientStateView DataContext="{Binding ClientState}" Margin="0,6,0,0" />
-            </TabItem>
-            <TabItem Header="Scenario &amp; Script Options">
-                <views:ScenarioEditorView DataContext="{Binding ScenarioEditor}" Margin="0,6,0,0" />
-            </TabItem>
-        </TabControl>
+        <Grid RowDefinitions="Auto,*,5,0.34*" Margin="10" RowSpacing="8">
+            <views:ExecutionToolbarView Grid.Row="0" />
 
-        <GridSplitter Grid.Row="2"
-                      ResizeDirection="Rows"
-                      Height="5"
-                      Background="#263242"
-                      CornerRadius="2"
-                      HorizontalAlignment="Stretch" />
+            <TabControl Grid.Row="1" SelectedIndex="{Binding WorkspaceTabIndex}" Padding="0,4,0,0">
+                <TabItem Header="Live Client">
+                    <views:ClientStateView DataContext="{Binding ClientState}" Margin="0,6,0,0" />
+                </TabItem>
+                <TabItem Header="Scenario &amp; Script Options">
+                    <views:ScenarioEditorView DataContext="{Binding ScenarioEditor}" Margin="0,6,0,0" />
+                </TabItem>
+            </TabControl>
 
-        <views:DiagnosticsView Grid.Row="3" DataContext="{Binding Diagnostics}" />
-    </Grid>
+            <GridSplitter Grid.Row="2"
+                          ResizeDirection="Rows"
+                          Height="5"
+                          Background="#263242"
+                          CornerRadius="2"
+                          HorizontalAlignment="Stretch" />
+
+            <views:DiagnosticsView Grid.Row="3" DataContext="{Binding Diagnostics}" MinHeight="170" />
+        </Grid>
+    </LayoutTransformControl>
 </Window>

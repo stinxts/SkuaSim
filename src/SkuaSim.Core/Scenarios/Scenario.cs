@@ -20,6 +20,8 @@ public sealed class Scenario
     public List<ItemSetup> House { get; set; } = new();
     public QuestSetup Quests { get; set; } = new();
     public List<FactionSetup> Factions { get; set; } = new();
+    public BoostsSetup Boosts { get; set; } = new();
+    public EnhancementsSetup Enhancements { get; set; } = new();
 
     /// <summary>Script options (Bot.Config), by option name. Values may be strings, numbers or booleans.</summary>
     public Dictionary<string, JsonElement> Options { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -166,8 +168,40 @@ public sealed class WorldSetup
 
 public sealed class LimitsSetup
 {
+    /// <summary>Maximum virtual simulation duration in minutes. 0 or less means unlimited (runs until script finishes or Stop is clicked).</summary>
     public double MaxVirtualMinutes { get; set; } = 360;
+    /// <summary>Maximum wall-clock execution seconds (excluding compilation). 0 or less means unlimited.</summary>
     public double MaxRealSeconds { get; set; } = 180;
     /// <summary>Stop when no API call happens for this many real seconds (script stuck in pure CPU code).</summary>
     public double StallRealSeconds { get; set; } = 20;
+}
+
+public sealed class BoostsSetup
+{
+    public bool XpBoost { get; set; }
+    public bool ClassPointsBoost { get; set; }
+    public bool GoldBoost { get; set; }
+    public bool RepBoost { get; set; }
+    public bool ServerBoost { get; set; }
+    public List<GearSlotBoostSetup> EquipmentBoosts { get; set; } = new();
+}
+
+public sealed class GearSlotBoostSetup
+{
+    /// <summary>Equipment slot: Weapon, Armor, Helm, Cape, or Pet.</summary>
+    public string Slot { get; set; } = "Weapon";
+    /// <summary>Real AQW boosted item name (e.g. "Necrotic Sword of Doom", "Radiant Goddess of War", "Head of the Legion Beast").</summary>
+    public string? ItemName { get; set; }
+    /// <summary>Optional explicit AQW Meta string (auto-resolved from AqwBoostGearCatalog when ItemName matches).</summary>
+    public string? Meta { get; set; }
+    /// <summary>Legacy single-boost fallback type: None, dmgAll, AllResources, exp, cp, gold, rep, AllRaces, Undead, Chaos, Dragonkin, Human, Elemental, Drakath, Orc.</summary>
+    public string BoostType { get; set; } = "None";
+    /// <summary>Legacy single-boost percentage (e.g. 51 for +51% dmgAll).</summary>
+    public int Percent { get; set; }
+}
+
+public sealed class EnhancementsSetup
+{
+    public List<string> UnlockedAwe { get; set; } = new();
+    public List<string> UnlockedForge { get; set; } = new();
 }

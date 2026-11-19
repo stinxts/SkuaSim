@@ -97,17 +97,22 @@ public sealed class SimulationRunner
 
             foreach (var (memberName, isPrimary, opt) in DiscoverScriptOptions(scriptType, instance))
             {
-                var name = opt.Name ?? "";
-                if (string.IsNullOrWhiteSpace(name))
+                var rawName = opt.Name ?? "";
+                var isHeader = string.IsNullOrWhiteSpace(rawName) || string.Equals(rawName.Trim(), " ", StringComparison.Ordinal);
+                var display = string.IsNullOrWhiteSpace(opt.DisplayName) ? rawName.Trim() : opt.DisplayName.Trim();
+                if (isHeader && string.IsNullOrWhiteSpace(display) && string.IsNullOrWhiteSpace(opt.Description))
                     continue;
+
                 var category = !string.IsNullOrWhiteSpace(opt.Category) &&
                                (isPrimary || !string.Equals(opt.Category, "Options", StringComparison.OrdinalIgnoreCase))
                     ? opt.Category
                     : (isPrimary ? "Options" : memberName);
-                if (!seen.Add($"{category}|{name}"))
+
+                var dedupeKey = isHeader ? $"hdr|{category}|{display}|{opt.Description}" : $"{category}|{rawName}";
+                if (!seen.Add(dedupeKey))
                     continue;
 
-                descriptors.Add(CreateOptionDescriptor(category, opt));
+                descriptors.Add(CreateOptionDescriptor(category, opt, isHeader));
             }
 
             return new ScriptInspectionResult
@@ -198,7 +203,9 @@ public sealed class SimulationRunner
 
         var clock = new SimClock(new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc))
         {
-            MaxVirtualMs = (long)(Math.Max(0.1, scenario.Limits.MaxVirtualMinutes) * 60_000)
+            MaxVirtualMs = scenario.Limits.MaxVirtualMinutes <= 0
+                ? 0
+                : (long)Math.Min(long.MaxValue / 2.0, scenario.Limits.MaxVirtualMinutes * 60_000.0)
         };
 
         using var trace = new SimulationTrace(options.TraceOutputPath, () => clock.NowMs, ms => clock.Format(ms));
@@ -281,7 +288,9 @@ public sealed class SimulationRunner
         session.MarkExecutionStarted(clock);
         scriptThread.Start();
 
-        var maxRealMs = (long)(Math.Max(1.0, scenario.Limits.MaxRealSeconds) * 1000);
+        var maxRealMs = scenario.Limits.MaxRealSeconds <= 0
+            ? long.MaxValue
+            : (long)(scenario.Limits.MaxRealSeconds * 1000.0);
         var stallRealMs = (long)(Math.Max(2.0, scenario.Limits.StallRealSeconds) * 1000);
 
         while (!scriptDone.Wait(50))
@@ -447,6 +456,7 @@ public sealed class SimulationRunner
         botHandler.Servers = hub.Create<IScriptServers>(new ServersApi(ctx), "Bot.Servers");
         botHandler.Handlers = hub.Create<IScriptHandlers>(new HandlersApi(ctx), "Bot.Handlers");
         botHandler.Accounts = hub.Create<IScriptAccounts>(new AccountsApi(ctx), "Bot.Accounts");
+        botHandler.Boosts = hub.Create<IScriptBoost>(new BoostsApi(ctx), "Bot.Boosts");
         botHandler.Config = hub.Create<IScriptOptionContainer>(configHandler, "Bot.Config");
 
         return hub.Create<IScriptInterface>(botHandler, "Bot");
@@ -527,33 +537,108 @@ public sealed class SimulationRunner
         const BindingFlags Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
         var members = new List<(string Name, bool IsPrimary, IEnumerable<IOption> List)>();
 
-        void TryCollectMember(string name, Func<object?> getter)
+        object? ReadMemberValue(string memberName)
         {
-            try
+            var f = scriptType.GetField(memberName, Flags | BindingFlags.IgnoreCase);
+            if (f != null)
+                return f.GetValue(f.IsStatic ? null : scriptInstance);
+
+            var p = scriptType.GetProperty(memberName, Flags | BindingFlags.IgnoreCase);
+            if (p != null && p.GetIndexParameters().Length == 0 && p.CanRead && p.GetMethod is { } getter)
+                return p.GetValue(getter.IsStatic ? null : scriptInstance);
+
+            return null;
+        }
+
+        // Real Skua convention: `public string[] MultiOptions = { "Generic", "Select" };`
+        // When present, Skua uses the exact category list & order declared in MultiOptions.
+        var declaredMultiOptions = new List<string>();
+        try
+        {
+            if (ReadMemberValue("MultiOptions") is IEnumerable<string> multiNames)
             {
-                if (getter() is IEnumerable<IOption> opts)
-                    members.Add((name, string.Equals(name, "Options", StringComparison.OrdinalIgnoreCase), opts));
+                foreach (var n in multiNames)
+                {
+                    if (!string.IsNullOrWhiteSpace(n))
+                        declaredMultiOptions.Add(n.Trim());
+                }
             }
-            catch { }
         }
+        catch { }
 
-        foreach (var field in scriptType.GetFields(Flags))
+        if (declaredMultiOptions.Count > 0)
         {
-            if (field.Name.Contains('<') || !typeof(IEnumerable<IOption>).IsAssignableFrom(field.FieldType))
-                continue;
-            TryCollectMember(field.Name, () => field.GetValue(field.IsStatic ? null : scriptInstance));
-        }
+            // Keep primary Options first if the script also declares it outside MultiOptions
+            if (!declaredMultiOptions.Any(m => string.Equals(m, "Options", StringComparison.OrdinalIgnoreCase)))
+            {
+                try
+                {
+                    if (ReadMemberValue("Options") is IEnumerable<IOption> primaryOpts)
+                        members.Add(("Options", true, primaryOpts));
+                }
+                catch { }
+            }
 
-        foreach (var prop in scriptType.GetProperties(Flags))
+            foreach (var catName in declaredMultiOptions)
+            {
+                try
+                {
+                    if (ReadMemberValue(catName) is IEnumerable<IOption> catOpts)
+                        members.Add((catName, false, catOpts));
+                }
+                catch { }
+            }
+        }
+        else
         {
-            if (prop.GetIndexParameters().Length > 0 || !prop.CanRead || !typeof(IEnumerable<IOption>).IsAssignableFrom(prop.PropertyType))
-                continue;
-            if (prop.GetMethod is not { } getter)
-                continue;
-            TryCollectMember(prop.Name, () => prop.GetValue(getter.IsStatic ? null : scriptInstance));
+            void TryCollectMember(string name, Func<object?> getter)
+            {
+                try
+                {
+                    var val = getter();
+                    if (val is IEnumerable<IOption> opts)
+                    {
+                        members.Add((name, string.Equals(name, "Options", StringComparison.OrdinalIgnoreCase), opts));
+                    }
+                    else if (val is System.Collections.IDictionary dict)
+                    {
+                        foreach (System.Collections.DictionaryEntry entry in dict)
+                        {
+                            var key = entry.Key?.ToString();
+                            if (!string.IsNullOrWhiteSpace(key) && entry.Value is IEnumerable<IOption> catOpts)
+                                members.Add((key, false, catOpts));
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            static bool IsOptionCollectionType(Type t) =>
+                typeof(IEnumerable<IOption>).IsAssignableFrom(t) ||
+                (typeof(System.Collections.IDictionary).IsAssignableFrom(t) &&
+                 t.IsGenericType &&
+                 t.GetGenericArguments().Length == 2 &&
+                 t.GetGenericArguments()[0] == typeof(string) &&
+                 typeof(IEnumerable<IOption>).IsAssignableFrom(t.GetGenericArguments()[1]));
+
+            foreach (var field in scriptType.GetFields(Flags))
+            {
+                if (field.Name.Contains('<') || !IsOptionCollectionType(field.FieldType))
+                    continue;
+                TryCollectMember(field.Name, () => field.GetValue(field.IsStatic ? null : scriptInstance));
+            }
+
+            foreach (var prop in scriptType.GetProperties(Flags))
+            {
+                if (prop.GetIndexParameters().Length > 0 || !prop.CanRead || !IsOptionCollectionType(prop.PropertyType))
+                    continue;
+                if (prop.GetMethod is not { } getter)
+                    continue;
+                TryCollectMember(prop.Name, () => prop.GetValue(getter.IsStatic ? null : scriptInstance));
+            }
         }
 
-        foreach (var group in members.OrderByDescending(m => m.IsPrimary).ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
+        foreach (var group in members.OrderByDescending(m => m.IsPrimary))
         {
             foreach (var opt in group.List)
             {
@@ -563,14 +648,16 @@ public sealed class SimulationRunner
         }
     }
 
-    private static ScriptOptionDescriptor CreateOptionDescriptor(string category, IOption opt)
+    private static ScriptOptionDescriptor CreateOptionDescriptor(string category, IOption opt, bool isHeader = false)
     {
         var type = opt.Type;
-        var isEnum = type?.IsEnum == true || opt.DefaultValue is Enum;
-        var allowed = type?.IsEnum == true ? (IReadOnlyList<string>)Enum.GetNames(type) : Array.Empty<string>();
-        var valueType = isEnum
-            ? "Enum"
-            : type?.FullName ?? opt.DefaultValue?.GetType().FullName ?? "System.String";
+        var isEnum = !isHeader && (type?.IsEnum == true || opt.DefaultValue is Enum);
+        var allowed = isEnum && type?.IsEnum == true ? (IReadOnlyList<string>)Enum.GetNames(type) : Array.Empty<string>();
+        var valueType = isHeader
+            ? "Header"
+            : isEnum
+                ? "Enum"
+                : type?.FullName ?? opt.DefaultValue?.GetType().FullName ?? "System.String";
 
         return new ScriptOptionDescriptor(
             category,
@@ -578,8 +665,9 @@ public sealed class SimulationRunner
             string.IsNullOrWhiteSpace(opt.DisplayName) ? opt.Name ?? "" : opt.DisplayName,
             opt.Description ?? "",
             valueType,
-            ToSafeScalarDefault(opt.DefaultValue, type),
-            allowed);
+            isHeader ? null : ToSafeScalarDefault(opt.DefaultValue, type),
+            allowed,
+            isHeader);
     }
 
     private static object? ToSafeScalarDefault(object? value, Type? declaredType)
@@ -597,12 +685,17 @@ public sealed class SimulationRunner
 
     public string? FindDefaultGameDataPath()
     {
-        var candidates = new[]
+        var candidates = new List<string>
         {
-            Path.Combine(AppContext.BaseDirectory, "data", "gamedata.json"),
             Path.Combine(Directory.GetCurrentDirectory(), "data", "gamedata.json"),
-            Path.Combine(_installation.UserDataDirectory, "SkuaSim", "gamedata.json")
+            Path.Combine(AppContext.BaseDirectory, "data", "gamedata.json")
         };
+
+        var cur = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 6 && cur != null; i++, cur = cur.Parent)
+            candidates.Add(Path.Combine(cur.FullName, "data", "gamedata.json"));
+
+        candidates.Add(Path.Combine(_installation.UserDataDirectory, "SkuaSim", "gamedata.json"));
         return candidates.FirstOrDefault(File.Exists);
     }
 

@@ -181,7 +181,7 @@ public partial class DiagnosticsViewModel : ViewModelBase
 
         foreach (var e in entries)
         {
-            Warnings.Add(new LogRowItem(e.Clock, e.Thread, e.Text));
+            Warnings.Add(new LogRowItem(e.Clock, e.Thread, e.Text, IsWarning: true));
             TotalWarningsCount++;
         }
 
@@ -399,8 +399,13 @@ public partial class DiagnosticsViewModel : ViewModelBase
     private void UpdateTabHeaders()
     {
         LogsTabHeader = $"Logs ({TotalLogsCount:N0})";
-        var issueCount = (HasFatalError ? 1 : 0) + TotalWarningsCount + SynthesizedItems.Count;
-        ErrorsTabHeader = issueCount > 0 ? $"Errors & Diagnostics ({issueCount})" : "Errors & Diagnostics";
+        var parts = new List<string>();
+        if (HasFatalError) parts.Add("ERR");
+        if (TotalWarningsCount > 0) parts.Add($"{TotalWarningsCount} warn");
+        if (SynthesizedItems.Count > 0) parts.Add($"{SynthesizedItems.Count} synth");
+        ErrorsTabHeader = parts.Count > 0
+            ? $"Errors & Diagnostics ({string.Join(", ", parts)})"
+            : "Errors & Diagnostics";
         TraceTabHeader = $"API Trace ({TotalTraceCount:N0})";
     }
 

@@ -214,10 +214,6 @@ public sealed partial class SimWorld
                 Trace.Synthesize("scenario:class", "No class in the scenario: a default 'Warrior' class was equipped.");
             }
 
-            RecalculateStats();
-            if (!s.Player.MaxHealth.HasValue)
-                Health = MaxHealth;
-
             foreach (var id in s.Quests.Completed)
             {
                 CompletedQuests.Add(id);
@@ -250,6 +246,12 @@ public sealed partial class SimWorld
                     RequiredRep = RepForRank(f.Rank + 1) - RepForRank(f.Rank)
                 });
             }
+
+            ApplyScenarioBoostsAndEnhancements();
+
+            RecalculateStats();
+            if (!s.Player.MaxHealth.HasValue)
+                Health = MaxHealth;
         }
 
         if (LoggedIn)
@@ -994,7 +996,7 @@ public sealed partial class SimWorld
                 return false;
             }
 
-            var damage = RollCombatDamageTick(out var isCrit);
+            var damage = RollCombatDamageTick(target, out var isCrit);
             PlayerAttacks++;
             if (isCrit)
                 PlayerCrits++;
@@ -1059,9 +1061,11 @@ public sealed partial class SimWorld
         Kills++;
         KillsByMonster[monster.Name] = KillsByMonster.GetValueOrDefault(monster.Name) + 1;
 
-        var monsterXp = CalculateMonsterXp(monster);
-        GainExperience(monsterXp);
-        Trace.World($"Defeated {monster.Name} (MapID {monster.MapID}) in {monster.Cell} (+{monsterXp} xp).");
+        var baseMonsterXp = CalculateMonsterXp(monster);
+        var boostedXp = Math.Max(1, (int)Math.Round(baseMonsterXp * EffectiveXpMultiplier));
+        GainExperience(boostedXp);
+        GainClassPoints(Math.Max(10, baseMonsterXp / 2));
+        Trace.World($"Defeated {monster.Name} (MapID {monster.MapID}) in {monster.Cell} (+{boostedXp} xp).");
 
         var respawnMs = Math.Max(1, Rules.MonsterRespawnSeconds) * 1000L;
         var map = Map;
@@ -1518,8 +1522,10 @@ public sealed partial class SimWorld
                 AddToInventory(_ctx.Catalog.FindItem(reward.ID) ?? InfoOf(reward), Math.Max(1, reward.Quantity), $"quest {id} reward");
             }
 
-            Gold += q.Gold;
-            GainExperience(q.XP);
+            var questGold = (int)Math.Round(q.Gold * EffectiveGoldMultiplier);
+            var questXp = (int)Math.Round(q.XP * EffectiveXpMultiplier);
+            Gold += questGold;
+            GainExperience(questXp);
             if (q.Slot >= 0)
                 SlotProgress[q.Slot] = Math.Max(SlotProgress.GetValueOrDefault(q.Slot), q.Value);
             if (q.Once || q.Slot >= 0)
@@ -1529,7 +1535,7 @@ public sealed partial class SimWorld
             ActiveQuests.Remove(id);
             QuestsCompletedCount++;
             QuestTurnIns[id] = QuestTurnIns.GetValueOrDefault(id) + 1;
-            Trace.World($"Completed quest {id} ({q.Name}) (+{q.Gold} gold, +{q.XP} xp).");
+            Trace.World($"Completed quest {id} ({q.Name}) (+{questGold} gold, +{questXp} xp).");
         }
         _ctx.RaiseEvent("QuestTurnedIn", id);
         return true;

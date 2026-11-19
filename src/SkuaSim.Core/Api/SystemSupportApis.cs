@@ -129,7 +129,15 @@ public sealed class ConfigApi : ApiBase
         return default!;
     }
 
-    public T Get<T>(string category, string name) => Get<T>(name)!;
+    public T Get<T>(string category, string name)
+    {
+        if (!string.IsNullOrWhiteSpace(category) &&
+            Ctx.Scenario.Options.TryGetValue($"{category}:{name}", out var scopedVal))
+        {
+            return (T)SimContext.ConvertJson(scopedVal, typeof(T))!;
+        }
+        return Get<T>(name)!;
+    }
 
     public string GetDirect(IOption option) =>
         option != null && OptionValues.TryGetValue(option, out var raw) ? raw : option?.DefaultValue?.ToString() ?? "";
@@ -641,6 +649,35 @@ public sealed class AccountsApi : ApiBase
     public void ClearTags() => ClearTags(World.Username);
     public bool ClearTags(string username) => _tags.Remove(username ?? World.Username);
     public List<ManagedAccount> GetAllAccounts() => new();
+}
+
+public sealed class BoostsApi : ApiBase
+{
+    public BoostsApi(SimContext ctx) : base(ctx) { }
+
+    public bool Enabled { get; set; }
+    public bool UsingBoosts => Enabled && (UseExperienceBoost || UseClassBoost || UseGoldBoost || UseReputationBoost);
+
+    public bool UseExperienceBoost { get => World.XpBoostActive; set => World.XpBoostActive = value; }
+    public bool UseClassBoost { get => World.ClassBoostActive; set => World.ClassBoostActive = value; }
+    public bool UseGoldBoost { get => World.GoldBoostActive; set => World.GoldBoostActive = value; }
+    public bool UseReputationBoost { get => World.RepBoostActive; set => World.RepBoostActive = value; }
+
+    public int ExperienceBoostID { get; set; } = 1;
+    public int ClassBoostID { get; set; } = 2;
+    public int GoldBoostID { get; set; } = 3;
+    public int ReputationBoostID { get; set; } = 4;
+
+    public void SetExperienceBoostID(int id = 1) => ExperienceBoostID = id > 0 ? id : 1;
+    public void SetClassBoostID(int id = 2) => ClassBoostID = id > 0 ? id : 2;
+    public void SetGoldBoostID(int id = 3) => GoldBoostID = id > 0 ? id : 3;
+    public void SetReputationBoostID(int id = 4) => ReputationBoostID = id > 0 ? id : 4;
+
+    public void Start() => Enabled = true;
+    public void Stop() => Enabled = false;
+    public Task StartAsync() { Enabled = true; return Task.CompletedTask; }
+    public Task StopAsync() { Enabled = false; return Task.CompletedTask; }
+    public void SetAllBoostsIDs() { }
 }
 
 /// <summary>

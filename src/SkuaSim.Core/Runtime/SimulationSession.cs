@@ -48,7 +48,8 @@ public sealed record ScriptOptionDescriptor(
     string Description,
     string ValueType,
     object? DefaultValue,
-    IReadOnlyList<string> AllowedValues);
+    IReadOnlyList<string> AllowedValues,
+    bool IsHeader = false);
 
 public sealed class ScriptInspectionResult
 {

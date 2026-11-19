@@ -1,8 +1,10 @@
+using System.Globalization;
 using Skua.Core.Models.Items;
 using Skua.Core.Models.Players;
 using Skua.Core.Models.Skills;
 using SkuaSim.Collector.Models;
 using SkuaSim.Core.Data;
+using SkuaSim.Core.Scenarios;
 
 namespace SkuaSim.Core.World;
 
@@ -36,6 +38,38 @@ public sealed record ClassArchetype(
     double PassiveDodgeBonus,
     double DamageReduction);
 
+public sealed class GearBoostProfile
+{
+    public double DamageAllMultiplier { get; init; } = 1.0;
+    public double XpMultiplier { get; init; } = 1.0;
+    public double ClassPointsMultiplier { get; init; } = 1.0;
+    public double GoldMultiplier { get; init; } = 1.0;
+    public double RepMultiplier { get; init; } = 1.0;
+    public IReadOnlyDictionary<string, double> RaceDamageMultipliers { get; init; } = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+
+    public double GetRaceMultiplier(string? race)
+    {
+        if (string.IsNullOrWhiteSpace(race))
+            return 1.0;
+        return RaceDamageMultipliers.TryGetValue(race.Trim(), out var mult) ? Math.Max(1.0, mult) : 1.0;
+    }
+}
+
+public sealed class ScenarioStatsPreview
+{
+    public int ComputedMaxHealth { get; init; }
+    public double EffectiveDps { get; init; }
+    public double CriticalChance { get; init; }
+    public double CriticalMultiplier { get; init; } = 1.5;
+    public double Haste { get; init; }
+    public double EvasionChance { get; init; }
+    public string StatModel { get; init; } = "";
+    public bool UsesCapturedClassData { get; init; }
+    public int CapturedSkillCount { get; init; }
+    public long CapturedSamples { get; init; }
+    public GearBoostProfile GearBoosts { get; init; } = new();
+}
+
 public sealed class ComputedCombatProfile
 {
     public required PlayerStats Stats { get; init; }
@@ -49,6 +83,10 @@ public sealed class ComputedCombatProfile
     public required ClassDamageKind DamageKind { get; init; }
     public required IReadOnlyList<SkillInfo> Skills { get; init; }
     public string EnhancementSummary { get; init; } = string.Empty;
+    public GearBoostProfile GearBoosts { get; init; } = new();
+    public bool UsesCapturedClassData { get; init; }
+    public int CapturedSkillCount { get; init; }
+    public long CapturedSamples { get; init; }
 }
 
 /// <summary>
@@ -339,16 +377,19 @@ public static class StatEngine
                 enhPenalty = 0.85;
         }
 
-        // Base weapon-per-second damage scales roughly linearly with AQW PrimaryPower * 0.72 * class multiplier
+        // Compute equipped gear boost multipliers (AQW non-stacking rule: highest boost per category wins)
+        var gearBoosts = EvaluateGearBoosts(equippedItems);
+
+        // Base weapon-per-second damage scales roughly linearly with AQW PrimaryPower * 0.75 * class multiplier
         var baseAutoSkillDps = Math.Max(8.0, (primaryPower * 0.75 + 10.0) * archetype.BaseDpsMultiplier * rankScale);
-        var effectiveDps = baseAutoSkillDps * critExpectedMult * hasteAttackMult * procDpsFactor * forgeOutDamageMultiplier * enhPenalty;
+        var effectiveDps = baseAutoSkillDps * critExpectedMult * hasteAttackMult * procDpsFactor * forgeOutDamageMultiplier * enhPenalty * gearBoosts.DamageAllMultiplier;
 
         // If Collector captured real class combat damage for this class, gently calibrate with level-normalized observed DPS
         if (capturedClass?.Combat is { } clsCombat && clsCombat.Hits + clsCombat.Crits >= 10 && clsCombat.AverageDamagePerHit > 0)
         {
             var obsPool = StatPoolForLevel((int)Math.Clamp(Math.Round(clsCombat.AverageDamageSampleLevel), 1, 100));
             var levelScale = pool / Math.Max(15.0, obsPool);
-            var obsDpsEstimate = clsCombat.AverageDamagePerHit * 0.8 * levelScale;
+            var obsDpsEstimate = clsCombat.AverageDamagePerHit * 0.8 * levelScale * gearBoosts.DamageAllMultiplier;
             effectiveDps = Math.Clamp(effectiveDps * 0.7 + obsDpsEstimate * 0.3, effectiveDps * 0.4, effectiveDps * 1.8);
         }
 
@@ -398,7 +439,11 @@ public static class StatEngine
             StatModel = archetype.StatModel,
             DamageKind = archetype.DamageKind,
             Skills = skills,
-            EnhancementSummary = enhSig
+            EnhancementSummary = enhSig,
+            GearBoosts = gearBoosts,
+            UsesCapturedClassData = capturedClass != null,
+            CapturedSkillCount = capturedClass?.Skills.Count ?? 0,
+            CapturedSamples = capturedClass?.SamplesObserved ?? 0
         };
     }
 
@@ -594,4 +639,256 @@ public static class StatEngine
         32 => new(0.15, 0.15, 0.55, 0.05, 0.05, 0.05), // Hearty Helm
         _ => new(0.18, 0.18, 0.20, 0.15, 0.15, 0.14)
     };
+
+    private static readonly string[] AllAqwRaces = { "Undead", "Chaos", "Dragonkin", "Human", "Elemental", "Drakath", "Orc" };
+
+    /// <summary>
+    /// Converts a user-friendly scenario slot boost into the exact AQW item Meta string
+    /// (compatible with CoreBots.GetBoostFloat / CoreAdvanced.HasMinimalBoost).
+    /// </summary>
+    public static string BuildBoostMeta(string? boostType, int percent)
+    {
+        if (string.IsNullOrWhiteSpace(boostType) ||
+            boostType.Equals("None", StringComparison.OrdinalIgnoreCase) ||
+            percent <= 0)
+        {
+            return string.Empty;
+        }
+
+        var factor = (1.0 + percent / 100.0).ToString("0.##", CultureInfo.InvariantCulture);
+        var key = boostType.Trim();
+
+        if (key.Equals("AllResources", StringComparison.OrdinalIgnoreCase))
+            return $"exp:{factor},cp:{factor},gold:{factor},rep:{factor}";
+
+        if (key.Equals("AllRaces", StringComparison.OrdinalIgnoreCase))
+            return string.Join(",", AllAqwRaces.Select(r => $"{r}:{factor}"));
+
+        return $"{key}:{factor}";
+    }
+
+    /// <summary>
+    /// Parses AQW item Meta tags across all equipped items using AQW's non-stacking rule
+    /// (highest boost per boost type wins; dmgAll multiplies with matching race boost).
+    /// </summary>
+    public static GearBoostProfile EvaluateGearBoosts(IEnumerable<InventoryItem> equippedItems)
+    {
+        double dmgAll = 1.0, exp = 1.0, cp = 1.0, gold = 1.0, rep = 1.0;
+        var raceMults = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var item in equippedItems)
+        {
+            if (item == null || !item.Equipped || string.IsNullOrWhiteSpace(item.Meta))
+                continue;
+
+            var parts = item.Meta.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            foreach (var part in parts)
+            {
+                var sep = part.IndexOf(':');
+                if (sep <= 0 || sep >= part.Length - 1)
+                    continue;
+
+                var tag = part[..sep].Trim();
+                if (!double.TryParse(part[(sep + 1)..].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var val) || val <= 1.0)
+                    continue;
+
+                if (tag.Equals("dmgAll", StringComparison.OrdinalIgnoreCase))
+                    dmgAll = Math.Max(dmgAll, val);
+                else if (tag.Equals("exp", StringComparison.OrdinalIgnoreCase))
+                    exp = Math.Max(exp, val);
+                else if (tag.Equals("cp", StringComparison.OrdinalIgnoreCase))
+                    cp = Math.Max(cp, val);
+                else if (tag.Equals("gold", StringComparison.OrdinalIgnoreCase))
+                    gold = Math.Max(gold, val);
+                else if (tag.Equals("rep", StringComparison.OrdinalIgnoreCase))
+                    rep = Math.Max(rep, val);
+                else if (AllAqwRaces.Any(r => r.Equals(tag, StringComparison.OrdinalIgnoreCase)))
+                    raceMults[tag] = Math.Max(raceMults.GetValueOrDefault(tag, 1.0), val);
+            }
+        }
+
+        return new GearBoostProfile
+        {
+            DamageAllMultiplier = dmgAll,
+            XpMultiplier = exp,
+            ClassPointsMultiplier = cp,
+            GoldMultiplier = gold,
+            RepMultiplier = rep,
+            RaceDamageMultipliers = raceMults
+        };
+    }
+
+    /// <summary>
+    /// Selects sensible default starting enhancement patterns &amp; weapon proc from the scenario's
+    /// unlocked Awe/Forge checklists for a given class archetype so starting stats match real AQW loadouts.
+    /// </summary>
+    public static (int BasePattern, int WeaponPattern, int WeaponProcId, int HelmPattern, int CapePattern)
+        PickStartingEnhancementsForClass(string? className, GameDataCatalog catalog, EnhancementsSetup? enhSetup)
+    {
+        var archetype = ResolveArchetype(string.IsNullOrWhiteSpace(className) ? "Warrior" : className, catalog.FindClassProfile(className));
+        var isCaster = archetype.DamageKind == ClassDamageKind.Magic ||
+                       archetype.StatModel is AqwStatModel.OffensiveCaster or AqwStatModel.PowerCaster or AqwStatModel.DefensiveCaster;
+        var basePat = isCaster ? 6 : 9; // Wizard for casters, Lucky for melee/hybrid
+
+        if (enhSetup == null || (enhSetup.UnlockedAwe.Count == 0 && enhSetup.UnlockedForge.Count == 0))
+            return (basePat, basePat, 0, basePat, basePat);
+
+        var unlockedForge = new HashSet<string>(enhSetup.UnlockedForge, StringComparer.OrdinalIgnoreCase);
+        var unlockedAwe = new HashSet<string>(enhSetup.UnlockedAwe, StringComparer.OrdinalIgnoreCase);
+
+        // Best weapon proc (Forge > Awe)
+        int weaponPat = basePat;
+        int procId = 0;
+        string[] weaponPriority = isCaster
+            ? new[] { "Elysium", "Valiance", "Arcana's Concerto", "Acheron", "Dauntless", "Ravenous", "Praxis", "Smite", "Lacerate", "Forge (Weapon)" }
+            : new[] { "Ravenous", "Dauntless", "Valiance", "Praxis", "Arcana's Concerto", "Smite", "Lacerate", "Elysium", "Acheron", "Forge (Weapon)" };
+
+        foreach (var wName in weaponPriority)
+        {
+            if (unlockedForge.Contains(wName) && EnhancementUnlockCatalog.Find(wName) is { } info)
+            {
+                weaponPat = info.PatternId;
+                procId = info.ProcId;
+                break;
+            }
+        }
+        if (procId == 0)
+        {
+            foreach (var aName in new[] { "Spiral Carve", "Awe Blast", "Health Vamp", "Mana Vamp", "Powerword Die" })
+            {
+                if (unlockedAwe.Contains(aName) && EnhancementUnlockCatalog.Find(aName) is { } info)
+                {
+                    weaponPat = basePat;
+                    procId = info.ProcId;
+                    break;
+                }
+            }
+        }
+
+        // Best helm
+        int helmPat = basePat;
+        string[] helmPriority = isCaster
+            ? new[] { "Pneuma", "Examen", "Forge (Helm)", "Vim", "Anima", "Hearty" }
+            : archetype.StatModel == AqwStatModel.DodgeMelee
+                ? new[] { "Vim", "Anima", "Forge (Helm)", "Examen", "Pneuma", "Hearty" }
+                : new[] { "Anima", "Vim", "Forge (Helm)", "Hearty", "Examen", "Pneuma" };
+
+        foreach (var hName in helmPriority)
+        {
+            if (unlockedForge.Contains(hName) && EnhancementUnlockCatalog.Find(hName) is { } info)
+            {
+                helmPat = info.PatternId;
+                break;
+            }
+        }
+
+        // Best cape
+        int capePat = basePat;
+        string[] capePriority = new[] { "Vainglory", "Lament", "Penitence", "Avarice", "Absolution", "Forge (Cape)" };
+        foreach (var cName in capePriority)
+        {
+            if (unlockedForge.Contains(cName) && EnhancementUnlockCatalog.Find(cName) is { } info)
+            {
+                capePat = info.PatternId;
+                break;
+            }
+        }
+
+        return (basePat, weaponPat, procId, helmPat, capePat);
+    }
+
+    /// <summary>
+    /// Builds a preview CombatProfile directly from a Scenario + GameDataCatalog for live UI display
+    /// before starting a run (matches what SimWorld.InitializeFromScenario equips at t=0).
+    /// </summary>
+    public static ComputedCombatProfile PreviewScenarioProfile(Scenario scenario, GameDataCatalog catalog)
+    {
+        var level = Math.Clamp(scenario.Player.Level, 1, 100);
+        var className = string.IsNullOrWhiteSpace(scenario.Player.Class) ? "Warrior" : scenario.Player.Class.Trim();
+        var rank = Math.Clamp(scenario.Player.ClassRank, 1, 10);
+
+        var hasEnhUnlocks = scenario.Enhancements.UnlockedAwe.Count > 0 || scenario.Enhancements.UnlockedForge.Count > 0;
+        var hasGearBoosts = scenario.Boosts.EquipmentBoosts.Any(b => !string.IsNullOrEmpty(AqwBoostGearCatalog.ResolveMeta(b)));
+        var (basePat, weapPat, procId, helmPat, capePat) = PickStartingEnhancementsForClass(className, catalog, scenario.Enhancements);
+
+        var equipped = new List<InventoryItem>();
+        // Include explicit equipped items from scenario.Inventory first
+        foreach (var it in scenario.Inventory.Where(i => i.Equipped))
+        {
+            equipped.Add(new InventoryItem
+            {
+                Name = it.Name ?? "Item",
+                CategoryString = string.IsNullOrWhiteSpace(it.Category) ? "Item" : it.Category,
+                Equipped = true,
+                EnhancementPatternID = it.EnhancementPatternID ?? 0,
+                EnhancementLevel = it.EnhancementLevel ?? 0,
+                ProcID = it.ProcID ?? 0
+            });
+        }
+
+        var enhLvl = hasEnhUnlocks ? level : (level >= 10 && equipped.Count == 0 ? level : 0);
+
+        void EnsureSlot(string slot, string category, int patId, int proc)
+        {
+            var group = SimWorld.EquipGroup(category);
+            var existing = equipped.FirstOrDefault(i => SimWorld.EquipGroup(i.CategoryString) == group);
+            var slotBoost = scenario.Boosts.EquipmentBoosts.FirstOrDefault(b => b.Slot.Equals(slot, StringComparison.OrdinalIgnoreCase));
+            var meta = slotBoost != null ? AqwBoostGearCatalog.ResolveMeta(slotBoost) : "";
+            var resolvedName = slot == "Class"
+                ? className
+                : (slotBoost != null ? AqwBoostGearCatalog.ResolveItemName(slotBoost) : $"Simulated {slot}");
+            var resolvedCat = slotBoost != null ? AqwBoostGearCatalog.ResolveCategory(slotBoost, category) : category;
+
+            if (existing == null && (hasEnhUnlocks || !string.IsNullOrEmpty(meta) || slot == "Class"))
+            {
+                existing = new InventoryItem
+                {
+                    Name = resolvedName,
+                    CategoryString = resolvedCat,
+                    ItemGroup = slot == "Weapon" ? "Weapon" : "None",
+                    Equipped = true,
+                    EnhancementPatternID = enhLvl > 0 ? patId : 0,
+                    EnhancementLevel = enhLvl,
+                    ProcID = proc,
+                    Meta = meta
+                };
+                equipped.Add(existing);
+            }
+            else if (existing != null && !string.IsNullOrEmpty(meta) && string.IsNullOrEmpty(existing.Meta))
+            {
+                existing.Meta = meta;
+            }
+        }
+
+        EnsureSlot("Class", "Class", basePat, 0);
+        if (hasEnhUnlocks || hasGearBoosts)
+        {
+            EnsureSlot("Weapon", "Sword", weapPat, procId);
+            EnsureSlot("Armor", "Armor", 0, 0);
+            EnsureSlot("Helm", "Helm", helmPat, 0);
+            EnsureSlot("Cape", "Cape", capePat, 0);
+            EnsureSlot("Pet", "Pet", 0, 0);
+        }
+
+        return ComputeProfile(level, className, rank, equipped, catalog);
+    }
+
+    public static ScenarioStatsPreview PreviewScenarioStats(Scenario scenario, GameDataCatalog catalog)
+    {
+        var profile = PreviewScenarioProfile(scenario, catalog);
+        return new ScenarioStatsPreview
+        {
+            ComputedMaxHealth = profile.ComputedMaxHealth,
+            EffectiveDps = profile.EffectiveDps,
+            CriticalChance = profile.Stats.CriticalChance,
+            CriticalMultiplier = profile.Stats.CriticalMultiplier,
+            Haste = profile.Stats.Haste,
+            EvasionChance = profile.Stats.EvasionChance,
+            StatModel = profile.StatModel.ToString(),
+            UsesCapturedClassData = profile.UsesCapturedClassData,
+            CapturedSkillCount = profile.CapturedSkillCount,
+            CapturedSamples = profile.CapturedSamples,
+            GearBoosts = profile.GearBoosts
+        };
+    }
 }

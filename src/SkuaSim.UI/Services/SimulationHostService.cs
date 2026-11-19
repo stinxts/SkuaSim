@@ -1,7 +1,9 @@
 using System.Runtime.CompilerServices;
 using SkuaSim.Core.Compilation;
+using SkuaSim.Core.Data;
 using SkuaSim.Core.Runtime;
 using SkuaSim.Core.Scenarios;
+using SkuaSim.Core.World;
 using SkuaSim.UI.Models;
 
 namespace SkuaSim.UI.Services;
@@ -14,20 +16,152 @@ public sealed class SimulationHostService : IDisposable
 {
     private SimulationRunner? _runner;
     private SimulationSession? _activeSession;
+    private GameDataCatalog? _cachedCatalog;
+
+    private static readonly string[] BuiltInCommonClasses =
+    {
+        "ArchPaladin", "Blaze Binder", "Chaos Avenger", "Dragon of Time", "Healer",
+        "Imperial Chunin", "Kathool Adept", "Legion Revenant", "Lord of Order",
+        "Mage", "Master Ranger", "Oracle", "Rogue", "Scarlet Sorceress",
+        "Shaman", "StoneCrusher", "Void Highlord", "Warrior", "Yami no Ronin"
+    };
 
     public bool IsReady => SkuaHostBootstrapper.Installation != null;
     public string? ErrorMessage => SkuaHostBootstrapper.StartupError;
     public string ClientFlavor => SkuaHostBootstrapper.Installation?.Flavor ?? "Not detected";
     public string? ScriptsDirectory => SkuaHostBootstrapper.Installation?.ScriptsDirectory;
     public string? AssembliesDirectory => SkuaHostBootstrapper.Installation?.AssembliesDirectory;
+    public string? UserDataDirectory => SkuaHostBootstrapper.Installation?.UserDataDirectory;
     public SimulationSession? ActiveSession => _activeSession;
+
+    public Dictionary<string, string>? TryLoadSkuaCfgOptions(string? optionsStorage)
+    {
+        if (string.IsNullOrWhiteSpace(optionsStorage) || string.IsNullOrWhiteSpace(UserDataDirectory))
+            return null;
+
+        var cfgPath = Path.Combine(UserDataDirectory, "options", $"{optionsStorage.Trim()}.cfg");
+        if (!File.Exists(cfgPath))
+            return null;
+
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var rawLine in File.ReadAllLines(cfgPath))
+            {
+                if (string.IsNullOrWhiteSpace(rawLine))
+                    continue;
+                var eq = rawLine.IndexOf('=');
+                if (eq <= 0)
+                    continue;
+                var left = rawLine[..eq].Trim();
+                var val = rawLine[(eq + 1)..];
+                map[left] = val;
+
+                var colon = left.IndexOf(':');
+                if (colon > 0 && colon + 1 < left.Length)
+                {
+                    var keyOnly = left[(colon + 1)..].Trim();
+                    if (!map.ContainsKey(keyOnly))
+                        map[keyOnly] = val;
+                }
+            }
+            return map;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     public bool ReconfigureSkua(string assembliesDirectory, string? userDataDirectory = null)
     {
         DisposeActiveSession();
         _runner = null;
+        _cachedCatalog = null;
         SkuaHostBootstrapper.Initialize(assembliesDirectory, userDataDirectory);
         return IsReady;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public IReadOnlyList<ClassCatalogOption> DiscoverKnownClasses(bool forceReload = false)
+    {
+        var list = new List<ClassCatalogOption>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            var catalog = GetOrLoadCatalog(forceReload);
+            if (catalog.Captured.Classes is { Count: > 0 })
+            {
+                foreach (var cls in catalog.Captured.Classes.Values.OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrWhiteSpace(cls.Name) || !seen.Add(cls.Name.Trim()))
+                        continue;
+                    list.Add(new ClassCatalogOption(
+                        cls.Name.Trim(),
+                        FromDatabase: true,
+                        StatModel: string.IsNullOrWhiteSpace(cls.InferredStatModel) ? "Auto" : cls.InferredStatModel,
+                        SkillCount: cls.Skills?.Count ?? 0,
+                        Samples: cls.SamplesObserved));
+                }
+            }
+        }
+        catch { }
+
+        foreach (var builtIn in BuiltInCommonClasses)
+        {
+            if (seen.Add(builtIn))
+                list.Add(new ClassCatalogOption(builtIn, FromDatabase: false, StatModel: "Archetype", SkillCount: 6, Samples: 0));
+        }
+
+        return list;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public ScenarioStatsPreview? PreviewScenarioStats(Scenario scenario)
+    {
+        if (!IsReady)
+            return null;
+        try
+        {
+            var catalog = GetOrLoadCatalog(forceReload: false);
+            return StatEngine.PreviewScenarioStats(scenario, catalog);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private GameDataCatalog GetOrLoadCatalog(bool forceReload = false)
+    {
+        if (_cachedCatalog != null && !forceReload)
+            return _cachedCatalog;
+
+        string? gameDataPath = null;
+        if (IsReady)
+        {
+            try { gameDataPath = EnsureRunner().FindDefaultGameDataPath(); } catch { }
+        }
+        gameDataPath ??= FindWorkspaceGameDataPath();
+
+        _cachedCatalog = GameDataCatalog.Load(gameDataPath, null);
+        return _cachedCatalog;
+    }
+
+    private static string? FindWorkspaceGameDataPath()
+    {
+        var candidates = new List<string>
+        {
+            Path.Combine(Directory.GetCurrentDirectory(), "data", "gamedata.json"),
+            Path.Combine(AppContext.BaseDirectory, "data", "gamedata.json")
+        };
+        var cur = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 6 && cur != null; i++, cur = cur.Parent)
+            candidates.Add(Path.Combine(cur.FullName, "data", "gamedata.json"));
+
+        return candidates.FirstOrDefault(File.Exists);
     }
 
     public Task<IReadOnlyList<ScriptEntry>> DiscoverScriptsAsync() => Task.Run<IReadOnlyList<ScriptEntry>>(() =>

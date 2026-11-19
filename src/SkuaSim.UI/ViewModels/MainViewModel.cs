@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 using Avalonia.Controls;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -22,6 +23,9 @@ public partial class MainViewModel : ViewModelBase
     private long _traceCursor;
     private bool _suppressScriptSelectionSync;
     private bool _suppressScenarioSelectionSync;
+    private bool _suppressDurationSync;
+    private double _lastLogicalWidth = 1920;
+    private double _lastLogicalHeight = 1080;
 
     public MainViewModel()
     {
@@ -38,6 +42,32 @@ public partial class MainViewModel : ViewModelBase
             new("100x", 100)
         };
         SelectedSpeed = SpeedPresets[0];
+
+        DisplayScalePresets = new ObservableCollection<DisplayScalePreset>
+        {
+            new("Auto (Screen)", 1.0, IsAuto: true),
+            new("HD (720p)", 0.86, IsAuto: false),
+            new("Full-HD (1080p)", 1.00, IsAuto: false),
+            new("2K (1440p)", 1.18, IsAuto: false),
+            new("4K (2160p)", 1.45, IsAuto: false),
+            new("8K (4320p)", 2.10, IsAuto: false)
+        };
+        SelectedDisplayScale = DisplayScalePresets[0];
+
+        VirtualDurationPresets = new ObservableCollection<VirtualDurationPreset>
+        {
+            new("30 min", 30, false),
+            new("1 hour", 60, false),
+            new("6 hours", 360, false),
+            new("1 day (24h)", 1440, false),
+            new("3 days", 4320, false),
+            new("7 days (1 wk)", 10080, false),
+            new("14 days (2 wks)", 20160, false),
+            new("30 days", 43200, false),
+            new("Unlimited", 0, false),
+            new("Custom...", 360, true)
+        };
+        SelectedVirtualDuration = VirtualDurationPresets[2]; // 6 hours default
 
         if (Design.IsDesignMode)
         {
@@ -59,11 +89,32 @@ public partial class MainViewModel : ViewModelBase
     public ScenarioEditorViewModel ScenarioEditor { get; }
     public DiagnosticsViewModel Diagnostics { get; }
     public ObservableCollection<SpeedPreset> SpeedPresets { get; }
+    public ObservableCollection<DisplayScalePreset> DisplayScalePresets { get; }
+    public ObservableCollection<VirtualDurationPreset> VirtualDurationPresets { get; }
+    public IReadOnlyList<string> CustomDurationUnits { get; } = new[] { "Minutes", "Hours", "Days", "Weeks" };
     public ObservableCollection<ScriptEntry> FilteredScripts { get; } = new();
     public ObservableCollection<ScenarioEntry> AvailableScenarios { get; } = new();
 
     [ObservableProperty]
     public partial int WorkspaceTabIndex { get; set; }
+
+    [ObservableProperty]
+    public partial double UiScale { get; set; } = 1.0;
+
+    [ObservableProperty]
+    public partial DisplayScalePreset SelectedDisplayScale { get; set; }
+
+    [ObservableProperty]
+    public partial VirtualDurationPreset SelectedVirtualDuration { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsCustomVirtualDuration { get; set; }
+
+    [ObservableProperty]
+    public partial string CustomVirtualAmountText { get; set; } = "24";
+
+    [ObservableProperty]
+    public partial string CustomVirtualUnit { get; set; } = "Hours";
 
     [ObservableProperty]
     public partial string ScriptPathText { get; set; } = "";
@@ -132,7 +183,133 @@ public partial class MainViewModel : ViewModelBase
     {
         _dialogService = dialogService;
         Diagnostics.AttachDialogService(dialogService);
-        ScenarioEditor.AttachServices(dialogService, _hostService, () => ScriptPathText, OnScenarioSavedAsync);
+        ScenarioEditor.AttachServices(
+            dialogService,
+            _hostService,
+            () => ScriptPathText,
+            OnScenarioSavedAsync,
+            SyncToolbarVirtualDurationFromEditor);
+    }
+
+    public void UpdateAutoScale(double logicalWidth, double logicalHeight)
+    {
+        if (logicalWidth <= 0 || logicalHeight <= 0)
+            return;
+        _lastLogicalWidth = logicalWidth;
+        _lastLogicalHeight = logicalHeight;
+        if (SelectedDisplayScale is { IsAuto: true })
+            UiScale = ComputeAutoScale(logicalWidth, logicalHeight);
+    }
+
+    private static double ComputeAutoScale(double logicalWidth, double logicalHeight)
+    {
+        if (logicalWidth < 1360 || logicalHeight < 760)
+            return 0.86; // HD (720p) compact fit
+        if (logicalWidth <= 2100)
+            return 1.00; // Full-HD (1080p)
+        if (logicalWidth <= 3000)
+            return 1.18; // 2K (1440p) at 100% OS DPI
+        if (logicalWidth <= 5200)
+            return 1.45; // 4K (2160p) at 100% OS DPI
+        return 2.10;     // 8K (4320p) at 100% OS DPI
+    }
+
+    partial void OnSelectedDisplayScaleChanged(DisplayScalePreset value)
+    {
+        if (value == null)
+            return;
+        UiScale = value.IsAuto
+            ? ComputeAutoScale(_lastLogicalWidth, _lastLogicalHeight)
+            : value.ScaleFactor;
+    }
+
+    partial void OnSelectedVirtualDurationChanged(VirtualDurationPreset value)
+    {
+        if (value == null)
+            return;
+        IsCustomVirtualDuration = value.IsCustom;
+        if (!_suppressDurationSync)
+        {
+            ScenarioEditor.SetVirtualMinutesFromToolbar(GetSelectedVirtualMinutes());
+        }
+    }
+
+    partial void OnCustomVirtualAmountTextChanged(string value)
+    {
+        if (!_suppressDurationSync && IsCustomVirtualDuration)
+            ScenarioEditor.SetVirtualMinutesFromToolbar(GetSelectedVirtualMinutes());
+    }
+
+    partial void OnCustomVirtualUnitChanged(string value)
+    {
+        if (!_suppressDurationSync && IsCustomVirtualDuration)
+            ScenarioEditor.SetVirtualMinutesFromToolbar(GetSelectedVirtualMinutes());
+    }
+
+    private double GetSelectedVirtualMinutes()
+    {
+        if (SelectedVirtualDuration == null)
+            return 360;
+        if (!SelectedVirtualDuration.IsCustom)
+            return SelectedVirtualDuration.Minutes;
+
+        var amount = double.TryParse(CustomVirtualAmountText?.Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed)
+            ? Math.Max(0, parsed)
+            : 6.0;
+        if (amount <= 0)
+            return 0;
+
+        return CustomVirtualUnit switch
+        {
+            "Hours" => amount * 60.0,
+            "Days" => amount * 1440.0,
+            "Weeks" => amount * 10080.0,
+            _ => amount
+        };
+    }
+
+    private void SyncToolbarVirtualDurationFromEditor(double minutes)
+    {
+        _suppressDurationSync = true;
+        try
+        {
+            var exact = VirtualDurationPresets.FirstOrDefault(p => !p.IsCustom && Math.Abs(p.Minutes - minutes) < 0.01);
+            if (exact != null)
+            {
+                SelectedVirtualDuration = exact;
+                IsCustomVirtualDuration = false;
+                return;
+            }
+
+            var custom = VirtualDurationPresets.Last(p => p.IsCustom);
+            SelectedVirtualDuration = custom;
+            IsCustomVirtualDuration = true;
+
+            if (minutes >= 10080 && Math.Abs(minutes % 10080) < 0.01)
+            {
+                CustomVirtualUnit = "Weeks";
+                CustomVirtualAmountText = (minutes / 10080.0).ToString("0.##", CultureInfo.InvariantCulture);
+            }
+            else if (minutes >= 1440 && Math.Abs(minutes % 1440) < 0.01)
+            {
+                CustomVirtualUnit = "Days";
+                CustomVirtualAmountText = (minutes / 1440.0).ToString("0.##", CultureInfo.InvariantCulture);
+            }
+            else if (minutes >= 60 && Math.Abs(minutes % 60) < 0.01)
+            {
+                CustomVirtualUnit = "Hours";
+                CustomVirtualAmountText = (minutes / 60.0).ToString("0.##", CultureInfo.InvariantCulture);
+            }
+            else
+            {
+                CustomVirtualUnit = "Minutes";
+                CustomVirtualAmountText = minutes.ToString("0.##", CultureInfo.InvariantCulture);
+            }
+        }
+        finally
+        {
+            _suppressDurationSync = false;
+        }
     }
 
     public void Shutdown()
@@ -252,7 +429,8 @@ public partial class MainViewModel : ViewModelBase
         }
 
         int? seedOverride = int.TryParse(SeedText.Trim(), out var parsedSeed) ? parsedSeed : null;
-        var scenarioToRun = ScenarioEditor.BuildScenario(seedOverride);
+        var virtualMinutesOverride = GetSelectedVirtualMinutes();
+        var scenarioToRun = ScenarioEditor.BuildScenario(seedOverride, virtualMinutesOverride);
 
         WorkspaceTabIndex = 0;
         ClientState.Reset();
@@ -421,6 +599,8 @@ public partial class MainViewModel : ViewModelBase
             _suppressScenarioSelectionSync = false;
         }
 
+        ScenarioEditor.RefreshKnownClasses(forceReload: true);
+
         var scripts = await _hostService.DiscoverScriptsAsync();
         _allScripts.Clear();
         _allScripts.AddRange(scripts);
@@ -557,6 +737,7 @@ public partial class MainViewModel : ViewModelBase
             var loaded = _hostService.LoadScenarioFile(path);
             ScenarioEditor.LoadFromScenario(loaded, Path.GetFullPath(path));
             SeedText = (loaded.Seed ?? 42).ToString();
+            SyncToolbarVirtualDurationFromEditor(loaded.Limits.MaxVirtualMinutes);
         }
         catch (Exception ex)
         {
@@ -620,5 +801,7 @@ public partial class MainViewModel : ViewModelBase
     };
 
     private static string FormatDuration(TimeSpan t) =>
-        $"{(int)t.TotalHours:00}:{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds:000}";
+        t.Days > 0
+            ? $"{t.Days}d {t.Hours:00}:{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds:000}"
+            : $"{(int)t.TotalHours:00}:{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds:000}";
 }

@@ -56,6 +56,7 @@ public sealed class BotApi : ApiBase
     public IScriptServers Servers { get; set; } = null!;
     public IScriptHandlers Handlers { get; set; } = null!;
     public IScriptAccounts Accounts { get; set; } = null!;
+    public IScriptBoost Boosts { get; set; } = null!;
     public IScriptOptionContainer Config { get; set; } = null!;
 
     public bool ShouldExit => Ctx.StopRequested;

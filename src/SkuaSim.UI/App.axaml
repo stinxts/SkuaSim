@@ -4,6 +4,15 @@
              xmlns:local="using:SkuaSim.UI"
              RequestedThemeVariant="Dark">
 
+    <Application.Resources>
+        <!-- Standardized Typography Scale (Fluid across HD, Full-HD, 2K, 4K, and 8K via UiScale) -->
+        <x:Double x:Key="FontSizeDisplay">16</x:Double>
+        <x:Double x:Key="FontSizeHeading">13.5</x:Double>
+        <x:Double x:Key="FontSizeBody">12.5</x:Double>
+        <x:Double x:Key="FontSizeMono">12</x:Double>
+        <x:Double x:Key="FontSizeCaption">11</x:Double>
+    </Application.Resources>
+
     <Application.DataTemplates>
         <local:ViewLocator />
     </Application.DataTemplates>
@@ -14,8 +23,49 @@
         <Style Selector="Window">
             <Setter Property="Background" Value="#0F141B" />
             <Setter Property="Foreground" Value="#E6EDF3" />
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeBody}" />
         </Style>
 
+        <!-- Uniform control font sizes so inputs, dropdowns, tabs, and buttons feel cohesive -->
+        <Style Selector="TextBox">
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeBody}" />
+            <Setter Property="MinHeight" Value="30" />
+            <Setter Property="Padding" Value="8,5" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style Selector="ComboBox">
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeBody}" />
+            <Setter Property="MinHeight" Value="30" />
+            <Setter Property="Padding" Value="8,4" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style Selector="Button">
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeBody}" />
+            <Setter Property="MinHeight" Value="30" />
+            <Setter Property="Padding" Value="10,5" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style Selector="CheckBox">
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeBody}" />
+            <Setter Property="MinHeight" Value="24" />
+        </Style>
+
+        <Style Selector="TabItem">
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeHeading}" />
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="Padding" Value="12,4" />
+        </Style>
+
+        <Style Selector="ListBoxItem">
+            <Setter Property="Padding" Value="6,3" />
+            <Setter Property="MinHeight" Value="22" />
+        </Style>
+
+        <!-- Cards & Semantic Diagnostic Containers -->
         <Style Selector="Border.Card">
             <Setter Property="Background" Value="#161E29" />
             <Setter Property="BorderBrush" Value="#263242" />
@@ -34,35 +84,76 @@
 
         <Style Selector="Border.ErrorCard">
             <Setter Property="Background" Value="#2B1418" />
-            <Setter Property="BorderBrush" Value="#B91C1C" />
+            <Setter Property="BorderBrush" Value="#DC2626" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="CornerRadius" Value="6" />
             <Setter Property="Padding" Value="10" />
         </Style>
 
         <Style Selector="Border.WarningCard">
-            <Setter Property="Background" Value="#292010" />
-            <Setter Property="BorderBrush" Value="#B45309" />
+            <Setter Property="Background" Value="#291E10" />
+            <Setter Property="BorderBrush" Value="#D97706" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="CornerRadius" Value="6" />
             <Setter Property="Padding" Value="8" />
         </Style>
 
+        <!-- Signature Violet style for Synthesized / Invented Data -->
+        <Style Selector="Border.SynthCard">
+            <Setter Property="Background" Value="#20132C" />
+            <Setter Property="BorderBrush" Value="#A855F7" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="8" />
+        </Style>
+
+        <Style Selector="Border.StubCard">
+            <Setter Property="Background" Value="#111D29" />
+            <Setter Property="BorderBrush" Value="#334155" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="8" />
+        </Style>
+
+        <!-- Standardized Semantic Text Styles -->
+        <Style Selector="TextBlock.DisplayTitle">
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeDisplay}" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Foreground" Value="#F8FAFC" />
+        </Style>
+
         <Style Selector="TextBlock.SectionTitle">
-            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeHeading}" />
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="Foreground" Value="#93C5FD" />
         </Style>
 
+        <Style Selector="TextBlock.BodyText">
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeBody}" />
+            <Setter Property="Foreground" Value="#E6EDF3" />
+        </Style>
+
         <Style Selector="TextBlock.MetricLabel">
-            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeCaption}" />
             <Setter Property="Foreground" Value="#94A3B8" />
         </Style>
 
         <Style Selector="TextBlock.MetricValue">
-            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeBody}" />
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="Foreground" Value="#F1F5F9" />
+        </Style>
+
+        <Style Selector="TextBlock.MonoText">
+            <Setter Property="FontFamily" Value="Consolas, monospace" />
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeMono}" />
+            <Setter Property="Foreground" Value="#E2E8F0" />
+        </Style>
+
+        <Style Selector="TextBlock.BadgeText">
+            <Setter Property="FontFamily" Value="Consolas, monospace" />
+            <Setter Property="FontSize" Value="{DynamicResource FontSizeCaption}" />
+            <Setter Property="FontWeight" Value="Bold" />
         </Style>
 
         <Style Selector="Button.Primary">
