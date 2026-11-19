@@ -167,5 +167,19 @@
             <Setter Property="Foreground" Value="#FFFFFF" />
             <Setter Property="FontWeight" Value="SemiBold" />
         </Style>
+
+        <!-- Responsive Splitters: Always above adjacent panes, clear hover highlight -->
+        <Style Selector="GridSplitter">
+            <Setter Property="Background" Value="#263242" />
+            <Setter Property="CornerRadius" Value="3" />
+            <Setter Property="ShowsPreview" Value="False" />
+            <Setter Property="ZIndex" Value="20" />
+        </Style>
+        <Style Selector="GridSplitter:pointerover">
+            <Setter Property="Background" Value="#38BDF8" />
+        </Style>
+        <Style Selector="GridSplitter:pressed">
+            <Setter Property="Background" Value="#60A5FA" />
+        </Style>
     </Application.Styles>
 </Application>

@@ -21,10 +21,17 @@
             <ScaleTransform ScaleX="{Binding UiScale}" ScaleY="{Binding UiScale}" />
         </LayoutTransformControl.LayoutTransform>
 
-        <Grid RowDefinitions="Auto,*,5,0.34*" Margin="10" RowSpacing="8">
-            <views:ExecutionToolbarView Grid.Row="0" />
+        <Grid Margin="10">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" MinHeight="180" />
+                <RowDefinition Height="8" />
+                <RowDefinition Height="0.34*" MinHeight="140" />
+            </Grid.RowDefinitions>
 
-            <TabControl Grid.Row="1" SelectedIndex="{Binding WorkspaceTabIndex}" Padding="0,4,0,0">
+            <views:ExecutionToolbarView Grid.Row="0" Margin="0,0,0,8" />
+
+            <TabControl Grid.Row="1" SelectedIndex="{Binding WorkspaceTabIndex}" Padding="0,4,0,0" ClipToBounds="True">
                 <TabItem Header="Live Client">
                     <views:ClientStateView DataContext="{Binding ClientState}" Margin="0,6,0,0" />
                 </TabItem>
@@ -35,12 +42,13 @@
 
             <GridSplitter Grid.Row="2"
                           ResizeDirection="Rows"
-                          Height="5"
-                          Background="#263242"
-                          CornerRadius="2"
-                          HorizontalAlignment="Stretch" />
+                          ResizeBehavior="PreviousAndNext"
+                          MinHeight="6"
+                          Margin="0,1"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch" />
 
-            <views:DiagnosticsView Grid.Row="3" DataContext="{Binding Diagnostics}" MinHeight="170" />
+            <views:DiagnosticsView Grid.Row="3" DataContext="{Binding Diagnostics}" ClipToBounds="True" />
         </Grid>
     </LayoutTransformControl>
 </Window>

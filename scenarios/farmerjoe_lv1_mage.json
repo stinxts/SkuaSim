@@ -43,8 +43,8 @@
     "PetChoice": "None"
   },
   "limits": {
-    "maxVirtualMinutes": 120,
-    "maxRealSeconds": 120,
+    "maxVirtualMinutes": 0,
+    "maxRealSeconds": 0,
     "stallRealSeconds": 20
   }
 }

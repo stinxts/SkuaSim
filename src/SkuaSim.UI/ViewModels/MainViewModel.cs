@@ -667,8 +667,8 @@ public partial class MainViewModel : ViewModelBase
     private void ApplyLiveSnapshot(SimulationLiveSnapshot snap)
     {
         VirtualClockText = FormatDuration(snap.VirtualTime);
-        RealTimeText = $"{snap.ActiveRealTime.TotalSeconds:F2} s";
-        PausedTimeText = $"{snap.PausedTime.TotalSeconds:F2} s";
+        RealTimeText = FormatRealTime(snap.ActiveRealTime);
+        PausedTimeText = FormatRealTime(snap.PausedTime);
         ApiCallsText = $"{snap.TotalApiCalls:N0}";
         LastApiCallText = string.IsNullOrWhiteSpace(snap.LastApiCall) ? "-" : snap.LastApiCall;
 
@@ -804,4 +804,13 @@ public partial class MainViewModel : ViewModelBase
         t.Days > 0
             ? $"{t.Days}d {t.Hours:00}:{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds:000}"
             : $"{(int)t.TotalHours:00}:{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds:000}";
+
+    private static string FormatRealTime(TimeSpan t)
+    {
+        if (t.TotalHours >= 1)
+            return $"{(int)t.TotalHours:00}:{t.Minutes:00}:{t.Seconds:00}";
+        if (t.TotalMinutes >= 1)
+            return $"{t.Minutes:00}m {t.Seconds:00}s";
+        return $"{t.TotalSeconds:F2} s";
+    }
 }

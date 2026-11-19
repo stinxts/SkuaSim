@@ -5,9 +5,15 @@
              x:Class="SkuaSim.UI.Views.ClientStateView"
              x:DataType="vm:ClientStateViewModel">
 
-    <Grid ColumnDefinitions="0.35*,5,0.65*">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="0.35*" MinWidth="260" />
+            <ColumnDefinition Width="8" />
+            <ColumnDefinition Width="0.65*" MinWidth="300" />
+        </Grid.ColumnDefinitions>
+
         <!-- Left Column: Live Client ("Skua without Flash") -->
-        <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" MinWidth="310">
+        <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" ClipToBounds="True">
             <StackPanel Spacing="10" Margin="0,0,6,0">
                 <!-- Location & Target Card -->
                 <Border Classes="Card">
@@ -140,13 +146,14 @@
 
         <GridSplitter Grid.Column="1"
                       ResizeDirection="Columns"
-                      Width="5"
-                      Background="#263242"
-                      CornerRadius="2"
+                      ResizeBehavior="PreviousAndNext"
+                      MinWidth="6"
+                      Margin="1,0"
+                      HorizontalAlignment="Stretch"
                       VerticalAlignment="Stretch" />
 
         <!-- Right Column: Containers, Quests, Factions, Maps -->
-        <Border Grid.Column="2" Classes="Card" Padding="6">
+        <Border Grid.Column="2" Classes="Card" Padding="6" ClipToBounds="True">
             <TabControl>
                 <!-- Inventory -->
                 <TabItem Header="{Binding InventoryHeader}">

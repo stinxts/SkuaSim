@@ -81,9 +81,15 @@
         </Border>
 
         <!-- Main Proportional Split: Left = Scenario / Boosts / Enhancements, Right = Skua Script Options -->
-        <Grid Grid.Row="1" ColumnDefinitions="0.60*,5,0.40*">
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="0.60*" MinWidth="360" />
+                <ColumnDefinition Width="8" />
+                <ColumnDefinition Width="0.40*" MinWidth="280" />
+            </Grid.ColumnDefinitions>
+
             <!-- Left Column: Scrollable Scenario Form -->
-            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto">
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" ClipToBounds="True">
                 <StackPanel Spacing="10" Margin="0,0,8,0">
 
                     <!-- 1. Player, Databank Class & Live Real Stats Preview -->
@@ -182,8 +188,10 @@
                                     </Grid>
                                 </StackPanel>
                                 <StackPanel Grid.Column="4" Spacing="3">
-                                    <TextBlock Text="Max Real (s, 0=Unl)" Classes="MetricLabel" />
-                                    <TextBox Text="{Binding MaxRealSecondsText}" ToolTip.Tip="Maximum real execution seconds (0 = unlimited)" />
+                                    <TextBlock Text="Max Real (s, 0=∞)" Classes="MetricLabel" />
+                                    <TextBox Text="{Binding MaxRealSecondsText}"
+                                             PlaceholderText="0 (Infinite)"
+                                             ToolTip.Tip="Maximum wall-clock execution seconds (0 or blank = Infinite / Unlimited)" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="5" Spacing="3">
                                     <TextBlock Text="Stall (s)" Classes="MetricLabel" />
@@ -338,13 +346,14 @@
 
             <GridSplitter Grid.Column="1"
                           ResizeDirection="Columns"
-                          Width="5"
-                          Background="#263242"
-                          CornerRadius="2"
+                          ResizeBehavior="PreviousAndNext"
+                          MinWidth="6"
+                          Margin="1,0"
+                          HorizontalAlignment="Stretch"
                           VerticalAlignment="Stretch" />
 
             <!-- Right Column: Skua-Faithful Script Options (Bot.Config) -->
-            <Border Grid.Column="2" Classes="Card" MinWidth="320">
+            <Border Grid.Column="2" Classes="Card" ClipToBounds="True">
                 <Grid RowDefinitions="Auto,Auto,*" RowSpacing="8">
                     <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="6">
                         <TextBlock Text="Script Options" Classes="SectionTitle" VerticalAlignment="Center" />

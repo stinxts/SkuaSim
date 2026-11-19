@@ -170,8 +170,8 @@ public sealed class LimitsSetup
 {
     /// <summary>Maximum virtual simulation duration in minutes. 0 or less means unlimited (runs until script finishes or Stop is clicked).</summary>
     public double MaxVirtualMinutes { get; set; } = 360;
-    /// <summary>Maximum wall-clock execution seconds (excluding compilation). 0 or less means unlimited.</summary>
-    public double MaxRealSeconds { get; set; } = 180;
+    /// <summary>Maximum wall-clock execution seconds (excluding compilation). 0 or less means unlimited (infinite).</summary>
+    public double MaxRealSeconds { get; set; } = 0;
     /// <summary>Stop when no API call happens for this many real seconds (script stuck in pure CPU code).</summary>
     public double StallRealSeconds { get; set; } = 20;
 }

@@ -23,6 +23,6 @@
   ],
   "limits": {
     "maxVirtualMinutes": 60,
-    "maxRealSeconds": 60
+    "maxRealSeconds": 0
   }
 }

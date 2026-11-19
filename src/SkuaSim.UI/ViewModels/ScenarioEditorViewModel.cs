@@ -121,7 +121,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
     [ObservableProperty] public partial string VirtualDurationAmountText { get; set; } = "6";
     [ObservableProperty] public partial string VirtualDurationUnit { get; set; } = "Hours";
     [ObservableProperty] public partial bool IsVirtualDurationAmountEnabled { get; set; } = true;
-    [ObservableProperty] public partial string MaxRealSecondsText { get; set; } = "180";
+    [ObservableProperty] public partial string MaxRealSecondsText { get; set; } = "0";
     [ObservableProperty] public partial string StallRealSecondsText { get; set; } = "15";
 
     // Active 2x Consumable & Server Boosts
@@ -340,7 +340,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
         clone.Location.Pad = string.IsNullOrWhiteSpace(StartPad) ? "Spawn" : StartPad.Trim();
 
         clone.Limits.MaxVirtualMinutes = toolbarVirtualMinutesOverride ?? GetCurrentVirtualMinutes();
-        clone.Limits.MaxRealSeconds = Math.Max(0, ParseDoubleOr(MaxRealSecondsText, 180));
+        clone.Limits.MaxRealSeconds = ParseRealSecondsOrUnlimited(MaxRealSecondsText);
         clone.Limits.StallRealSeconds = Math.Max(2, ParseDoubleOr(StallRealSecondsText, 15));
 
         // Boosts & Real AQW Boosted Equipment
@@ -1108,6 +1108,22 @@ public partial class ScenarioEditorViewModel : ViewModelBase
 
     private static double ParseDoubleOr(string? text, double fallback) =>
         double.TryParse(text?.Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : fallback;
+
+    private static double ParseRealSecondsOrUnlimited(string? text)
+    {
+        var trimmed = text?.Trim();
+        if (string.IsNullOrEmpty(trimmed) ||
+            trimmed == "∞" ||
+            trimmed.Equals("inf", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("infinite", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("unlimited", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+        return double.TryParse(trimmed, NumberStyles.Any, CultureInfo.InvariantCulture, out var v)
+            ? Math.Max(0, v)
+            : 0;
+    }
 
     private static string SanitizeFileName(string name)
     {

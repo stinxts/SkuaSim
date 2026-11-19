@@ -891,7 +891,7 @@ internal static class CoreTests
                 UnlockedAwe = new List<string> { "Spiral Carve", "Awe Blast" },
                 UnlockedForge = new List<string> { "Valiance", "Dauntless", "Anima", "Vainglory", "Hearty" }
             },
-            Limits = new LimitsSetup { MaxVirtualMinutes = 0, MaxRealSeconds = 20 } // 0 = Unlimited virtual time!
+            Limits = new LimitsSetup { MaxVirtualMinutes = 0, MaxRealSeconds = 0 } // 0 = Unlimited virtual & real time!
         };
 
         // Verify AQW highest-in-category stacking across multi-boost real AQW gear via StatEngine preview
