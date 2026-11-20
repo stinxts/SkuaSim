@@ -20,7 +20,17 @@ public sealed class PacketSchemaSampler
     private static readonly HashSet<string> RedactedKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         "strUsername", "uoName", "unm", "strName", "guild", "strGuild", "chat", "sToken", "token",
-        "userId", "charId", "intCharID"
+        "userId", "charId", "intCharID",
+        // Personal inventory state carried by addItems/getDrop (per-character item record ID, owned quantity, bank flag)
+        "CharItemID", "iQtyNow", "bBank",
+        // The player's own house layout
+        "houseData"
+    };
+
+    /// <summary>String (str) server packets sampled for protocol verification. Their arguments are numbers/cells only.</summary>
+    public static readonly IReadOnlySet<string> ProtocolStringCommands = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "respawnMon", "resTimed"
     };
 
     private static readonly HashSet<string> EntityIdKeys = new(StringComparer.OrdinalIgnoreCase)
@@ -28,9 +38,38 @@ public sealed class PacketSchemaSampler
         "uid", "casterId"
     };
 
+    /// <summary>Unknown commands only get a few value-free skeleton samples each.</summary>
+    public const int MaxSkeletonSamplesPerCommand = 3;
+
+    /// <summary>
+    /// Protocol packets sampled in full (anonymized) to verify the real key names the parsers rely on
+    /// (Phase 3.5 Step 1). They describe the world (maps, monsters, rewards, quests, drops), never the player's own
+    /// inventory/bank/social data.
+    /// </summary>
+    public static readonly IReadOnlySet<string> ProtocolCommands = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "moveToArea", "addGoldExp", "dropItem", "addItems", "ccqr", "getQuests", "monsterDrops",
+        // Monster respawn/update candidates (exact name to be confirmed by the command census)
+        "mtls", "respawnMon"
+    };
+
+    /// <summary>
+    /// Commands whose name suggests personal or social data. They are counted by the census but never sampled,
+    /// not even as value-free skeletons.
+    /// </summary>
+    private static readonly Regex PersonalCommandRegex = new(
+        "inv|bank|house|friend|chat|whisper|message|msg|guild|mail|login|user|party|ignore|char|account|password|report|trade",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>Keys removed from moveToArea before sampling: the other players present in the room.</summary>
+    private static readonly string[] RoomPlayerKeys = { "uoBranch", "uoBranchs", "players" };
+
     private readonly object _sync = new();
     private readonly Dictionary<string, List<PacketSchemaSample>> _pendingBuckets = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HashSet<string>> _seenShapesByCategory = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, long> _pendingCommandCounts = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _commandsSeenThisSession = new(StringComparer.Ordinal);
+    private long _countsSinceFlush;
     private int _sessionSamplesCaptured;
     private bool _dirty;
 
@@ -64,7 +103,98 @@ public sealed class PacketSchemaSampler
     {
         if (!Enabled || string.IsNullOrWhiteSpace(category) || dataObj == null)
             return;
+        CaptureCore(category, cmd, dataObj, selfEntityId, selfUsername, mapContext, MaxSamplesPerCategory, skeletonOnly: false);
+    }
 
+    /// <summary>
+    /// Counts one server command by name only (no payload). Persisted as <see cref="PacketSchemaDocument.CommandCounts"/>
+    /// so unhandled packets (e.g. the monster respawn packet) can be discovered without recording their content.
+    /// </summary>
+    public void CountCommand(string commandName)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(commandName))
+            return;
+
+        lock (_sync)
+        {
+            _pendingCommandCounts[commandName] = _pendingCommandCounts.GetValueOrDefault(commandName) + 1;
+            // Mark dirty on a new command name or periodically, not on every packet, to avoid rewriting the file constantly.
+            if (_commandsSeenThisSession.Add(commandName) || ++_countsSinceFlush >= 500)
+                _dirty = true;
+        }
+    }
+
+    /// <summary>
+    /// Samples a JSON server packet for protocol verification: allowlisted world packets in full (anonymized),
+    /// any other non-personal command as a value-free skeleton (key names only). Personal commands are never sampled.
+    /// </summary>
+    public void TryCaptureProtocol(string cmd, JObject dataObj, bool handledByCollector, int selfEntityId, string? selfUsername, string? mapContext)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(cmd) || dataObj == null)
+            return;
+
+        if (ProtocolCommands.Contains(cmd))
+        {
+            var payload = dataObj;
+            if (cmd == "moveToArea")
+            {
+                // Never sample the player's own house (layout + owner-specific area name).
+                if (IsHousePayload(dataObj, mapContext))
+                    return;
+                payload = (JObject)dataObj.DeepClone();
+                foreach (var key in RoomPlayerKeys)
+                {
+                    if (payload[key] is JArray players)
+                        payload[key] = $"<OMITTED {players.Count} room player(s)>";
+                    else if (payload[key] != null)
+                        payload[key] = "<OMITTED room players>";
+                }
+            }
+            CaptureCore("proto_" + cmd, cmd, payload, selfEntityId, selfUsername, mapContext, MaxSamplesPerCategory, skeletonOnly: false);
+            return;
+        }
+
+        if (handledByCollector || PersonalCommandRegex.IsMatch(cmd))
+            return;
+
+        CaptureCore("skeleton_" + cmd, cmd, dataObj, selfEntityId, selfUsername, mapContext: null, MaxSkeletonSamplesPerCommand, skeletonOnly: true);
+    }
+
+    /// <summary>
+    /// Samples an allowlisted string (str) server packet, e.g. ["respawnMon", "-1", "3"], as
+    /// <c>{ "cmd": ..., "args": [...] }</c>. Other str packets (chat, warnings) are never sampled.
+    /// </summary>
+    public void TryCaptureStringPacket(JArray parts, int selfEntityId, string? selfUsername, string? mapContext)
+    {
+        if (!Enabled || parts == null || parts.Count == 0 || parts[0]?.Type != JTokenType.String)
+            return;
+        var cmd = parts[0]!.ToString();
+        if (!ProtocolStringCommands.Contains(cmd))
+            return;
+
+        var payload = new JObject
+        {
+            ["cmd"] = cmd,
+            ["args"] = new JArray(parts.Skip(1).Select(p => p.DeepClone()))
+        };
+        CaptureCore("proto_str_" + cmd, cmd, payload, selfEntityId, selfUsername, mapContext, MaxSamplesPerCategory, skeletonOnly: false);
+    }
+
+    private static bool IsHousePayload(JObject payload, string? mapContext) =>
+        string.Equals((mapContext ?? string.Empty).Trim(), "house", StringComparison.OrdinalIgnoreCase) ||
+        payload["houseData"] != null ||
+        string.Equals(payload["strMapName"]?.ToString(), "house", StringComparison.OrdinalIgnoreCase);
+
+    private void CaptureCore(
+        string category,
+        string cmd,
+        JObject dataObj,
+        int selfEntityId,
+        string? selfUsername,
+        string? mapContext,
+        int maxSamples,
+        bool skeletonOnly)
+    {
         lock (_sync)
         {
             if (!_seenShapesByCategory.TryGetValue(category, out var seenShapes))
@@ -73,11 +203,13 @@ public sealed class PacketSchemaSampler
                 _seenShapesByCategory[category] = seenShapes;
             }
 
-            if (seenShapes.Count >= MaxSamplesPerCategory)
+            if (seenShapes.Count >= maxSamples)
                 return;
 
             var playerAliasMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var sanitized = (JObject)SanitizeToken(dataObj.DeepClone(), selfEntityId, selfUsername, playerAliasMap, parentKey: null);
+            if (skeletonOnly)
+                sanitized = (JObject)ToSkeleton(sanitized);
             var normalizedMap = (mapContext ?? string.Empty).Trim().ToLowerInvariant();
             var shapeKey = ComputeShapeKey(cmd, normalizedMap, sanitized);
 
@@ -106,9 +238,10 @@ public sealed class PacketSchemaSampler
     public void FlushToFiles(string primarySchemaPath, IEnumerable<string>? mirrorSchemaPaths = null)
     {
         Dictionary<string, List<PacketSchemaSample>> pendingSnapshot;
+        Dictionary<string, long> pendingCounts;
         lock (_sync)
         {
-            if (!_dirty || _pendingBuckets.Count == 0)
+            if (!_dirty || (_pendingBuckets.Count == 0 && _pendingCommandCounts.Count == 0))
                 return;
 
             pendingSnapshot = new Dictionary<string, List<PacketSchemaSample>>(StringComparer.OrdinalIgnoreCase);
@@ -118,10 +251,13 @@ public sealed class PacketSchemaSampler
                     pendingSnapshot[cat] = new List<PacketSchemaSample>(list);
             }
             _pendingBuckets.Clear();
+            pendingCounts = new Dictionary<string, long>(_pendingCommandCounts, StringComparer.Ordinal);
+            _pendingCommandCounts.Clear();
+            _countsSinceFlush = 0;
             _dirty = false;
         }
 
-        if (pendingSnapshot.Count == 0)
+        if (pendingSnapshot.Count == 0 && pendingCounts.Count == 0)
             return;
 
         var mutexName = BuildMutexName(primarySchemaPath);
@@ -153,6 +289,9 @@ public sealed class PacketSchemaSampler
                 {
                     if (sample?.Payload == null)
                         continue;
+                    // Retroactively drop any sample of the player's own house (older builds sampled it).
+                    if (IsHousePayload(sample.Payload, sample.MapContext))
+                        continue;
 
                     var aliasMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     sample.Payload = (JObject)SanitizeToken(sample.Payload, 0, null, aliasMap, parentKey: null);
@@ -160,7 +299,7 @@ public sealed class PacketSchemaSampler
                     if (string.IsNullOrWhiteSpace(sample.ShapeKey))
                         sample.ShapeKey = ComputeShapeKey(sample.Command, sample.MapContext, sample.Payload);
 
-                    if (shapeSet.Add(sample.ShapeKey) && cleanedList.Count < MaxSamplesPerCategory)
+                    if (shapeSet.Add(sample.ShapeKey) && cleanedList.Count < MaxSamplesFor(cat))
                         cleanedList.Add(sample);
                 }
                 existing[cat] = cleanedList;
@@ -183,7 +322,7 @@ public sealed class PacketSchemaSampler
 
                 foreach (var s in samples)
                 {
-                    if (dst.Count >= MaxSamplesPerCategory)
+                    if (dst.Count >= MaxSamplesFor(cat))
                         break;
                     var key = string.IsNullOrWhiteSpace(s.ShapeKey)
                         ? ComputeShapeKey(s.Command, s.MapContext, s.Payload)
@@ -196,11 +335,19 @@ public sealed class PacketSchemaSampler
                 }
             }
 
+            var commandCounts = new Dictionary<string, long>(existingDoc.CommandCounts ?? new Dictionary<string, long>(), StringComparer.Ordinal);
+            foreach (var (name, count) in pendingCounts)
+                commandCounts[name] = commandCounts.GetValueOrDefault(name) + count;
+
             var doc = new PacketSchemaDocument
             {
-                Note = "Anonymized AQW packet samples accumulated across sessions for SkuaSim protocol calibration. Contains zero usernames or account/entity IDs.",
+                Note = "Anonymized AQW packet samples accumulated across sessions for SkuaSim protocol calibration. Contains zero usernames or account/entity IDs. 'skeleton_*' samples keep key names only; CommandCounts holds command names and counts only.",
                 LastUpdatedUtc = DateTime.UtcNow,
                 TotalFlushesMerged = existingDoc.TotalFlushesMerged + 1,
+                CommandCounts = commandCounts
+                    .OrderByDescending(kv => kv.Value)
+                    .ThenBy(kv => kv.Key, StringComparer.Ordinal)
+                    .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal),
                 Categories = existing
             };
 
@@ -246,6 +393,36 @@ public sealed class PacketSchemaSampler
         catch { }
 
         return new PacketSchemaDocument();
+    }
+
+    private static int MaxSamplesFor(string category) =>
+        category.StartsWith("skeleton_", StringComparison.OrdinalIgnoreCase) ? MaxSkeletonSamplesPerCommand : MaxSamplesPerCategory;
+
+    /// <summary>Replaces every leaf value with its type ("&lt;int&gt;", "&lt;str&gt;", ...); keeps at most 2 array items.</summary>
+    private static JToken ToSkeleton(JToken token)
+    {
+        switch (token.Type)
+        {
+            case JTokenType.Object:
+            {
+                var dst = new JObject();
+                foreach (var prop in ((JObject)token).Properties())
+                    dst[prop.Name] = ToSkeleton(prop.Value);
+                return dst;
+            }
+            case JTokenType.Array:
+            {
+                var dst = new JArray();
+                foreach (var item in ((JArray)token).Take(2))
+                    dst.Add(ToSkeleton(item));
+                return dst;
+            }
+            case JTokenType.Integer: return new JValue("<int>");
+            case JTokenType.Float: return new JValue("<float>");
+            case JTokenType.Boolean: return new JValue("<bool>");
+            case JTokenType.Null: return new JValue("<null>");
+            default: return new JValue("<str>");
+        }
     }
 
     private static string ComputeShapeKey(string cmd, string mapContext, JObject payload)
@@ -476,6 +653,8 @@ public sealed class PacketSchemaDocument
     public string Note { get; set; } = string.Empty;
     public DateTime LastUpdatedUtc { get; set; } = DateTime.UtcNow;
     public int TotalFlushesMerged { get; set; }
+    /// <summary>Server command name -> times seen (names and counts only, no payloads).</summary>
+    public Dictionary<string, long> CommandCounts { get; set; } = new(StringComparer.Ordinal);
     public Dictionary<string, List<PacketSchemaSample>> Categories { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 

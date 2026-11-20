@@ -174,6 +174,12 @@ public sealed class LimitsSetup
     public double MaxRealSeconds { get; set; } = 0;
     /// <summary>Stop when no API call happens for this many real seconds (script stuck in pure CPU code).</summary>
     public double StallRealSeconds { get; set; } = 20;
+    /// <summary>
+    /// Stop with outcome Stalled when the player's progress (level, XP, gold, coins, items, quests, story slots,
+    /// reputation) does not change for this many virtual minutes, which almost always means an infinite loop.
+    /// Measured in virtual time, so it is deterministic. 0 or less disables it.
+    /// </summary>
+    public double MaxNoProgressMinutes { get; set; } = 60;
 }
 
 public sealed class BoostsSetup

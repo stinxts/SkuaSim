@@ -9,6 +9,11 @@ using SkuaSim.Core.World;
 
 var installation = SkuaInstallation.Detect();
 SkuaAssemblyResolver.Register(installation.ProbeDirectories);
+
+// Child-process mode used by the cross-process determinism test.
+if (args.Length >= 2 && args[0] == CoreTests.FingerprintArg)
+    return CoreTests.PrintDeterminismFingerprint(installation, args[1]);
+
 return CoreTests.RunAll(installation);
 
 internal static class CoreTests
@@ -39,6 +44,9 @@ internal static class CoreTests
             TestClassCombatDodgeCritHealAndDeterminism(runner, tempDir);
             TestCatalogClassCalibration(installation, tempDir);
             TestBoostsEnhancementUnlocksAndLongVirtualDuration(runner, tempDir);
+            TestKillQuestHintsOnDemandMonstersAndStallDetector(runner, tempDir);
+            TestCrossProcessDeterminism(tempDir);
+            TestSchemaV2QuestGatedAndUnknownRateDrops(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -938,6 +946,249 @@ internal static class CoreTests
         Assert(formatted2Days == "2d 01:00:00.000", $"Unexpected multi-day clock format: {formatted2Days}");
 
         Console.WriteLine($"   OK: Boosts/Unlocks/Unlimited verified (DPS {repPlain.FinalState.EffectiveDps:F0} -> {repBoosted.FinalState.EffectiveDps:F0}, Clock={formatted2Days})");
+    }
+
+    private static void TestKillQuestHintsOnDemandMonstersAndStallDetector(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("12. Testing KillQuest AST hints, on-demand monsters on synthesized maps & no-progress (Stalled) detector...");
+
+        // (a) KillQuest(id, map, "name") and KillQuest(id, map, new[] {...}) feed synthesized maps;
+        // (b) a monster requested by a runtime-built name is spawned on demand instead of looping forever.
+        var hintScript = Path.Combine(tempDir, "KillQuestHintBot.cs");
+        File.WriteAllText(hintScript, """
+        using System.Linq;
+        using Skua.Core.Interfaces;
+
+        public class KillQuestHintBot
+        {
+            // Stand-ins with CoreStory's signatures: only the literal arguments matter to the hint extractor.
+            public void KillQuest(int questId, string mapName, string monsterName) { }
+            public void KillQuest(int questId, string mapName, string[] monsterNames) { }
+
+            public void ScriptMain(IScriptInterface bot)
+            {
+                KillQuest(165, "zzsimlair", "Sim Wyvern");
+                KillQuest(166, "zzsimpeak", new[] { "Alpha Beast", "Beta Beast" });
+
+                bot.Map.Join("zzsimlair");
+                bot.Log("LAIR " + string.Join(",", bot.Monsters.MapMonsters.Select(m => m.Name).Distinct()));
+                bot.Map.Join("zzsimpeak");
+                bot.Log("PEAK " + string.Join(",", bot.Monsters.MapMonsters.Select(m => m.Name).Distinct()));
+
+                bot.Map.Join("zzsimvoid");
+                var runtimeName = string.Concat("Runtime", " Golem");
+                bot.Kill.Monster(runtimeName);
+            }
+        }
+        """);
+
+        var strongPlayer = new PlayerSetup { Username = "Tester", Level = 100, MaxHealth = 10_000, DamagePerSecond = 8_000 };
+        var hintReport = runner.Run(new SimulationRunOptions
+        {
+            ScriptPath = hintScript,
+            Scenario = new Scenario { Name = "KillQuest hints", Player = strongPlayer, Limits = new LimitsSetup { MaxVirtualMinutes = 30 } },
+            SeedOverride = 5
+        });
+        var logs = string.Join(" | ", hintReport.ScriptLogs.Select(l => l.Text));
+        Assert(hintReport.Outcome == SimulationOutcome.Completed, $"Hint run expected Completed, got {hintReport.Outcome} ({hintReport.ExceptionText ?? hintReport.StopReason})");
+        Assert(hintReport.ScriptLogs.Any(l => l.Text.StartsWith("LAIR") && l.Text.Contains("Sim Wyvern")), $"Expected 'Sim Wyvern' synthesized from KillQuest(string) hint, logs: {logs}");
+        Assert(hintReport.ScriptLogs.Any(l => l.Text.StartsWith("PEAK") && l.Text.Contains("Alpha Beast") && l.Text.Contains("Beta Beast")), $"Expected both monsters from KillQuest(string[]) hint, logs: {logs}");
+        Assert(hintReport.KillsByMonster.GetValueOrDefault("Runtime Golem") >= 1, $"Expected the on-demand 'Runtime Golem' to be killed, kills: {string.Join(", ", hintReport.KillsByMonster.Select(k => $"{k.Key}={k.Value}"))}");
+
+        // (c) A tight polling loop that never progresses (the /lair bug shape) must stop as Stalled, deterministically.
+        var stallScript = Path.Combine(tempDir, "NoProgressLoopBot.cs");
+        File.WriteAllText(stallScript, """
+        using Skua.Core.Interfaces;
+
+        public class NoProgressLoopBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Map.Join("zzsimloop");
+                while (!bot.ShouldExit)
+                    bot.TempInv.Contains("Never Drops", 12);
+            }
+        }
+        """);
+
+        var stallScenario = new Scenario
+        {
+            Name = "No progress loop",
+            Player = strongPlayer,
+            Limits = new LimitsSetup { MaxVirtualMinutes = 120, MaxNoProgressMinutes = 3 }
+        };
+        var stall = runner.Run(new SimulationRunOptions { ScriptPath = stallScript, Scenario = stallScenario, SeedOverride = 5 });
+        Assert(stall.Outcome == SimulationOutcome.Stalled, $"Expected Stalled, got {stall.Outcome} ({stall.ExceptionText ?? stall.StopReason})");
+        Assert(stall.VirtualDuration >= TimeSpan.FromMinutes(3) && stall.VirtualDuration < TimeSpan.FromMinutes(4),
+            $"Expected the stall to be detected right after 3 virtual minutes, got {stall.VirtualDuration}");
+        Assert(stall.StopReason?.Contains("Contains") == true, $"Expected the repeated TempInv.Contains call to be named, got: {stall.StopReason}");
+
+        var stallAgain = runner.Run(new SimulationRunOptions { ScriptPath = stallScript, Scenario = stallScenario, SeedOverride = 5 });
+        Assert(stallAgain.Outcome == SimulationOutcome.Stalled && stallAgain.VirtualDuration == stall.VirtualDuration,
+            $"Stall detection must be deterministic: {stall.VirtualDuration} vs {stallAgain.VirtualDuration}");
+
+        // Disabled (0) must fall back to the virtual time limit.
+        stallScenario.Limits.MaxNoProgressMinutes = 0;
+        stallScenario.Limits.MaxVirtualMinutes = 4;
+        var disabled = runner.Run(new SimulationRunOptions { ScriptPath = stallScript, Scenario = stallScenario, SeedOverride = 5 });
+        Assert(disabled.Outcome == SimulationOutcome.LimitReached, $"Expected LimitReached with the detector disabled, got {disabled.Outcome}");
+
+        Console.WriteLine($"   OK: KillQuest hints + on-demand monster verified; Stalled after {stall.VirtualDuration} ({stall.TotalApiCalls:N0} calls)");
+    }
+
+    private static void TestSchemaV2QuestGatedAndUnknownRateDrops(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("14. Testing schema v2 drops: quest-gated drops need the quest active; unknown rates are synthesized, never 0 %...");
+        var gameDataPath = Path.Combine(tempDir, "gamedata_v2_test.json");
+        File.WriteAllText(gameDataPath, """
+        {
+          "SchemaVersion": 2,
+          "Maps": { "zzgatemap": { "Name": "zzgatemap", "Cells": { "Enter": ["Spawn"], "r1": ["Left"] },
+            "Monsters": { "1": { "MapID": 1, "MonsterID": 990001, "Name": "Gate Beast", "Cell": "r1", "Level": 5, "MaxHP": 300 } } } },
+          "Monsters": { "id:990001": { "Key": "id:990001", "ID": 990001, "Name": "Gate Beast", "Level": 5, "MaxHP": 300, "KillCount": 50,
+            "Drops": {
+              "990101": { "ItemID": 990101, "ItemName": "Gated Fang", "DropEvents": 10, "TrackedDropEvents": 10, "EligibleKills": 10,
+                          "QuestGated": true, "RequiredQuestIds": [802], "RateBasis": "quest_active_kills" },
+              "990102": { "ItemID": 990102, "ItemName": "Official Pelt", "IsOfficialDrop": true, "DropEvents": 0, "EligibleKills": 50, "RateBasis": "unverified" }
+            } } }
+        }
+        """);
+
+        var script = Path.Combine(tempDir, "GatedDropBot.cs");
+        File.WriteAllText(script, """
+        using Skua.Core.Interfaces;
+
+        public class GatedDropBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Map.Join("zzgatemap");
+                for (var i = 0; i < 6; i++)
+                {
+                    bot.Hunt.Monster("Gate Beast");
+                    bot.Sleep(13_000); // single spawn: wait for the 12 s respawn
+                }
+            }
+        }
+        """);
+
+        Scenario MakeScenario(bool questActive) => new()
+        {
+            Name = questActive ? "Gated quest active" : "Gated quest inactive",
+            Player = new PlayerSetup { Username = "Tester", Level = 100, MaxHealth = 10_000, DamagePerSecond = 8_000 },
+            Quests = new QuestSetup { Active = questActive ? new List<int> { 802 } : new List<int>() },
+            Limits = new LimitsSetup { MaxVirtualMinutes = 30 }
+        };
+
+        var inactive = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = MakeScenario(false), GameDataPath = gameDataPath, SeedOverride = 3 });
+        var active = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = MakeScenario(true), GameDataPath = gameDataPath, SeedOverride = 3 });
+
+        Assert(inactive.Outcome == SimulationOutcome.Completed && active.Outcome == SimulationOutcome.Completed,
+            $"Both runs must complete ({inactive.Outcome}: {inactive.StopReason}; {active.Outcome}: {active.StopReason})");
+        Assert(inactive.Kills >= 6 && active.Kills >= 6, $"Expected 6 kills per run (inactive={inactive.Kills}, active={active.Kills})");
+        Assert(inactive.DropsByItem.GetValueOrDefault("Gated Fang") == 0,
+            $"A quest-gated drop must not drop without its quest active (got {inactive.DropsByItem.GetValueOrDefault("Gated Fang")})");
+        Assert(active.DropsByItem.GetValueOrDefault("Gated Fang") >= 6,
+            $"With the quest active the measured 100 % gated rate must apply (got {active.DropsByItem.GetValueOrDefault("Gated Fang")})");
+        Assert(inactive.DropsByItem.GetValueOrDefault("Official Pelt") > 0 &&
+               inactive.SynthesizedData.Any(s => s.Key.StartsWith("droprate:gate beast:990102")),
+            "An official drop with no measured rate must use a flagged synthesized chance instead of 0 %");
+        Console.WriteLine($"   OK: Gated Fang inactive=0 / active={active.DropsByItem["Gated Fang"]}, Official Pelt synthesized={inactive.DropsByItem["Official Pelt"]}");
+    }
+
+    internal const string FingerprintArg = "--determinism-fingerprint";
+
+    /// <summary>
+    /// Runs the same scenario in two separate processes and compares the results. Same-process reruns cannot catch
+    /// per-process randomness such as string.GetHashCode(), which used to leak into monster and faction IDs.
+    /// </summary>
+    private static void TestCrossProcessDeterminism(string tempDir)
+    {
+        Console.WriteLine("13. Testing determinism across separate processes (same seed => identical IDs and outcome)...");
+        var workDir = Path.Combine(tempDir, "fingerprint");
+        Directory.CreateDirectory(workDir);
+
+        var first = RunFingerprintChild(workDir);
+        var second = RunFingerprintChild(workDir);
+        Assert(first == second, $"Cross-process results differ:\n  run 1: {first}\n  run 2: {second}");
+        Console.WriteLine($"   OK: Identical in 2 processes ({first})");
+    }
+
+    private static string RunFingerprintChild(string workDir)
+    {
+        var processPath = Environment.ProcessPath ?? throw new InvalidOperationException("Cannot locate the test executable.");
+        var psi = new ProcessStartInfo(processPath)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        // Under "dotnet SkuaSim.Core.Tests.dll" the host is dotnet.exe, so pass the test assembly first.
+        if (string.Equals(Path.GetFileNameWithoutExtension(processPath), "dotnet", StringComparison.OrdinalIgnoreCase))
+            psi.ArgumentList.Add(typeof(CoreTests).Assembly.Location);
+        psi.ArgumentList.Add(FingerprintArg);
+        psi.ArgumentList.Add(workDir);
+
+        using var process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start the fingerprint child process.");
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stdout = process.StandardOutput.ReadToEnd();
+        if (!process.WaitForExit(180_000))
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw new Exception("Fingerprint child process timed out.");
+        }
+        var line = stdout.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.StartsWith("FINGERPRINT "));
+        Assert(process.ExitCode == 0 && line != null, $"Fingerprint child failed (exit {process.ExitCode}): {stdout}\n{stderrTask.Result}");
+        return line!["FINGERPRINT ".Length..];
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static int PrintDeterminismFingerprint(SkuaInstallation installation, string workDir)
+    {
+        var script = Path.Combine(workDir, "FingerprintBot.cs");
+        File.WriteAllText(script, """
+        using Skua.Core.Interfaces;
+
+        public class FingerprintBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Map.Join("zzfpmap");
+                for (var i = 0; i < 3; i++)
+                    bot.Hunt.Monster("Fp Slime");
+                bot.Sleep(5_000);
+            }
+        }
+        """);
+
+        var scenario = new Scenario
+        {
+            Name = "Cross-process fingerprint",
+            Player = new PlayerSetup { Username = "Tester", Level = 50, MaxHealth = 5_000, DamagePerSecond = 600 },
+            // No Id on the monster or the faction: both IDs are derived from their names.
+            Factions = new List<FactionSetup> { new() { Name = "Fp Faction", Rank = 3 } },
+            Maps = new Dictionary<string, MapSetup>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["zzfpmap"] = new MapSetup
+                {
+                    Cells = new List<string> { "Enter", "r1" },
+                    Monsters = new List<MonsterSetup> { new() { Name = "Fp Slime", Cell = "r1", Count = 2, MaxHP = 2_000, Level = 20 } }
+                }
+            },
+            Limits = new LimitsSetup { MaxVirtualMinutes = 30 }
+        };
+
+        var report = new SimulationRunner(installation).Run(new SimulationRunOptions { ScriptPath = script, Scenario = scenario, SeedOverride = 99 });
+        var fs = report.FinalState;
+        Console.WriteLine("FINGERPRINT " + string.Join(" ",
+            $"outcome={report.Outcome}",
+            $"virtualMs={(long)report.VirtualDuration.TotalMilliseconds}",
+            $"kills={report.Kills}",
+            $"gold={fs.Gold}",
+            $"hp={fs.Health}",
+            $"monIds={string.Join(",", fs.MapMonsters.Select(m => $"{m.MapId}:{m.MonId}:{m.Hp}"))}",
+            $"factions={string.Join(",", fs.Factions.Select(f => $"{f.Id}:{f.TotalRep}"))}"));
+        return report.Outcome == SimulationOutcome.Completed ? 0 : 1;
     }
 
     private static bool SpinWaitUntil(Func<bool> predicate, TimeSpan timeout)

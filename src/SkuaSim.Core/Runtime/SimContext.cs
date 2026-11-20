@@ -55,6 +55,60 @@ public sealed class SimContext
 
     public void NoteApiActivity() => Interlocked.Exchange(ref _lastApiActivityTicks, DateTime.UtcNow.Ticks);
 
+    // ------------------------------------------------------------ No-progress watchdog
+    private const long ProgressCheckIntervalMs = 30_000;
+    private long _nextProgressCheckMs;
+    private long _lastProgressMs;
+    private long? _progressSignature;
+    private Dictionary<string, long>? _callCountsAtLastProgress;
+
+    /// <summary>True when the run was stopped by the no-progress watchdog (outcome Stalled).</summary>
+    public bool StallDetected { get; private set; }
+
+    /// <summary>
+    /// Called by the main thread every time virtual time advances. Every 30 virtual seconds it compares the
+    /// world's progress fingerprint; if it stays identical for Limits.MaxNoProgressMinutes it stops the run as
+    /// Stalled and names the API calls the script kept repeating. Driven only by virtual time, so it is deterministic.
+    /// </summary>
+    internal void CheckProgress(long nowMs)
+    {
+        var limitMinutes = Scenario.Limits.MaxNoProgressMinutes;
+        if (limitMinutes <= 0 || StopRequested || nowMs < _nextProgressCheckMs)
+            return;
+        _nextProgressCheckMs = nowMs + ProgressCheckIntervalMs;
+
+        var signature = World.ProgressSignature();
+        if (_progressSignature != signature)
+        {
+            _progressSignature = signature;
+            _lastProgressMs = nowMs;
+            _callCountsAtLastProgress = new Dictionary<string, long>(Trace.CallCounts);
+            return;
+        }
+
+        var idleMs = nowMs - _lastProgressMs;
+        if (idleMs < limitMinutes * 60_000)
+            return;
+
+        var baseline = _callCountsAtLastProgress ?? new Dictionary<string, long>();
+        var repeated = Trace.CallCounts
+            .Select(kv => (Name: kv.Key, Delta: kv.Value - baseline.GetValueOrDefault(kv.Key)))
+            .Where(x => x.Delta > 0)
+            .OrderByDescending(x => x.Delta)
+            .ThenBy(x => x.Name, StringComparer.Ordinal)
+            .Take(5)
+            .Select(x => $"{x.Name} x{x.Delta:N0}")
+            .ToList();
+
+        var message =
+            $"no progress for {limitMinutes:0.#} virtual minutes (level, XP, gold, items, quests and reputation unchanged since {Clock.Format(_lastProgressMs)}, map '{World.MapName}', cell '{World.Cell}'). " +
+            $"Most repeated API calls since then: {(repeated.Count > 0 ? string.Join(", ", repeated) : "none")}. " +
+            "This is most likely an infinite loop; if the script legitimately waits this long, raise limits.maxNoProgressMinutes (0 disables).";
+        StallDetected = true;
+        Trace.Warn("Stalled: " + message);
+        RequestStop(message);
+    }
+
     public void RequestStop(string reason)
     {
         if (StopRequested)

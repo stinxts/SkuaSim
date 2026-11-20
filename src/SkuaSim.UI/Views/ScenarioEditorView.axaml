@@ -167,7 +167,7 @@
                             <CheckBox Content="Member (Upgrade)" IsChecked="{Binding IsMember}" />
 
                             <!-- Location & Simulation Duration / Limits -->
-                            <Grid ColumnDefinitions="*,*,*,1.5*,*,*" ColumnSpacing="8">
+                            <Grid ColumnDefinitions="*,*,*,1.5*,*,*,*" ColumnSpacing="8">
                                 <StackPanel Grid.Column="0" Spacing="3">
                                     <TextBlock Text="Start Map" Classes="MetricLabel" />
                                     <TextBox Text="{Binding StartMap}" />
@@ -196,6 +196,12 @@
                                 <StackPanel Grid.Column="5" Spacing="3">
                                     <TextBlock Text="Stall (s)" Classes="MetricLabel" />
                                     <TextBox Text="{Binding StallRealSecondsText}" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="6" Spacing="3">
+                                    <TextBlock Text="No Progress (min)" Classes="MetricLabel" />
+                                    <TextBox Text="{Binding MaxNoProgressMinutesText}"
+                                             PlaceholderText="60"
+                                             ToolTip.Tip="Stop as 'Stalled' when level, XP, gold, items, quests and reputation stay unchanged for this many virtual minutes (likely an infinite loop). 0 = disabled." />
                                 </StackPanel>
                             </Grid>
                         </StackPanel>

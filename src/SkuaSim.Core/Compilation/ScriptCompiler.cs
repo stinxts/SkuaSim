@@ -359,11 +359,21 @@ public sealed class ScriptCompiler
                 IdentifierNameSyntax id => id.Identifier.ValueText,
                 _ => null
             };
-            if (methodName is not ("KillMonster" or "HuntMonster" or "BuyItem"))
+            if (methodName is not ("KillMonster" or "HuntMonster" or "KillQuest" or "BuyItem"))
                 continue;
 
             var args = inv.ArgumentList.Arguments;
-            if (methodName == "KillMonster" && args.Count >= 4)
+            if (methodName == "KillQuest" && args.Count >= 3)
+            {
+                // CoreStory.KillQuest(int QuestID, string MapName, string MonsterName | string[] MonsterNames, ...)
+                var mapExpr = GetArgument(args, 1, "MapName");
+                var monExpr = GetArgument(args, 2, "MonsterName") ?? GetArgument(args, 2, "MonsterNames");
+                var map = mapExpr == null ? null : GetStringLiteral(mapExpr);
+                var names = monExpr == null ? new List<string>() : GetStringLiterals(monExpr);
+                if (!string.IsNullOrWhiteSpace(map) && names.Count > 0)
+                    monsters.Add(new SynthesizedMonsterHint(map.Trim(), "r1", string.Join("|", names.Select(n => n.Trim()))));
+            }
+            else if (methodName == "KillMonster" && args.Count >= 4)
             {
                 var map = GetStringLiteral(args[0].Expression);
                 var cell = GetStringLiteral(args[1].Expression);
@@ -393,6 +403,35 @@ public sealed class ScriptCompiler
         expr is LiteralExpressionSyntax lit && lit.IsKind(SyntaxKind.StringLiteralExpression)
             ? lit.Token.ValueText
             : null;
+
+    /// <summary>Returns the argument named <paramref name="name"/>, or the positional one at <paramref name="index"/>.</summary>
+    private static ExpressionSyntax? GetArgument(SeparatedSyntaxList<ArgumentSyntax> args, int index, string name)
+    {
+        var named = args.FirstOrDefault(a => a.NameColon?.Name.Identifier.ValueText == name);
+        if (named != null)
+            return named.Expression;
+        return index < args.Count && args[index].NameColon == null ? args[index].Expression : null;
+    }
+
+    /// <summary>
+    /// String literals from a single literal, <c>new[] { "a", "b" }</c>, <c>new string[] { ... }</c>
+    /// or a collection expression <c>["a", "b"]</c>. Non-literal elements are skipped.
+    /// </summary>
+    private static List<string> GetStringLiterals(ExpressionSyntax expr)
+    {
+        IEnumerable<ExpressionSyntax> elements = expr switch
+        {
+            ImplicitArrayCreationExpressionSyntax implicitArray => implicitArray.Initializer.Expressions,
+            ArrayCreationExpressionSyntax array when array.Initializer != null => array.Initializer.Expressions,
+            CollectionExpressionSyntax collection => collection.Elements.OfType<ExpressionElementSyntax>().Select(e => e.Expression),
+            _ => new[] { expr }
+        };
+        return elements
+            .Select(GetStringLiteral)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s!)
+            .ToList();
+    }
 
     private static int? GetIntLiteral(ExpressionSyntax expr) =>
         expr is LiteralExpressionSyntax lit && lit.IsKind(SyntaxKind.NumericLiteralExpression) && lit.Token.Value is int v

@@ -292,6 +292,7 @@ public sealed class SimClock : SkuaSim.Runtime.ISimTimeSource
         _spinCounter = 0;
         LastAdvanceRealUtc = DateTime.UtcNow;
         Context?.NoteApiActivity();
+        Context?.CheckProgress(NowMs);
 
         if (MaxVirtualMs > 0 && NowMs >= MaxVirtualMs)
             Context?.RequestStop($"virtual time limit reached ({Format(MaxVirtualMs)})");

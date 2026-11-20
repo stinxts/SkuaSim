@@ -11,7 +11,9 @@ public enum SimulationOutcome
     StoppedByScript,
     LimitReached,
     ScriptException,
-    CompileError
+    CompileError,
+    /// <summary>No player progress for Limits.MaxNoProgressMinutes of virtual time (likely an infinite loop).</summary>
+    Stalled
 }
 
 public sealed class SimulationReport

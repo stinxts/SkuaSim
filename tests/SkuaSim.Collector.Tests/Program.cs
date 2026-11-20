@@ -289,7 +289,7 @@ try
     Assert(mon.Combat.CounterAttacksObserved >= 1, "Counter-attack not recorded");
     Assert(mon.Auras.ContainsKey("Counter Attack"), "Aura Counter Attack not recorded");
     Assert(mon.Drops[61890].DropEvents == 1 && mon.Drops[61890].TotalQuantity == 5, "Drop count mismatch");
-    Assert(Math.Abs(mon.Drops[61890].EstimatedDropChance - 0.5) < 0.001, $"Expected 0.5 drop chance (1/2 kills), got {mon.Drops[61890].EstimatedDropChance}");
+    Assert(mon.Drops[61890].EstimatedDropChance is { } chance61890 && Math.Abs(chance61890 - 0.5) < 0.001, $"Expected 0.5 drop chance (1/2 kills), got {mon.Drops[61890].EstimatedDropChance}");
 
     Assert(merged.Shops.ContainsKey(2031) && merged.Shops[2031].Items.Count == 1, "Shop 2031 not captured");
     Assert(merged.Quests.ContainsKey(8152) && merged.Quests[8152].AcceptedCount == 1 && merged.Quests[8152].TurnInCount == 1, "Quest 8152 stats mismatch");
@@ -404,7 +404,10 @@ try
         "Shop 141 EnhancementPatternID not captured");
 
     var persistedJson = File.ReadAllText(primaryPath);
-    Assert(!persistedJson.Contains("4242") && !persistedJson.Contains("8888"), "Persisted JSON must not leak ephemeral entity IDs");
+    // Match the IDs as standalone numbers only (timestamps such as "...:24.4242123Z" contain the digits by chance).
+    static bool ContainsId(string json, string id) =>
+        System.Text.RegularExpressions.Regex.IsMatch(json, $@"(?<![\d.]){id}(?!\d)");
+    Assert(!ContainsId(persistedJson, "4242") && !ContainsId(persistedJson, "8888"), "Persisted JSON must not leak ephemeral entity IDs");
 
     Console.WriteLine("5. Testing Army/Ultra upgrades (aura origin, party buffs, animStr, event zones, procs, ct.p deltas & schema sampler)...");
     var bossEng = new PacketCollectorEngine();
@@ -724,6 +727,237 @@ try
         "live_packet_schemas.json must redact new and legacy casterId, uid, and username");
     Assert(liveSchemaText.Contains("<SELF_ID>") && liveSchemaText.Contains("updateClass_sample") && liveSchemaText.Contains("oldmap") && liveSchemaText.Contains("genesisgarden"),
         "live_packet_schemas.json must preserve previous session samples while accumulating new maps/categories");
+
+    Console.WriteLine("7. Testing protocol verification sampling (allowlisted packets, command census, skeletons, privacy)...");
+    var protoEng = new PacketCollectorEngine();
+    protoEng.SchemaSampler.Enabled = true;
+    protoEng.SetPlayerCombatContext(
+        selfEntityId: 31337, className: "Rogue", level: 20, maxHealth: 1200,
+        weaponEnhPattern: 3, weaponEnhLevel: 20, selfUsername: "ProtoTester", weaponProcId: 0);
+
+    void Send(string json) => protoEng.ProcessExtensionPacketJson(json);
+    Send("""
+    { "params": { "type": "json", "dataObj": {
+        "cmd": "moveToArea", "strMapName": "protomap", "strMapFileName": "proto/town.swf",
+        "mondef": [ { "MonID": "60", "strMonName": "Proto Skeleton", "iLvl": 3, "sRace": "Undead", "intHPMax": 800 } ],
+        "monBranch": [ { "MonMapID": "1", "MonID": "60", "iLvl": 3, "intHP": 800, "intHPMax": 800 } ],
+        "uoBranch": [ { "strUsername": "RoomStranger", "uoName": "roomstranger", "entID": 424242, "intLevel": 77 } ]
+    } } }
+    """);
+    Send("""{ "params": { "type": "json", "dataObj": { "cmd": "addGoldExp", "intGold": 12, "intExp": 340, "iCP": 5, "typ": "m", "id": 1 } } }""");
+    Send("""{ "params": { "type": "json", "dataObj": { "cmd": "loadInventoryBig", "items": [ { "sName": "SecretPersonalSword", "ItemID": 999001 } ] } } }""");
+    Send("""{ "params": { "type": "json", "dataObj": { "cmd": "mysteryCmd", "someValue": 98765, "label": "SecretValueText", "list": [1, 2, 3] } } }""");
+    Send("""{ "params": { "type": "json", "dataObj": { "cmd": "mysteryCmd", "someValue": 1, "label": "x", "list": [] } } }""");
+    Send("""{ "params": { "type": "str", "dataObj": [ "respawnMon", "-1", "1" ] } }""");
+
+    var protoSchemaPath = Path.Combine(tempDir, "proto_packet_schemas.json");
+    protoEng.SchemaSampler.FlushToFiles(protoSchemaPath);
+    var protoText = File.ReadAllText(protoSchemaPath);
+    var protoDoc = Newtonsoft.Json.Linq.JObject.Parse(protoText);
+    var cats = (Newtonsoft.Json.Linq.JObject)protoDoc["Categories"]!;
+    var counts = (Newtonsoft.Json.Linq.JObject)protoDoc["CommandCounts"]!;
+
+    Assert(cats["proto_moveToArea"] != null && protoText.Contains("<OMITTED 1 room player(s)>"), "moveToArea must be sampled with the room player list omitted");
+    Assert(protoText.Contains("monBranch") && protoText.Contains("iLvl"), "moveToArea sample must keep the monster keys we need to verify");
+    Assert(!protoText.Contains("RoomStranger") && !protoText.Contains("roomstranger") && !protoText.Contains("424242") && !protoText.Contains("ProtoTester") && !protoText.Contains("31337"),
+        "Protocol samples must not contain other players, the own username or entity IDs");
+    Assert(cats["proto_addGoldExp"] != null && protoText.Contains("340"), "addGoldExp must be sampled with its values");
+    Assert(!protoText.Contains("SecretPersonalSword") && !protoText.Contains("999001") && cats["skeleton_loadInventoryBig"] == null,
+        "Personal packets (inventory) must never be sampled, not even as skeletons");
+    Assert(cats["skeleton_mysteryCmd"] != null && !protoText.Contains("98765") && !protoText.Contains("SecretValueText") && protoText.Contains("<int>"),
+        "Unknown commands must be sampled as value-free skeletons");
+    Assert(counts.Value<long>("mysteryCmd") == 2 && counts.Value<long>("loadInventoryBig") == 1 && counts.Value<long>("str:respawnMon") == 1,
+        $"Command census must count names only (json and str), got: {counts.ToString(Newtonsoft.Json.Formatting.None)}");
+
+    // A second session merges counts instead of overwriting them.
+    var protoEng2 = new PacketCollectorEngine();
+    protoEng2.SchemaSampler.Enabled = true;
+    protoEng2.ProcessExtensionPacketJson("""{ "params": { "type": "str", "dataObj": [ "respawnMon", "-1", "2" ] } }""");
+    protoEng2.SchemaSampler.FlushToFiles(protoSchemaPath);
+    var mergedCounts = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(protoSchemaPath))["CommandCounts"]!;
+    Assert(mergedCounts.Value<long>("str:respawnMon") == 2 && mergedCounts.Value<long>("mysteryCmd") == 2, "Command counts must accumulate across sessions");
+    Console.WriteLine($"   OK: {cats.Count} categories, {counts.Count} command names counted, privacy guarantees held");
+
+    // Fixtures below are REAL anonymized AQW packets captured by the protocol sampler (2026-11-20), trimmed for size.
+    Console.WriteLine("8. Testing real-packet parsing (monBranch/iLvl/sRace/wDPS, quest rewards, drop attribution, sampler privacy)...");
+    var realEng = new PacketCollectorEngine();
+    realEng.SchemaSampler.Enabled = true;
+    realEng.ProcessExtensionPacketJson("""
+    { "params": { "type": "json", "dataObj":
+      {"cmd":"moveToArea","areaId":185480,"areaName":"chaoscrypt-95964","strMapName":"chaoscrypt","strMapFileName":"Mirror/town-ChaosCrypt-22Feb18.swf","intType":1,"sExtra":"",
+       "mondef":[{"sRace":"Chaos","strMonName":"Chaorrupted Knight","intLevel":4,"strMonFileName":"Guardcorrupt1.swf","strBehave":"walk","MonID":170,"strLinkage":"Guardcorrupt1"},
+                 {"sRace":"Chaos","strMonName":"Chaorrupted Armor","intLevel":5,"strMonFileName":"Seppychaos.swf","strBehave":"walk","MonID":171,"strLinkage":"Seppychaos"}],
+       "monmap":[{"MonID":170,"intRSS":-1,"bRed":false,"strFrame":"Crypt","MonMapID":1},{"MonID":170,"intRSS":-1,"bRed":false,"strFrame":"Basement","MonMapID":2}],
+       "monBranch":[{"intHP":670,"intHPMax":670,"iLvl":4,"wDPS":9,"MonMapID":1,"MonID":170,"intMP":100,"bRed":false,"intState":1,"intMPMax":100},
+                    {"intHP":670,"intHPMax":670,"iLvl":4,"wDPS":9,"MonMapID":2,"MonID":170,"intMP":100,"bRed":false,"intState":1,"intMPMax":100}],
+       "uoBranch":[]}
+    } }
+    """);
+
+    // Real getQuests shape: "reward" rows + "oRewards" item definitions (Elders' Blood quest).
+    realEng.ProcessExtensionPacketJson("""
+    { "params": { "type": "json", "dataObj": { "cmd": "getQuests", "quests": { "802": {
+        "QuestID": 802, "sName": "Elders' Blood", "iExp": 0, "iGold": 0, "iLvl": 1, "bOnce": 0,
+        "turnin": [ { "ItemID": 5574, "iQty": 8 } ],
+        "oItems": { "5574": { "ItemID": 5574, "sName": "Slain Gorillaphant", "bTemp": true, "sType": "Quest Item", "iStk": 57, "sReqQuests": "795,802" } },
+        "reward": [ { "ItemID": 5586, "iType": 0, "iQty": 1, "iRate": 100 } ],
+        "oRewards": { "itemsS": { "0": { "ItemID": 5586, "sName": "Elders' Blood", "bTemp": false, "sType": "Item", "iStk": 20, "sReqQuests": "" } } }
+    } } } } }
+    """);
+
+    // (a) A real monster drop right after a kill is credited to the monster.
+    realEng.RecordMonsterKilled(1);
+    realEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"dropItem","items":{"898":{"ItemID":898,"sName":"Corrupted Armet","sType":"Helm","bTemp":false,"iQty":1,"iStk":1,"sReqQuests":""}}} } }""");
+    // (b) The quest reward that arrives right after the turn-in is NOT credited to that same monster.
+    realEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"QuestID":802,"msg":"","rewardObj":{"intCoins":0,"intExp":0,"iCP":0,"intGold":0,"typ":"q"},"sName":"Elders' Blood","cmd":"ccqr","bSuccess":1} } }""");
+    realEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"dropItem","items":{"5586":{"ItemID":5586,"sName":"Elders' Blood","sType":"Item","bTemp":false,"iQty":1,"iStk":20,"sReqQuests":""}}} } }""");
+    // (c) Real addItems carries the player's own inventory state (CharItemID/iQtyNow) — must never reach the samples.
+    realEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"msg":"","cmd":"addItems","items":{"8940":{"CharItemID":1483879064,"iQty":1,"bBank":0,"iQtyNow":18}}} } }""");
+    // (d) The player's own house must never be sampled; respawnMon (str) is sampled.
+    realEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","strMapName":"house","areaName":"house-74055984","areaId":184962,"intType":1,"houseData":{"items":[1,2]},"uoBranch":[]} } }""");
+    realEng.ProcessExtensionPacketJson("""{ "params": { "type": "str", "dataObj": [ "respawnMon", "-1", "1" ] } }""");
+
+    var realDelta = realEng.TakeDeltaSnapshot();
+    var knight = realDelta.Monsters["id:170"];
+    Assert(knight.Level == 4 && knight.Race == "Chaos" && knight.WeaponDps == 9,
+        $"monBranch iLvl / mondef sRace / wDPS must be parsed (got Level={knight.Level}, Race={knight.Race}, WeaponDps={knight.WeaponDps})");
+    var cryptSpawn = realDelta.Maps["chaoscrypt"].Monsters[1];
+    Assert(cryptSpawn.Level == 4 && cryptSpawn.Cell == "Crypt" && cryptSpawn.WeaponDps == 9, "Map spawn must carry level, cell and wDPS");
+    Assert(knight.Drops.ContainsKey(898), "A drop right after a kill must be credited to the killed monster");
+    Assert(!knight.Drops.ContainsKey(5586) && realEng.SessionQuestRewardsExcluded >= 1,
+        "A quest reward arriving right after the turn-in must not be credited to the monster");
+    var eldersQuest = realDelta.Quests[802];
+    Assert(eldersQuest.Rewards.Count == 1 && eldersQuest.Rewards[0].ItemID == 5586 && eldersQuest.Rewards[0].ItemName == "Elders' Blood" &&
+           eldersQuest.Rewards[0].RewardType == 0 && eldersQuest.Rewards[0].RatePercent == 100,
+        "getQuests rewards must be parsed with name, type and rate");
+
+    // (e) Without a recent kill, a drop is never credited to "the first monster in the cell" any more.
+    var noKillEng = new PacketCollectorEngine();
+    noKillEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","strMapName":"chaoscrypt","mondef":[{"sRace":"Chaos","strMonName":"Chaorrupted Knight","intLevel":4,"MonID":170}],"monmap":[{"MonID":170,"strFrame":"Enter","MonMapID":1}],"monBranch":[{"intHP":670,"intHPMax":670,"iLvl":4,"MonMapID":1,"MonID":170}]} } }""");
+    noKillEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"dropItem","items":{"24528":{"ItemID":24528,"sName":"Chaos War Medal","sType":"Resource","bTemp":false,"iQty":1,"iStk":1000}}} } }""");
+    var noKillDelta = noKillEng.TakeDeltaSnapshot();
+    Assert(noKillDelta.Monsters.Values.All(m => m.Drops.Count == 0) && noKillEng.SessionUnattributedDropsSkipped == 1,
+        "A drop with no recent kill must not be attributed to any monster");
+
+    var realSchemaPath = Path.Combine(tempDir, "real_packet_schemas.json");
+    realEng.SchemaSampler.FlushToFiles(realSchemaPath);
+    var realSchemaText = File.ReadAllText(realSchemaPath);
+    Assert(!realSchemaText.Contains("1483879064") && !realSchemaText.Contains("\"iQtyNow\": 18"),
+        "addItems samples must not keep CharItemID / iQtyNow");
+    Assert(!realSchemaText.Contains("74055984") && !realSchemaText.Contains("houseData\": {"),
+        "The player's house must never be sampled");
+    Assert(realSchemaText.Contains("proto_str_respawnMon"), "respawnMon string packets must be sampled");
+
+    // Retroactive cleanup: a legacy house sample already on disk is dropped on the next flush.
+    var legacyDoc = Newtonsoft.Json.Linq.JObject.Parse(realSchemaText);
+    ((Newtonsoft.Json.Linq.JObject)legacyDoc["Categories"]!)["proto_moveToArea"] = Newtonsoft.Json.Linq.JArray.Parse("""
+    [ { "CapturedUtc": "2026-11-20T00:00:00Z", "Command": "moveToArea", "MapContext": "house", "ShapeKey": "legacy-house",
+        "Payload": { "cmd": "moveToArea", "strMapName": "house", "areaName": "house-74055984", "houseData": { "x": 1 } } } ]
+    """);
+    File.WriteAllText(realSchemaPath, legacyDoc.ToString());
+    var cleanupEng = new PacketCollectorEngine();
+    cleanupEng.SchemaSampler.Enabled = true;
+    cleanupEng.SchemaSampler.CountCommand("ct");
+    cleanupEng.SchemaSampler.FlushToFiles(realSchemaPath);
+    Assert(!File.ReadAllText(realSchemaPath).Contains("74055984"), "Legacy house samples must be removed retroactively");
+    Console.WriteLine($"   OK: Level/Race/wDPS parsed, quest reward excluded ({realEng.SessionQuestRewardsExcluded}), unattributed drop skipped, privacy rules enforced");
+
+    Console.WriteLine("9. Testing schema v2 (migration + backup, quest-gated rates, passive monsterDrops, map-item quests, room cap)...");
+    // (a) v1 -> v2 migration with a dated backup and provable-error cleanup.
+    var v2Dir = Path.Combine(tempDir, "v2");
+    Directory.CreateDirectory(v2Dir);
+    var v2Path = Path.Combine(v2Dir, "gamedata.json");
+    var v1Db = new GameDatabase { SchemaVersion = 1 };
+    var viking = new CapturedMonster { Key = "id:700", ID = 700, Name = "Skeletal Viking", KillCount = 100 };
+    viking.Drops[1] = new CapturedDropStat { ItemID = 1, ItemName = "Impossible Item", DropEvents = 150, EligibleKills = 150 };
+    viking.Drops[2] = new CapturedDropStat { ItemID = 2, ItemName = "Fighter Helm", DropEvents = 40, EligibleKills = 100 };
+    viking.Drops[3] = new CapturedDropStat { ItemID = 3, ItemName = "Viking Fragment", Temp = true, DropEvents = 2, EligibleKills = 100 };
+    viking.Drops[4] = new CapturedDropStat { ItemID = 4, ItemName = "Bone Dust", DropEvents = 25, EligibleKills = 100 };
+    viking.Drops[5] = new CapturedDropStat { ItemID = 5, ItemName = "Treasure Chest", DropEvents = 10, EligibleKills = 100 };
+    v1Db.Monsters[viking.Key] = viking;
+    v1Db.Items[3] = new CapturedItem { ID = 3, Name = "Viking Fragment", Temp = true };
+    File.WriteAllText(v2Path, Newtonsoft.Json.JsonConvert.SerializeObject(v1Db));
+
+    var hints = new SkuaSim.Collector.Storage.QuestCatalogHints();
+    hints.RewardItemIds.Add(2);          // Fighter Helm: a quest reward — kept (rewards can also be real drops)
+    hints.AddRequirement(3, 500);        // temporary + required by quest 500 -> quest-gated (server sets sReqQuests)
+    hints.AddRequirement(5, 600);        // permanent + required by quest 600 -> NOT gated (server leaves sReqQuests empty)
+    var v2Store = new GameDatabaseStore(v2Path) { QuestHintsProvider = () => hints };
+    var migrated = v2Store.FlushDelta(new GameDatabase());
+    var mv = migrated.Monsters["id:700"];
+    Assert(migrated.SchemaVersion == 2 && migrated.MigrationLog.Count == 1, "Database must be migrated to v2 with a log entry");
+    Assert(v2Store.LastMigrationBackupPath != null && File.Exists(v2Store.LastMigrationBackupPath) &&
+           File.ReadAllText(v2Store.LastMigrationBackupPath).Contains("\"SchemaVersion\":1"), "A dated v1 backup must be written before migrating");
+    Assert(!mv.Drops.ContainsKey(1), "Impossible drop records (more drops than kills) must be removed");
+    Assert(mv.Drops.ContainsKey(2), "Quest rewards that may also be real drops must be kept");
+    Assert(mv.Drops[3].QuestGated && mv.Drops[3].RequiredQuestIds.SetEquals(new[] { 500 }) && mv.Drops[3].RateBasis == DropRates.Unverified &&
+           mv.Drops[3].EstimatedDropChance == null, "Temporary quest-required drops must become quest-gated with an unverified (null) rate");
+    Assert(!mv.Drops[5].QuestGated && mv.Drops[5].RateBasis == DropRates.AllKills, "Permanent quest-required items keep their all-kills rate");
+    Assert(mv.Drops[4].RateBasis == DropRates.AllKills && mv.Drops[4].EstimatedDropChance is { } bone && Math.Abs(bone - 0.25) < 0.001, "Normal drops keep their all-kills rate");
+    Assert(migrated.Items[3].RequiredByQuestIds.Contains(500), "Items get their requiring quests");
+    var backupsBefore = Directory.GetFiles(v2Dir, "gamedata.v1-backup-*.json").Length;
+    v2Store.FlushDelta(new GameDatabase());
+    Assert(Directory.GetFiles(v2Dir, "gamedata.v1-backup-*.json").Length == backupsBefore, "A v2 file must not be migrated or backed up again");
+
+    // (b) Quest-gated rates are measured only with the quest active (and only once the active list is known).
+    var qEng = new PacketCollectorEngine();
+    void Join(PacketCollectorEngine e) => e.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","strMapName":"arcangrove","mondef":[{"sRace":"Beast","strMonName":"Gorillaphant","intLevel":10,"MonID":250}],"monmap":[{"MonID":250,"strFrame":"Enter","MonMapID":1}],"monBranch":[{"intHP":900,"intHPMax":900,"iLvl":10,"wDPS":20,"MonMapID":1,"MonID":250}]} } }""");
+    Join(qEng);
+    qEng.RecordMonsterKilled(1); // active list unknown -> not tracked
+    qEng.SyncActiveQuests(new[] { 802 });
+    Thread.Sleep(450); // the engine deduplicates kills of the same MonMapID reported within 400 ms
+    qEng.RecordMonsterKilled(1);
+    qEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"addItems","items":{"5574":{"ItemID":5574,"sName":"Slain Gorillaphant","bTemp":true,"sType":"Quest Item","iStk":57,"iQty":1,"sReqQuests":"795,802"}}} } }""");
+    qEng.SyncActiveQuests(Array.Empty<int>());
+    Thread.Sleep(450);
+    qEng.RecordMonsterKilled(1);
+    var qDelta = qEng.TakeDeltaSnapshot();
+    var gorilla = qDelta.Monsters["id:250"];
+    var slain = gorilla.Drops[5574];
+    Assert(gorilla.KillCount == 3 && gorilla.TrackedKills == 2 && gorilla.KillsWhileQuestActive.GetValueOrDefault(802) == 1,
+        $"Kills must be tracked per active quest only once the list is known (Kill={gorilla.KillCount}, Tracked={gorilla.TrackedKills}, Q802={gorilla.KillsWhileQuestActive.GetValueOrDefault(802)})");
+    Assert(slain.QuestGated && slain.RequiredQuestIds.SetEquals(new[] { 795, 802 }) && slain.TrackedDropEvents == 1 &&
+           slain.RateBasis == DropRates.QuestActiveKills && slain.EstimatedDropChance == 1.0,
+        $"A quest-gated drop's rate must use quest-active kills (basis={slain.RateBasis}, chance={slain.EstimatedDropChance})");
+
+    // (c) Passive official drop list (real monsterDrops shape, items keyed by ItemID): official + gated, no invented rate.
+    qEng.ProcessExtensionPacketJson("""
+    { "params": { "type": "json", "dataObj": {"cmd":"monsterDrops","MonMapID":1,"items":{
+        "104953":{"ItemID":104953,"sName":"Pumpkin Rind","sType":"Quest Item","bTemp":true,"iStk":6,"sReqQuests":"10941","questGated":["Five-Star Service"],"questObjective":["Five-Star Service"]},
+        "9001":{"ItemID":9001,"sName":"Gorilla Pelt","sType":"Resource","bTemp":false,"iStk":100,"sReqQuests":""}}} } }
+    """);
+    var official = qEng.TakeDeltaSnapshot().Monsters["id:250"];
+    var rind = official.Drops[104953];
+    var pelt = official.Drops[9001];
+    Assert(rind.IsOfficialDrop && rind.QuestGated && rind.RequiredQuestIds.Contains(10941) && rind.QuestGatedNames.Contains("Five-Star Service") &&
+           rind.DropEvents == 0 && rind.EstimatedDropChance == null, "Official quest-gated drops must be recorded without an invented rate");
+    Assert(pelt.IsOfficialDrop && !pelt.QuestGated && pelt.EstimatedDropChance == null && official.OfficialDropsObservedUtc != null,
+        "Official drops never observed dropping must have a null rate");
+
+    // (d) Quest-gated map items: requiring quests from sReqQuests + active-quest observations.
+    var mEng = new PacketCollectorEngine();
+    Join(mEng);
+    mEng.SyncActiveQuests(new[] { 7277 });
+    mEng.ProcessClientPacket("%xt%zm%getMapItem%1%5044%");
+    mEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"addItems","items":{"52566":{"ItemID":52566,"sName":"Star of the Sandsea","bTemp":true,"sType":"Quest Item","iStk":1,"iQty":1,"sReqQuests":"7277"}}} } }""");
+    // (e) Room cap observed after joining.
+    mEng.RecordRoomCapacity("arcangrove-12345", 6, "runtime:world.areaData.intMaxPlayers");
+    var mDelta = mEng.TakeDeltaSnapshot();
+    var mapItem = mDelta.Maps["arcangrove"].MapItems[5044];
+    Assert(mapItem.GrantedItemIDs.Contains(52566) && mapItem.RequiredQuestIds.Contains(7277) &&
+           mapItem.GrantObservations == 1 && mapItem.ActiveQuestCounts.GetValueOrDefault(7277) == 1, "Map items must record their requiring/active quests");
+    Assert(mDelta.Maps["arcangrove"].MaxPlayers == 6, "Room cap must be recorded");
+
+    // (f) Store merge sums the new counters and recomputes the rate basis from the merged totals.
+    var mergeStore = new GameDatabaseStore(Path.Combine(v2Dir, "merge.json"));
+    mergeStore.FlushDelta(qDelta);
+    mergeStore.FlushDelta(mDelta);
+    var mergedV2 = mergeStore.FlushDelta(official.Key == "id:250" ? new GameDatabase { Monsters = { [official.Key] = official } } : new GameDatabase());
+    var mg = mergedV2.Monsters["id:250"];
+    Assert(mergedV2.SchemaVersion == 2 && mg.KillsWhileQuestActive.GetValueOrDefault(802) == 1 && mg.Drops[5574].RateBasis == DropRates.QuestActiveKills &&
+           mg.Drops[104953].IsOfficialDrop && mergedV2.Maps["arcangrove"].MaxPlayers == 6 && mergedV2.Maps["arcangrove"].MapItems[5044].RequiredQuestIds.Contains(7277),
+        "Merged v2 database must keep quest-active counters, official flags, map-item quests and room caps");
+    Console.WriteLine($"   OK: migrated v1->v2 ({migrated.MigrationLog[0].Split(':').Last().Trim()[..60]}...), gated rates, official drops, map items, room cap");
 
     Console.WriteLine("   OK: All Collector tests passed successfully!");
 }

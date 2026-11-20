@@ -267,6 +267,14 @@ public partial class DiagnosticsViewModel : ViewModelBase
             FatalErrorDetails = report.ExceptionText ?? report.StopReason ?? "Script threw an unhandled exception.";
             CompileErrors.Clear();
         }
+        else if (report.Outcome == SimulationOutcome.Stalled)
+        {
+            HasFatalError = true;
+            HasCompileErrors = false;
+            FatalErrorTitle = $"Stalled (No Progress) — {Path.GetFileName(report.ScriptPath)}";
+            FatalErrorDetails = report.StopReason ?? "The player made no progress for the configured virtual time.";
+            CompileErrors.Clear();
+        }
         else
         {
             HasFatalError = false;

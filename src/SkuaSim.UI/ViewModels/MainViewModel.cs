@@ -658,7 +658,7 @@ public partial class MainViewModel : ViewModelBase
         PauseResumeLabel = "Pause";
 
         StatusText = FormatOutcomeStatus(report);
-        if (report.Outcome is SimulationOutcome.CompileError or SimulationOutcome.ScriptException)
+        if (report.Outcome is SimulationOutcome.CompileError or SimulationOutcome.ScriptException or SimulationOutcome.Stalled)
             Diagnostics.SelectedTabIndex = 1;
 
         RefreshCommandStates();
@@ -797,6 +797,7 @@ public partial class MainViewModel : ViewModelBase
         SimulationOutcome.LimitReached => $"Stopped ({report.StopReason ?? "limit reached"})",
         SimulationOutcome.ScriptException => "Failed — Unhandled script exception",
         SimulationOutcome.CompileError => $"Failed — {report.CompileErrors.Count} compile error(s)",
+        SimulationOutcome.Stalled => "Stalled — no progress, likely an infinite loop (see Errors & Diagnostics)",
         _ => report.Outcome.ToString()
     };
 

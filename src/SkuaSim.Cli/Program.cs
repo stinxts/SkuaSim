@@ -102,7 +102,7 @@ internal static class CliEntry
     {
         if (args.Length == 0)
         {
-            Console.Error.WriteLine("Error: missing script path. Usage: skuasim run <script.cs> [--scenario <file.json>] [--seed <int>] [--max-virtual-min <num>] [--max-real-sec <num>] [--report <path.md>] [--trace <path.jsonl>]");
+            Console.Error.WriteLine("Error: missing script path. Usage: skuasim run <script.cs> [--scenario <file.json>] [--seed <int>] [--max-virtual-min <num>] [--max-real-sec <num>] [--max-no-progress-min <num>] [--report <path.md>] [--trace <path.jsonl>]");
             return 1;
         }
 
@@ -121,6 +121,10 @@ internal static class CliEntry
         if (GetOption(args, "--max-real-sec") is { } rSecStr &&
             double.TryParse(rSecStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rSec))
             scenario.Limits.MaxRealSeconds = rSec;
+
+        if (GetOption(args, "--max-no-progress-min") is { } npStr &&
+            double.TryParse(npStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var noProgressMin))
+            scenario.Limits.MaxNoProgressMinutes = noProgressMin;
 
         var reportPath = GetOption(args, "--report") ?? GetOption(args, "-o");
         var tracePath = GetOption(args, "--trace");
@@ -152,7 +156,12 @@ internal static class CliEntry
             Console.WriteLine($"Report saved to: {fullReportPath}");
         }
 
-        return report.Outcome is SimulationOutcome.CompileError or SimulationOutcome.ScriptException ? 2 : 0;
+        return report.Outcome switch
+        {
+            SimulationOutcome.CompileError or SimulationOutcome.ScriptException => 2,
+            SimulationOutcome.Stalled => 3,
+            _ => 0
+        };
     }
 
     private static string ResolveScriptPath(string input, SkuaInstallation installation)
@@ -202,8 +211,12 @@ internal static class CliEntry
         Console.WriteLine("  --scenario, -s <file.json>     Scenario JSON file describing player/world state");
         Console.WriteLine("  --seed <int>                   Random seed for deterministic simulation (default: 42)");
         Console.WriteLine("  --max-virtual-min <minutes>    Maximum simulated virtual time in minutes (default: 360)");
-        Console.WriteLine("  --max-real-sec <seconds>       Maximum wall-clock time in seconds (default: 180)");
+        Console.WriteLine("  --max-real-sec <seconds>       Maximum wall-clock time in seconds (default: 0 = unlimited)");
+        Console.WriteLine("  --max-no-progress-min <min>    Stop as Stalled after this many virtual minutes without player");
+        Console.WriteLine("                                 progress (default: 60, 0 = disabled)");
         Console.WriteLine("  --report, -o <file.md|.json>   Save the execution report to disk");
         Console.WriteLine("  --trace <file.jsonl>           Stream full API trace to JSONL file");
+        Console.WriteLine();
+        Console.WriteLine("Exit codes (run): 0 = completed/stopped, 2 = compile error or script exception, 3 = stalled");
     }
 }

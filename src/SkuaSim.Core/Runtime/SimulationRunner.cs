@@ -336,7 +336,11 @@ public sealed class SimulationRunner
             try { loadContext.Unload(); } catch { }
         }
 
-        if (threadEx is SimulationStopException stopEx)
+        if (ctx.StallDetected && (threadEx == null || threadEx is SimulationStopException))
+        {
+            outcome = SimulationOutcome.Stalled;
+        }
+        else if (threadEx is SimulationStopException stopEx)
         {
             outcome = stopEx.Reason.Contains("script called", StringComparison.OrdinalIgnoreCase)
                 ? SimulationOutcome.StoppedByScript

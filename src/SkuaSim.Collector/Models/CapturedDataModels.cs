@@ -8,9 +8,20 @@ namespace SkuaSim.Collector.Models;
 /// </summary>
 public sealed class GameDatabase
 {
-    public int SchemaVersion { get; set; } = 1;
+    /// <summary>
+    /// v2 (2026-11-20): quest-gated drop precision (RequiredQuestIds, TrackedDropEvents, KillsWhileQuestActive,
+    /// RateBasis), passive official drops (IsOfficialDrop), room MaxPlayers, quest-gated map items, quest reward
+    /// types, monster level/WeaponDps. Files written before v2 deserialize with SchemaVersion = 1 and are migrated
+    /// (with a dated backup) by GameDatabaseStore on the next flush.
+    /// </summary>
+    public const int CurrentSchemaVersion = 2;
+
+    public int SchemaVersion { get; set; } = CurrentSchemaVersion;
     public DateTime LastUpdatedUtc { get; set; } = DateTime.UtcNow;
     public long TotalFlushesMerged { get; set; }
+
+    /// <summary>Human-readable record of schema migrations applied to this file.</summary>
+    public List<string> MigrationLog { get; set; } = new();
 
     public Dictionary<string, CapturedMap> Maps { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, CapturedMonster> Monsters { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -67,6 +78,14 @@ public sealed class CapturedMap
     /// Zone events (cmd="event", args.zoneSet) observed on this map (e.g. UltraDage, DarkCarnax).
     /// </summary>
     public Dictionary<string, CapturedZoneEvent> ZoneEvents { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Room player cap read from the game client after joining (null when not observed). Not server-wide iMax.</summary>
+    public int? MaxPlayers { get; set; }
+
+    /// <summary>Where <see cref="MaxPlayers"/> came from, e.g. "runtime:world.areaData.intMaxPlayers".</summary>
+    public string? MaxPlayersSource { get; set; }
+
+    public DateTime? MaxPlayersObservedUtc { get; set; }
 }
 
 public sealed class CapturedMapMonsterSpawn
@@ -80,6 +99,9 @@ public sealed class CapturedMapMonsterSpawn
     public string Race { get; set; } = string.Empty;
     public string Element { get; set; } = string.Empty;
     public string FileName { get; set; } = string.Empty;
+
+    /// <summary>Server-side monster weapon DPS from moveToArea "monBranch[].wDPS" (0 when unknown).</summary>
+    public int WeaponDps { get; set; }
 }
 
 public sealed class CapturedMapItem
@@ -89,6 +111,15 @@ public sealed class CapturedMapItem
     public long TimesRequested { get; set; }
     public HashSet<int> GrantedItemIDs { get; set; } = new();
     public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
+
+    /// <summary>Quests that use the granted items (from the items' "sReqQuests"): the map item only works while one is active.</summary>
+    public HashSet<int> RequiredQuestIds { get; set; } = new();
+
+    /// <summary>Successful grants observed while the active quest list was known.</summary>
+    public long GrantObservations { get; set; }
+
+    /// <summary>Quest ID -> how many of those successful grants happened with that quest active.</summary>
+    public Dictionary<int, long> ActiveQuestCounts { get; set; } = new();
 }
 
 public sealed class CapturedMonster
@@ -102,12 +133,25 @@ public sealed class CapturedMonster
     public string Element { get; set; } = string.Empty;
     public string FileName { get; set; } = string.Empty;
 
+    /// <summary>Server-side monster weapon DPS from moveToArea "monBranch[].wDPS" (0 when unknown).</summary>
+    public int WeaponDps { get; set; }
+
     /// <summary>
     /// Maps map name -> set of cells where this monster spawns.
     /// </summary>
     public Dictionary<string, HashSet<string>> MapsSeen { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public long KillCount { get; set; }
+
+    /// <summary>Kills recorded while the player's active quest list was known (v2+ collectors only).</summary>
+    public long TrackedKills { get; set; }
+
+    /// <summary>Quest ID -> tracked kills of this monster with that quest active (basis for quest-gated drop rates).</summary>
+    public Dictionary<int, long> KillsWhileQuestActive { get; set; } = new();
+
+    /// <summary>Last time an official "monsterDrops" list was observed for this monster.</summary>
+    public DateTime? OfficialDropsObservedUtc { get; set; }
+
     public CapturedCombatStats Combat { get; set; } = new();
     public Dictionary<string, CapturedAuraStat> Auras { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, CapturedMonsterSkillEvent> SkillEvents { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -181,15 +225,82 @@ public sealed class CapturedDropStat
     public long TotalQuantity { get; set; }
 
     /// <summary>
-    /// Number of kills recorded for this monster AFTER this drop was first observed,
-    /// plus kills in the session where it dropped, used for drop rate estimation.
+    /// Kills that could have produced this drop (denominator of the rate), recomputed by <see cref="DropRates"/>:
+    /// all kills for normal drops, kills with a required quest active for quest-gated drops.
     /// </summary>
     public long EligibleKills { get; set; }
 
+    /// <summary>Confirmed by the server's official "monsterDrops" list.</summary>
+    public bool IsOfficialDrop { get; set; }
+
+    /// <summary>Only drops while one of <see cref="RequiredQuestIds"/> is active (item "sReqQuests" / monsterDrops "questGated").</summary>
+    public bool QuestGated { get; set; }
+
+    /// <summary>Quest IDs that use this item (from the item's "sReqQuests").</summary>
+    public HashSet<int> RequiredQuestIds { get; set; } = new();
+
+    /// <summary>Quest names from monsterDrops "questGated" (the server sends names, not IDs).</summary>
+    public HashSet<string> QuestGatedNames { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Quest names from monsterDrops "questObjective".</summary>
+    public HashSet<string> QuestObjectives { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Drop events recorded while the active quest list was known (numerator for quest-gated rates).</summary>
+    public long TrackedDropEvents { get; set; }
+
+    /// <summary>
+    /// "all_kills" (normal drop), "quest_active_kills" (quest-gated, measured with the quest active) or
+    /// "unverified" (quest-gated but not yet measured with the quest active, or never observed dropping).
+    /// </summary>
+    public string RateBasis { get; set; } = DropRates.AllKills;
+
+    /// <summary>Observed drop chance, or null when there is no trustworthy measurement yet (simulators must not use 0).</summary>
     [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
-    public double EstimatedDropChance => EligibleKills > 0
-        ? Math.Min(1.0, Math.Round((double)DropEvents / EligibleKills, 4))
-        : 0.0;
+    public double? EstimatedDropChance => RateBasis switch
+    {
+        DropRates.QuestActiveKills when EligibleKills > 0 && TrackedDropEvents > 0 =>
+            Math.Min(1.0, Math.Round((double)TrackedDropEvents / EligibleKills, 4)),
+        DropRates.AllKills when EligibleKills > 0 && DropEvents > 0 =>
+            Math.Min(1.0, Math.Round((double)DropEvents / EligibleKills, 4)),
+        _ => null
+    };
+}
+
+/// <summary>Single place where drop-rate denominators and bases are derived (engine deltas and store merges).</summary>
+public static class DropRates
+{
+    public const string AllKills = "all_kills";
+    public const string QuestActiveKills = "quest_active_kills";
+    public const string Unverified = "unverified";
+
+    public static void Recompute(CapturedMonster monster)
+    {
+        foreach (var drop in monster.Drops.Values)
+        {
+            if (drop.QuestGated)
+            {
+                long eligible = 0;
+                foreach (var questId in drop.RequiredQuestIds)
+                    eligible += monster.KillsWhileQuestActive.GetValueOrDefault(questId);
+
+                if (eligible > 0 && drop.TrackedDropEvents > 0)
+                {
+                    drop.EligibleKills = Math.Max(eligible, drop.TrackedDropEvents);
+                    drop.RateBasis = QuestActiveKills;
+                }
+                else
+                {
+                    drop.EligibleKills = eligible;
+                    drop.RateBasis = Unverified;
+                }
+            }
+            else
+            {
+                drop.EligibleKills = Math.Max(monster.KillCount, drop.DropEvents);
+                drop.RateBasis = drop.DropEvents > 0 ? AllKills : Unverified;
+            }
+        }
+    }
 }
 
 public sealed class CapturedItem
@@ -209,6 +320,9 @@ public sealed class CapturedItem
     public string Meta { get; set; } = string.Empty;
     public int EnhancementPatternID { get; set; }
     public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
+
+    /// <summary>Quest IDs that use this item (AQW "sReqQuests"); a non-empty set marks a quest-gated item.</summary>
+    public HashSet<int> RequiredByQuestIds { get; set; } = new();
 }
 
 public sealed class CapturedShop
@@ -248,6 +362,12 @@ public sealed class CapturedItemRequirement
     public string ItemName { get; set; } = string.Empty;
     public int Quantity { get; set; }
     public bool Temp { get; set; }
+
+    /// <summary>Quest rewards only: raw AQW reward type from getQuests "reward[].iType" (meaning to be mapped).</summary>
+    public int? RewardType { get; set; }
+
+    /// <summary>Quest rewards only: drop chance in percent from getQuests "reward[].iRate" (100 = guaranteed).</summary>
+    public double? RatePercent { get; set; }
 }
 
 public sealed class CapturedQuest

@@ -123,6 +123,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
     [ObservableProperty] public partial bool IsVirtualDurationAmountEnabled { get; set; } = true;
     [ObservableProperty] public partial string MaxRealSecondsText { get; set; } = "0";
     [ObservableProperty] public partial string StallRealSecondsText { get; set; } = "15";
+    [ObservableProperty] public partial string MaxNoProgressMinutesText { get; set; } = "60";
 
     // Active 2x Consumable & Server Boosts
     [ObservableProperty] public partial bool XpBoost { get; set; }
@@ -267,6 +268,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
             ApplyVirtualMinutesToFields(scenario.Limits.MaxVirtualMinutes);
             MaxRealSecondsText = scenario.Limits.MaxRealSeconds.ToString(CultureInfo.InvariantCulture);
             StallRealSecondsText = scenario.Limits.StallRealSeconds.ToString(CultureInfo.InvariantCulture);
+            MaxNoProgressMinutesText = scenario.Limits.MaxNoProgressMinutes.ToString(CultureInfo.InvariantCulture);
 
             // Boosts
             XpBoost = scenario.Boosts.XpBoost;
@@ -342,6 +344,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
         clone.Limits.MaxVirtualMinutes = toolbarVirtualMinutesOverride ?? GetCurrentVirtualMinutes();
         clone.Limits.MaxRealSeconds = ParseRealSecondsOrUnlimited(MaxRealSecondsText);
         clone.Limits.StallRealSeconds = Math.Max(2, ParseDoubleOr(StallRealSecondsText, 15));
+        clone.Limits.MaxNoProgressMinutes = Math.Max(0, ParseDoubleOr(MaxNoProgressMinutesText, 60));
 
         // Boosts & Real AQW Boosted Equipment
         clone.Boosts = new BoostsSetup

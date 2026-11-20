@@ -25,6 +25,8 @@ public sealed partial class PacketCollectorEngine
 
     // Recently killed monster tracking for drop attribution
     private string? _lastKilledMonsterKey;
+    private int _lastKilledMonsterId;
+    private string _lastKilledMonsterName = string.Empty;
     private DateTime _lastKillTimeUtc = DateTime.MinValue;
 
     // Recently dropped items via dropItem so addItems right after doesn't double-count
@@ -34,6 +36,20 @@ public sealed partial class PacketCollectorEngine
     private int _lastRequestedMapItemId;
     private string _lastRequestedMapItemMap = string.Empty;
     private DateTime _lastRequestedMapItemTimeUtc = DateTime.MinValue;
+
+    // Quest turn-in tracking so quest reward items are not credited to the monster killed just before.
+    // Rewards are cached for the whole session (not only the current delta) because flushes reset the delta.
+    private const double DropAttributionWindowSeconds = 5.0;
+    private const double QuestRewardWindowSeconds = 3.0;
+    private readonly Dictionary<int, HashSet<int>> _sessionQuestRewardItems = new();
+    private int _lastTurnInQuestId;
+    private DateTime _lastTurnInUtc = DateTime.MinValue;
+
+    // Player's active quests (IDs only, kept in RAM): the denominator of quest-gated drop rates.
+    private readonly HashSet<int> _activeQuestIds = new();
+    private bool _activeQuestsKnown;
+    public long SessionQuestRewardsExcluded { get; private set; }
+    public long SessionUnattributedDropsSkipped { get; private set; }
 
     // Total cumulative statistics for this session (for UI/status reporting)
     public long SessionPacketsProcessed { get; private set; }
@@ -106,10 +122,28 @@ public sealed partial class PacketCollectorEngine
         ProcessExtensionPacketJObject(root);
     }
 
+    /// <summary>JSON server commands parsed by the switch below (anything else is only counted / skeleton-sampled).</summary>
+    private static readonly HashSet<string> HandledServerCommands = new(StringComparer.Ordinal)
+    {
+        "moveToArea", "ct", "event", "updateClass", "equipItem", "sAct", "stu",
+        "dropItem", "addItems", "loadShop", "getQuests", "ccqr", "monsterDrops"
+    };
+
     public void ProcessExtensionPacketJObject(JObject root)
     {
         var prms = root["params"] as JObject ?? root;
         var type = prms["type"]?.ToString();
+        if (string.Equals(type, "str", StringComparison.OrdinalIgnoreCase))
+        {
+            // String packets: census only (command name, no payload). dataObj is ["cmd", "-1", ...].
+            if (prms["dataObj"] is JArray strParts && strParts.Count > 0 && strParts[0]?.Type == JTokenType.String)
+            {
+                SchemaSampler.CountCommand("str:" + strParts[0]);
+                lock (_sync)
+                    SchemaSampler.TryCaptureStringPacket(strParts, _selfPlayerEntityId, _selfUsername, _currentMapName);
+            }
+            return;
+        }
         if (!string.Equals(type, "json", StringComparison.OrdinalIgnoreCase))
             return;
 
@@ -123,6 +157,11 @@ public sealed partial class PacketCollectorEngine
         lock (_sync)
         {
             SessionPacketsProcessed++;
+            SchemaSampler.CountCommand(cmd);
+            var sampleMap = cmd == "moveToArea"
+                ? GameDatabase.NormalizeMapName(dataObj["strMapName"]?.ToString())
+                : _currentMapName;
+            SchemaSampler.TryCaptureProtocol(cmd, dataObj, HandledServerCommands.Contains(cmd), _selfPlayerEntityId, _selfUsername, sampleMap);
 
             switch (cmd)
             {
@@ -164,6 +203,9 @@ public sealed partial class PacketCollectorEngine
                     break;
                 case "ccqr":
                     HandleQuestCompleteResponse(dataObj);
+                    break;
+                case "monsterDrops":
+                    HandleMonsterDropsPacket(dataObj);
                     break;
             }
         }
@@ -211,6 +253,12 @@ public sealed partial class PacketCollectorEngine
                     {
                         RecordQuestAccepted(questId, _currentMapName);
                     }
+                    break;
+
+                case "tryQuestComplete":
+                    // %xt%zm%tryQuestComplete%<room>%<questId>%<rewardItemId>%... — reward items arrive right after.
+                    if (parts.Length >= 5 && int.TryParse(parts[4], out var completingQuestId) && completingQuestId > 0)
+                        MarkQuestTurnIn(completingQuestId);
                     break;
             }
         }
@@ -478,11 +526,12 @@ public sealed partial class PacketCollectorEngine
 
             if (quest.Rewards is { Count: > 0 })
             {
-                cq.Rewards = quest.Rewards
+                var modelRewards = quest.Rewards
                     .Where(r => r != null && r.ID > 0)
                     .Select(r =>
                     {
                         UpsertItemFromModel(r);
+                        CacheQuestRewardItem(quest.ID, r.ID);
                         return new CapturedItemRequirement
                         {
                             ItemID = r.ID,
@@ -492,7 +541,13 @@ public sealed partial class PacketCollectorEngine
                         };
                     })
                     .ToList();
+                // Do not replace rewards parsed from getQuests (which carry type/rate) with the plain model list.
+                if (!cq.Rewards.Any(r => r.RewardType.HasValue))
+                    cq.Rewards = modelRewards;
             }
+
+            if (turnedIn)
+                MarkQuestTurnIn(quest.ID);
 
             if (accepted)
             {
@@ -536,9 +591,13 @@ public sealed partial class PacketCollectorEngine
 
         RecordCellVisit(normMap, _currentCell, _currentPad);
 
+        // Real AQW keys (verified from live samples, 2026-11-20): "mondef" { MonID, strMonName, intLevel, sRace,
+        // strMonFileName }, "monmap" { MonMapID, MonID, strFrame }, "monBranch" (capital B) { MonMapID, MonID, iLvl,
+        // intHP, intHPMax, wDPS }. Lookups are case-insensitive and keep the older guesses as fallbacks.
+
         // 1. Parse mondef (monster definitions by MonID)
         var monDefs = new Dictionary<int, (string Name, int Level, int MaxHP, string Race, string Element, string FileName)>();
-        if (dataObj["mondef"] is JArray monDefArray)
+        if (GetArrayIgnoreCase(dataObj, "mondef") is { } monDefArray)
         {
             foreach (var token in monDefArray.OfType<JObject>())
             {
@@ -546,10 +605,10 @@ public sealed partial class PacketCollectorEngine
                 if (monId <= 0)
                     continue;
                 var name = token["strMonName"]?.ToString() ?? string.Empty;
-                var level = ParseInt(token["intLevel"]);
+                var level = ParseInt(token["intLevel"], ParseInt(token["iLvl"]));
                 var maxHp = ParseInt(token["intHPMax"], ParseInt(token["intHP"]));
-                var race = token["strRace"]?.ToString() ?? string.Empty;
-                var element = token["strElement"]?.ToString() ?? string.Empty;
+                var race = token["sRace"]?.ToString() ?? token["strRace"]?.ToString() ?? string.Empty;
+                var element = token["strElement"]?.ToString() ?? token["sElmt"]?.ToString() ?? string.Empty;
                 var file = token["strMonFileName"]?.ToString() ?? string.Empty;
                 monDefs[monId] = (name, level, maxHp, race, element, file);
             }
@@ -557,7 +616,7 @@ public sealed partial class PacketCollectorEngine
 
         // 2. Parse monmap (MonMapID -> strFrame cell)
         var monMapCells = new Dictionary<int, string>();
-        if (dataObj["monmap"] is JArray monMapArray)
+        if (GetArrayIgnoreCase(dataObj, "monmap") is { } monMapArray)
         {
             foreach (var token in monMapArray.OfType<JObject>())
             {
@@ -573,7 +632,7 @@ public sealed partial class PacketCollectorEngine
         }
 
         // 3. Parse monbranch (MonMapID instances)
-        if (dataObj["monbranch"] is JArray monBranchArray)
+        if (GetArrayIgnoreCase(dataObj, "monBranch") is { } monBranchArray)
         {
             foreach (var token in monBranchArray.OfType<JObject>())
             {
@@ -584,7 +643,8 @@ public sealed partial class PacketCollectorEngine
 
                 var hp = ParseInt(token["intHP"]);
                 var maxHp = ParseInt(token["intHPMax"], hp);
-                var level = ParseInt(token["intLevel"]);
+                var level = ParseInt(token["iLvl"], ParseInt(token["intLevel"]));
+                var weaponDps = ParseInt(token["wDPS"]);
 
                 monDefs.TryGetValue(monId, out var def);
                 monMapCells.TryGetValue(monMapId, out var cell);
@@ -608,11 +668,15 @@ public sealed partial class PacketCollectorEngine
                         def.Race ?? string.Empty,
                         def.Element ?? string.Empty,
                         def.FileName ?? string.Empty,
-                        hp > 0 ? hp : finalMaxHp);
+                        hp > 0 ? hp : finalMaxHp,
+                        weaponDps);
                 }
             }
         }
     }
+
+    private static JArray? GetArrayIgnoreCase(JObject obj, string key) =>
+        obj.GetValue(key, StringComparison.OrdinalIgnoreCase) as JArray;
 
     private void HandleCombatTick(JObject dataObj, HashSet<int> procsRecordedThisTick)
     {
@@ -846,6 +910,63 @@ public sealed partial class PacketCollectorEngine
         }
     }
 
+    /// <summary>
+    /// Passive capture of the server's official drop list (sent when any tool requests getMonsterDrops, e.g. the
+    /// weekly/merge generators). Marks drops as official and quest-gated; never changes observed counts or rates.
+    /// Shape: { MonMapID, items: { "&lt;ItemID&gt;": { ItemID, sName, bTemp, sReqQuests, questGated[], questObjective[] } } }
+    /// (items may also arrive as an array).
+    /// </summary>
+    public long SessionOfficialDropListsCaptured { get; private set; }
+
+    private void HandleMonsterDropsPacket(JObject dataObj)
+    {
+        var monMapId = ParseInt(dataObj["MonMapID"]);
+        if (monMapId <= 0 || !_mapMonsters.TryGetValue(monMapId, out var active))
+            return;
+
+        IEnumerable<(JObject Item, string? Key)> entries = dataObj["items"] switch
+        {
+            JObject keyed => keyed.Properties().Where(p => p.Value is JObject).Select(p => ((JObject)p.Value, (string?)p.Name)),
+            JArray arr => arr.OfType<JObject>().Select(o => (o, (string?)null)),
+            _ => Enumerable.Empty<(JObject, string?)>()
+        };
+
+        var mon = GetOrCreateMonster(active.MonsterID, active.Name);
+        foreach (var (itemObj, key) in entries)
+        {
+            var item = UpsertItemFromJson(itemObj, key);
+            if (item == null)
+                continue;
+
+            if (!mon.Drops.TryGetValue(item.ID, out var drop))
+                mon.Drops[item.ID] = drop = new CapturedDropStat { ItemID = item.ID, ItemName = item.Name, Temp = item.Temp };
+            if (!string.IsNullOrWhiteSpace(item.Name))
+                drop.ItemName = item.Name;
+            drop.Temp |= item.Temp;
+            drop.IsOfficialDrop = true;
+
+            var gatedNames = ReadStringList(itemObj["questGated"]);
+            drop.QuestGatedNames.UnionWith(gatedNames);
+            drop.QuestObjectives.UnionWith(ReadStringList(itemObj["questObjective"]));
+            if (gatedNames.Count > 0 || item.RequiredByQuestIds.Count > 0)
+            {
+                drop.QuestGated = true;
+                drop.RequiredQuestIds.UnionWith(item.RequiredByQuestIds);
+            }
+        }
+
+        mon.OfficialDropsObservedUtc = DateTime.UtcNow;
+        DropRates.Recompute(mon);
+        SessionOfficialDropListsCaptured++;
+    }
+
+    private static List<string> ReadStringList(JToken? token) => token switch
+    {
+        JArray arr => arr.Select(t => t?.ToString() ?? string.Empty).Where(s => !string.IsNullOrWhiteSpace(s)).ToList(),
+        JValue v when !string.IsNullOrWhiteSpace(v.ToString()) => new List<string> { v.ToString() },
+        _ => new List<string>()
+    };
+
     private void HandleAddItemsPacket(JObject dataObj)
     {
         if (dataObj["items"] is not JObject itemsObj)
@@ -865,10 +986,20 @@ public sealed partial class PacketCollectorEngine
             if (item == null)
                 continue;
 
-            if (isRecentMapItemPickup && _delta.Maps.TryGetValue(_currentMapName, out var map) &&
-                map.MapItems.TryGetValue(_lastRequestedMapItemId, out var mapItem))
+            if (isRecentMapItemPickup)
             {
+                // The delta may have been flushed between getMapItem and addItems; recreate the entry if needed.
+                var map = GetOrCreateMap(_currentMapName);
+                if (!map.MapItems.TryGetValue(_lastRequestedMapItemId, out var mapItem))
+                    map.MapItems[_lastRequestedMapItemId] = mapItem = new CapturedMapItem { MapItemID = _lastRequestedMapItemId };
                 mapItem.GrantedItemIDs.Add(item.ID);
+                mapItem.RequiredQuestIds.UnionWith(item.RequiredByQuestIds);
+                if (_activeQuestsKnown)
+                {
+                    mapItem.GrantObservations++;
+                    foreach (var questId in _activeQuestIds)
+                        mapItem.ActiveQuestCounts[questId] = mapItem.ActiveQuestCounts.GetValueOrDefault(questId) + 1;
+                }
                 continue;
             }
 
@@ -1022,8 +1153,69 @@ public sealed partial class PacketCollectorEngine
                     cq.Requirements = reqs;
             }
 
+            var rewards = ParseQuestRewards(questId, qObj);
+            if (rewards.Count > 0)
+                cq.Rewards = rewards;
+
             cq.LastSeenUtc = DateTime.UtcNow;
         }
+    }
+
+    /// <summary>
+    /// Reads quest rewards from a getQuests entry: "reward" holds one row per reward item
+    /// ({ ItemID, iQty, iType, iRate }); "oRewards" groups the item definitions (e.g. "itemsS": { "0": {...} }).
+    /// Every reward item is also cached for drop attribution.
+    /// </summary>
+    private List<CapturedItemRequirement> ParseQuestRewards(int questId, JObject qObj)
+    {
+        var defsById = new Dictionary<int, CapturedItem>();
+        if (qObj["oRewards"] is JObject oRewards)
+        {
+            foreach (var group in oRewards.Properties().Select(p => p.Value).OfType<JObject>())
+            {
+                foreach (var itemProp in group.Properties())
+                {
+                    if (itemProp.Value is not JObject itemDef)
+                        continue;
+                    var upserted = UpsertItemFromJson(itemDef, null);
+                    if (upserted != null)
+                        defsById[upserted.ID] = upserted;
+                }
+            }
+        }
+
+        IEnumerable<JObject> rows = qObj["reward"] switch
+        {
+            JArray arr => arr.OfType<JObject>(),
+            JObject single when single["ItemID"] != null => new[] { single },
+            JObject keyed => keyed.Properties().Select(p => p.Value).OfType<JObject>(),
+            _ => Enumerable.Empty<JObject>()
+        };
+
+        var rewards = new List<CapturedItemRequirement>();
+        foreach (var row in rows)
+        {
+            var itemId = ParseInt(row["ItemID"]);
+            if (itemId <= 0 || rewards.Any(r => r.ItemID == itemId))
+                continue;
+            defsById.TryGetValue(itemId, out var def);
+            rewards.Add(new CapturedItemRequirement
+            {
+                ItemID = itemId,
+                ItemName = def?.Name ?? string.Empty,
+                Quantity = Math.Max(1, ParseInt(row["iQty"], 1)),
+                Temp = def?.Temp ?? false,
+                RewardType = row["iType"] != null ? ParseInt(row["iType"]) : null,
+                RatePercent = row["iRate"] != null ? ParseDoubleSafe(row["iRate"], 100) : null
+            });
+            CacheQuestRewardItem(questId, itemId);
+        }
+
+        // Reward definitions without a matching "reward" row still identify reward items for attribution.
+        foreach (var id in defsById.Keys)
+            CacheQuestRewardItem(questId, id);
+
+        return rewards;
     }
 
     private void HandleQuestCompleteResponse(JObject dataObj)
@@ -1035,6 +1227,8 @@ public sealed partial class PacketCollectorEngine
         var success = ParseInt(dataObj["bSuccess"], 1) != 0 && ParseBool(dataObj["bSuccess"], true);
         if (success)
         {
+            MarkQuestTurnIn(questId);
+            _activeQuestIds.Remove(questId); // a completed quest leaves the active list (re-accepts send acceptQuest again)
             var cq = GetOrCreateQuest(questId);
             cq.TurnInCount++;
             if (!string.IsNullOrWhiteSpace(_currentMapName))
@@ -1054,7 +1248,8 @@ public sealed partial class PacketCollectorEngine
         string race,
         string element,
         string fileName,
-        int currentHp)
+        int currentHp,
+        int weaponDps = 0)
     {
         var map = GetOrCreateMap(normMap);
         if (!string.IsNullOrWhiteSpace(cell) && !map.Cells.ContainsKey(cell))
@@ -1071,6 +1266,7 @@ public sealed partial class PacketCollectorEngine
             if (!string.IsNullOrWhiteSpace(name)) spawn.Name = name;
             if (!string.IsNullOrWhiteSpace(cell)) spawn.Cell = cell;
             if (level > 0) spawn.Level = level;
+            if (weaponDps > 0) spawn.WeaponDps = weaponDps;
             if (maxHp > 0) spawn.MaxHP = maxHp;
             if (!string.IsNullOrWhiteSpace(race)) spawn.Race = race;
             if (!string.IsNullOrWhiteSpace(element)) spawn.Element = element;
@@ -1090,6 +1286,7 @@ public sealed partial class PacketCollectorEngine
 
         var mon = GetOrCreateMonster(monId, name);
         if (level > 0) mon.Level = level;
+        if (weaponDps > 0) mon.WeaponDps = weaponDps;
         if (maxHp > 0) mon.MaxHP = Math.Max(mon.MaxHP, maxHp);
         if (!string.IsNullOrWhiteSpace(race) && race != "None") mon.Race = race;
         if (!string.IsNullOrWhiteSpace(element) && element != "None") mon.Element = element;
@@ -1117,13 +1314,11 @@ public sealed partial class PacketCollectorEngine
             active.CurrentHP = 0;
 
             var mon = GetOrCreateMonster(active.MonsterID, active.Name);
-            mon.KillCount++;
-            foreach (var drop in mon.Drops.Values)
-            {
-                drop.EligibleKills = Math.Max(mon.KillCount, drop.DropEvents);
-            }
+            CountKill(mon);
 
             _lastKilledMonsterKey = mon.Key;
+            _lastKilledMonsterId = mon.ID;
+            _lastKilledMonsterName = mon.Name;
             _lastKillTimeUtc = now;
             SessionKillsRecorded++;
             return;
@@ -1134,15 +1329,92 @@ public sealed partial class PacketCollectorEngine
         if (cellMonsters.Count == 1)
         {
             var mon = cellMonsters[0];
-            mon.KillCount++;
-            foreach (var drop in mon.Drops.Values)
-            {
-                drop.EligibleKills = Math.Max(mon.KillCount, drop.DropEvents);
-            }
+            CountKill(mon);
             _lastKilledMonsterKey = mon.Key;
+            _lastKilledMonsterId = mon.ID;
+            _lastKilledMonsterName = mon.Name;
             _lastKillTimeUtc = now;
             SessionKillsRecorded++;
         }
+    }
+
+    /// <summary>
+    /// Counts a kill. When the active quest list is known, also counts it as a tracked kill per active quest:
+    /// the denominator of quest-gated drop rates (those items can only drop while one of their quests is active).
+    /// </summary>
+    private void CountKill(CapturedMonster mon)
+    {
+        mon.KillCount++;
+        if (_activeQuestsKnown)
+        {
+            mon.TrackedKills++;
+            foreach (var questId in _activeQuestIds)
+                mon.KillsWhileQuestActive[questId] = mon.KillsWhileQuestActive.GetValueOrDefault(questId) + 1;
+        }
+        DropRates.Recompute(mon);
+    }
+
+    /// <summary>
+    /// Replaces the known active quest list (from the client's Bot.Quests.Active). Until the first sync the list is
+    /// unknown and no quest-gated statistics are recorded, so partial knowledge never biases the rates.
+    /// </summary>
+    public void SyncActiveQuests(IEnumerable<int> activeQuestIds)
+    {
+        lock (_sync)
+        {
+            _activeQuestIds.Clear();
+            foreach (var id in activeQuestIds)
+                if (id > 0)
+                    _activeQuestIds.Add(id);
+            _activeQuestsKnown = true;
+        }
+    }
+
+    public bool ActiveQuestsKnown
+    {
+        get { lock (_sync) return _activeQuestsKnown; }
+    }
+
+    /// <summary>Records the room player cap read from the game client after joining (never pre-join or server-wide).</summary>
+    public void RecordRoomCapacity(string? mapName, int maxPlayers, string source)
+    {
+        var normMap = GameDatabase.NormalizeMapName(mapName);
+        if (string.IsNullOrEmpty(normMap) || maxPlayers <= 0)
+            return;
+        lock (_sync)
+        {
+            var map = GetOrCreateMap(normMap);
+            map.MaxPlayers = maxPlayers;
+            map.MaxPlayersSource = source;
+            map.MaxPlayersObservedUtc = DateTime.UtcNow;
+        }
+    }
+
+    private void MarkQuestTurnIn(int questId)
+    {
+        _lastTurnInQuestId = questId;
+        _lastTurnInUtc = DateTime.UtcNow;
+    }
+
+    private void CacheQuestRewardItem(int questId, int itemId)
+    {
+        if (questId <= 0 || itemId <= 0)
+            return;
+        if (!_sessionQuestRewardItems.TryGetValue(questId, out var set))
+            _sessionQuestRewardItems[questId] = set = new HashSet<int>();
+        set.Add(itemId);
+    }
+
+    /// <summary>
+    /// True when an item that just arrived belongs to a quest turn-in rather than to a monster kill: a turn-in started
+    /// within <see cref="QuestRewardWindowSeconds"/> and the item is one of that quest's known rewards, or the quest's
+    /// rewards are unknown this session (then the item is ambiguous and is skipped rather than risk polluting drop rates).
+    /// </summary>
+    private bool IsLikelyQuestReward(int itemId, DateTime now)
+    {
+        if (_lastTurnInQuestId <= 0 || (now - _lastTurnInUtc).TotalSeconds > QuestRewardWindowSeconds)
+            return false;
+        return !_sessionQuestRewardItems.TryGetValue(_lastTurnInQuestId, out var rewards) || rewards.Contains(itemId);
     }
 
     private void AttributeDropToMonster(int itemId, string itemName, bool isTemp, int quantity)
@@ -1150,24 +1422,28 @@ public sealed partial class PacketCollectorEngine
         CapturedMonster? targetMonster = null;
         var now = DateTime.UtcNow;
 
-        // 1. Prefer the monster that was just killed within the last 5 seconds
-        if (!string.IsNullOrEmpty(_lastKilledMonsterKey) &&
-            (now - _lastKillTimeUtc).TotalSeconds <= 5.0 &&
-            _delta.Monsters.TryGetValue(_lastKilledMonsterKey, out var killedMon))
+        if (IsLikelyQuestReward(itemId, now))
         {
-            targetMonster = killedMon;
-        }
-
-        // 2. Fallback to monster in the current cell
-        if (targetMonster == null)
-        {
-            var cellMonsters = GetMonstersInCell(_currentCell);
-            if (cellMonsters.Count > 0)
-                targetMonster = cellMonsters[0];
-        }
-
-        if (targetMonster == null)
+            SessionQuestRewardsExcluded++;
             return;
+        }
+
+        // Only credit the monster that was just killed. There is deliberately no "first monster in the cell" fallback:
+        // items arriving without a recent kill come from quests, merges, map items or shops, never from that monster.
+        if (!string.IsNullOrEmpty(_lastKilledMonsterKey) &&
+            (now - _lastKillTimeUtc).TotalSeconds <= DropAttributionWindowSeconds)
+        {
+            // The delta may have been flushed since the kill; recreate the entry instead of losing the drop.
+            targetMonster = _delta.Monsters.TryGetValue(_lastKilledMonsterKey, out var killedMon)
+                ? killedMon
+                : GetOrCreateMonster(_lastKilledMonsterId, _lastKilledMonsterName);
+        }
+
+        if (targetMonster == null)
+        {
+            SessionUnattributedDropsSkipped++;
+            return;
+        }
 
         if (!targetMonster.Drops.TryGetValue(itemId, out var dropStat))
         {
@@ -1184,8 +1460,15 @@ public sealed partial class PacketCollectorEngine
             dropStat.ItemName = itemName;
         dropStat.Temp |= isTemp;
         dropStat.DropEvents++;
+        if (_activeQuestsKnown)
+            dropStat.TrackedDropEvents++;
         dropStat.TotalQuantity += Math.Max(1, quantity);
-        dropStat.EligibleKills = Math.Max(targetMonster.KillCount, dropStat.DropEvents);
+        if (_delta.Items.TryGetValue(itemId, out var itemInfo) && itemInfo.RequiredByQuestIds.Count > 0)
+        {
+            dropStat.QuestGated = true;
+            dropStat.RequiredQuestIds.UnionWith(itemInfo.RequiredByQuestIds);
+        }
+        DropRates.Recompute(targetMonster);
         SessionDropsRecorded++;
     }
 
@@ -1233,6 +1516,8 @@ public sealed partial class PacketCollectorEngine
 
     private void RecordQuestAccepted(int questId, string normMap)
     {
+        if (_activeQuestsKnown)
+            _activeQuestIds.Add(questId);
         var cq = GetOrCreateQuest(questId);
         cq.AcceptedCount++;
         if (!string.IsNullOrEmpty(normMap))
@@ -1280,6 +1565,11 @@ public sealed partial class PacketCollectorEngine
         if (!string.IsNullOrWhiteSpace(meta)) item.Meta = meta;
         var enh = ParseInt(itemObj["EnhPatternID"]);
         if (enh > 0) item.EnhancementPatternID = enh;
+
+        // "sReqQuests": comma-separated IDs of the quests that use this item (a quest-gated item when non-empty).
+        foreach (var part in (itemObj["sReqQuests"]?.ToString() ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            if (int.TryParse(part, out var reqQuestId) && reqQuestId > 0)
+                item.RequiredByQuestIds.Add(reqQuestId);
 
         item.LastSeenUtc = DateTime.UtcNow;
         return item;

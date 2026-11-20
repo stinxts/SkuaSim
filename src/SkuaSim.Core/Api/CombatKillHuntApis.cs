@@ -30,6 +30,7 @@ public sealed class CombatApi : ApiBase
     {
         if (StopAttacking)
             return false;
+        World.EnsureRequestedMonster(name);
         var mon = World.FindMonster(name, currentCellOnly: true, aliveOnly: true);
         return World.Attack(mon);
     }
@@ -85,6 +86,7 @@ public sealed class KillApi : ApiBase
 
     public void Monster(string name, CancellationToken? token)
     {
+        World.EnsureRequestedMonster(name);
         KillLoop(() => World.FindMonster(name, currentCellOnly: true, aliveOnly: true), token);
     }
 
@@ -146,6 +148,9 @@ public sealed class KillApi : ApiBase
             }
             return true;
         }
+
+        foreach (var n in nameList)
+            World.EnsureRequestedMonster(n);
 
         var missingWarned = false;
         while (!Ctx.StopRequested && !HasAllRequired())
@@ -211,6 +216,7 @@ public sealed class HuntApi : ApiBase
 
     public void Monster(string name, CancellationToken? token)
     {
+        World.EnsureRequestedMonster(name);
         var mon = FindAndJump(m => SimWorld.NameMatches(m.Name, name));
         if (mon != null)
             _kill.KillOne(mon, token);
@@ -289,6 +295,9 @@ public sealed class HuntApi : ApiBase
             }
             return true;
         }
+
+        foreach (var n in nameList)
+            World.EnsureRequestedMonster(n);
 
         while (!Ctx.StopRequested && !HasAllRequired())
         {

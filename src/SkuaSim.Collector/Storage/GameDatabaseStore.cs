@@ -32,20 +32,45 @@ public sealed partial class GameDatabaseStore
             .ToList();
     }
 
+    /// <summary>Supplies offline quest knowledge (Skua's QuestData.json) for the v1 → v2 migration. Optional.</summary>
+    public Func<QuestCatalogHints>? QuestHintsProvider { get; set; }
+
+    /// <summary>Path of the dated v1 backup written by the last migration (null when none happened).</summary>
+    public string? LastMigrationBackupPath { get; private set; }
+
     public GameDatabase LoadCurrent()
     {
-        return ExecuteWithMutex(() => LoadFromDiskInternal(PrimaryFilePath));
+        return ExecuteWithMutex(() =>
+        {
+            var db = LoadFromDiskInternal(PrimaryFilePath);
+            if (db.SchemaVersion < GameDatabase.CurrentSchemaVersion)
+                GameDatabaseMigrations.MigrateToV2(db, SafeHints()); // in memory only; the next flush persists it
+            return db;
+        });
     }
 
     /// <summary>
     /// Atomically reads the current database on disk, merges the in-memory delta into it,
     /// saves it back atomically, and updates any configured mirror files.
+    /// A v1 file is first backed up (dated copy next to it) and migrated to v2.
     /// </summary>
     public GameDatabase FlushDelta(GameDatabase delta)
     {
         return ExecuteWithMutex(() =>
         {
             var current = LoadFromDiskInternal(PrimaryFilePath);
+            if (current.SchemaVersion < GameDatabase.CurrentSchemaVersion)
+            {
+                if (File.Exists(PrimaryFilePath))
+                {
+                    var backup = Path.Combine(
+                        Path.GetDirectoryName(PrimaryFilePath) ?? ".",
+                        $"gamedata.v{current.SchemaVersion}-backup-{DateTime.UtcNow:yyyyMMdd-HHmmss}.json");
+                    File.Copy(PrimaryFilePath, backup, overwrite: false);
+                    LastMigrationBackupPath = backup;
+                }
+                GameDatabaseMigrations.MigrateToV2(current, SafeHints());
+            }
             MergeInto(current, delta);
             current.TotalFlushesMerged++;
             current.LastUpdatedUtc = DateTime.UtcNow;
@@ -115,6 +140,12 @@ public sealed partial class GameDatabaseStore
         return zipPath;
     }
 
+    private QuestCatalogHints? SafeHints()
+    {
+        try { return QuestHintsProvider?.Invoke(); }
+        catch { return null; }
+    }
+
     public static void MergeInto(GameDatabase target, GameDatabase source)
     {
         // 1. Merge Maps
@@ -169,6 +200,7 @@ public sealed partial class GameDatabaseStore
                 if (!string.IsNullOrWhiteSpace(srcSpawn.Race)) dstSpawn.Race = srcSpawn.Race;
                 if (!string.IsNullOrWhiteSpace(srcSpawn.Element)) dstSpawn.Element = srcSpawn.Element;
                 if (!string.IsNullOrWhiteSpace(srcSpawn.FileName)) dstSpawn.FileName = srcSpawn.FileName;
+                if (srcSpawn.WeaponDps > 0) dstSpawn.WeaponDps = srcSpawn.WeaponDps;
             }
 
             foreach (var (mapItemId, srcMapItem) in srcMap.MapItems)
@@ -190,6 +222,19 @@ public sealed partial class GameDatabaseStore
                 foreach (var itemId in srcMapItem.GrantedItemIDs)
                     if (itemId > 0)
                         dstMapItem.GrantedItemIDs.Add(itemId);
+
+                dstMapItem.RequiredQuestIds.UnionWith(srcMapItem.RequiredQuestIds);
+                dstMapItem.GrantObservations += srcMapItem.GrantObservations;
+                foreach (var (questId, count) in srcMapItem.ActiveQuestCounts)
+                    dstMapItem.ActiveQuestCounts[questId] = dstMapItem.ActiveQuestCounts.GetValueOrDefault(questId) + count;
+            }
+
+            if (srcMap.MaxPlayers is > 0 &&
+                (dstMap.MaxPlayersObservedUtc == null || srcMap.MaxPlayersObservedUtc >= dstMap.MaxPlayersObservedUtc))
+            {
+                dstMap.MaxPlayers = srcMap.MaxPlayers;
+                dstMap.MaxPlayersSource = srcMap.MaxPlayersSource;
+                dstMap.MaxPlayersObservedUtc = srcMap.MaxPlayersObservedUtc;
             }
 
             if (srcMap.ZoneEvents is { Count: > 0 })
@@ -238,6 +283,7 @@ public sealed partial class GameDatabaseStore
             if (srcMon.ID > 0) dstMon.ID = srcMon.ID;
             if (!string.IsNullOrWhiteSpace(srcMon.Name)) dstMon.Name = srcMon.Name;
             if (srcMon.Level > 0) dstMon.Level = srcMon.Level;
+            if (srcMon.WeaponDps > 0) dstMon.WeaponDps = srcMon.WeaponDps;
             if (srcMon.MaxHP > 0) dstMon.MaxHP = Math.Max(dstMon.MaxHP, srcMon.MaxHP);
             if (!string.IsNullOrWhiteSpace(srcMon.Race) && srcMon.Race != "None") dstMon.Race = srcMon.Race;
             else if (string.IsNullOrWhiteSpace(dstMon.Race) && !string.IsNullOrWhiteSpace(srcMon.Race)) dstMon.Race = srcMon.Race;
@@ -245,6 +291,11 @@ public sealed partial class GameDatabaseStore
             if (!string.IsNullOrWhiteSpace(srcMon.FileName)) dstMon.FileName = srcMon.FileName;
 
             dstMon.KillCount += srcMon.KillCount;
+            dstMon.TrackedKills += srcMon.TrackedKills;
+            foreach (var (questId, kills) in srcMon.KillsWhileQuestActive)
+                dstMon.KillsWhileQuestActive[questId] = dstMon.KillsWhileQuestActive.GetValueOrDefault(questId) + kills;
+            if (srcMon.OfficialDropsObservedUtc > (dstMon.OfficialDropsObservedUtc ?? DateTime.MinValue))
+                dstMon.OfficialDropsObservedUtc = srcMon.OfficialDropsObservedUtc;
             if (srcMon.LastSeenUtc > dstMon.LastSeenUtc)
                 dstMon.LastSeenUtc = srcMon.LastSeenUtc;
 
@@ -344,13 +395,16 @@ public sealed partial class GameDatabaseStore
                 dstDrop.Temp |= srcDrop.Temp;
                 dstDrop.DropEvents += srcDrop.DropEvents;
                 dstDrop.TotalQuantity += srcDrop.TotalQuantity;
+                dstDrop.TrackedDropEvents += srcDrop.TrackedDropEvents;
+                dstDrop.IsOfficialDrop |= srcDrop.IsOfficialDrop;
+                dstDrop.QuestGated |= srcDrop.QuestGated;
+                dstDrop.RequiredQuestIds.UnionWith(srcDrop.RequiredQuestIds);
+                dstDrop.QuestGatedNames.UnionWith(srcDrop.QuestGatedNames);
+                dstDrop.QuestObjectives.UnionWith(srcDrop.QuestObjectives);
             }
 
-            // Synchronize EligibleKills across all known drops of this monster with total KillCount
-            foreach (var drop in dstMon.Drops.Values)
-            {
-                drop.EligibleKills = Math.Max(dstMon.KillCount, drop.DropEvents);
-            }
+            // Denominators/bases depend on the merged kill counters (all kills or quest-active kills).
+            DropRates.Recompute(dstMon);
         }
 
         // 3. Merge Items
@@ -374,6 +428,7 @@ public sealed partial class GameDatabaseStore
             if (!string.IsNullOrWhiteSpace(srcItem.FileLink)) dstItem.FileLink = srcItem.FileLink;
             if (!string.IsNullOrWhiteSpace(srcItem.Meta)) dstItem.Meta = srcItem.Meta;
             if (srcItem.EnhancementPatternID > 0) dstItem.EnhancementPatternID = srcItem.EnhancementPatternID;
+            dstItem.RequiredByQuestIds.UnionWith(srcItem.RequiredByQuestIds);
             if (srcItem.LastSeenUtc > dstItem.LastSeenUtc) dstItem.LastSeenUtc = srcItem.LastSeenUtc;
         }
 
@@ -422,7 +477,10 @@ public sealed partial class GameDatabaseStore
 
             if (srcQuest.AcceptRequirements.Count > 0) dstQuest.AcceptRequirements = srcQuest.AcceptRequirements;
             if (srcQuest.Requirements.Count > 0) dstQuest.Requirements = srcQuest.Requirements;
-            if (srcQuest.Rewards.Count > 0) dstQuest.Rewards = srcQuest.Rewards;
+            // Keep reward lists that carry type/rate (from getQuests) over plain ones (from the Skua Quest model).
+            if (srcQuest.Rewards.Count > 0 &&
+                (srcQuest.Rewards.Any(r => r.RewardType.HasValue) || !dstQuest.Rewards.Any(r => r.RewardType.HasValue)))
+                dstQuest.Rewards = srcQuest.Rewards;
 
             dstQuest.AcceptedCount += srcQuest.AcceptedCount;
             dstQuest.TurnInCount += srcQuest.TurnInCount;

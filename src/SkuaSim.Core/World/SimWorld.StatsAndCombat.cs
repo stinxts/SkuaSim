@@ -261,7 +261,7 @@ public sealed partial class SimWorld
                 {
                     Factions.Add(new Skua.Core.Models.Factions.Faction
                     {
-                        ID = Math.Abs(info.RequiredFaction.GetHashCode() % 1000) + 100,
+                        ID = StableHash.Of(info.RequiredFaction) % 1000 + 100,
                         Name = info.RequiredFaction,
                         Rank = info.RequiredFactionRank,
                         TotalRep = RepForRank(info.RequiredFactionRank),

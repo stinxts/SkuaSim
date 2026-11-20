@@ -238,7 +238,7 @@ public sealed partial class SimWorld
             {
                 Factions.Add(new Faction
                 {
-                    ID = f.Id ?? Math.Abs(f.Name.GetHashCode() % 1000),
+                    ID = f.Id ?? StableHash.Of(f.Name) % 1000,
                     Name = f.Name,
                     Rank = f.Rank,
                     TotalRep = f.TotalRep ?? RepForRank(f.Rank),
@@ -780,7 +780,7 @@ public sealed partial class SimWorld
                     map.Monsters.Add(new SimMonster
                     {
                         MapID = nextMapId++,
-                        MonID = ms.Id ?? captured?.ID ?? 90_000 + Math.Abs(ms.Name.GetHashCode() % 9_999),
+                        MonID = ms.Id ?? captured?.ID ?? 90_000 + StableHash.Of(ms.Name) % 9_999,
                         Name = ms.Name,
                         Cell = ms.Cell,
                         MaxHP = hp,
@@ -865,6 +865,58 @@ public sealed partial class SimWorld
         }
     }
 
+    /// <summary>
+    /// On a synthesized (uncaptured) map, spawns a monster the script explicitly asked to fight by name when no
+    /// monster with that name exists yet (e.g. names built at runtime that the AST hint extractor cannot see).
+    /// Without this, Kill/Hunt loops on a missing monster spin forever. Returns true when something was spawned.
+    /// Captured and scenario-defined maps are never touched: a missing monster there is a real script/data issue.
+    /// </summary>
+    public bool EnsureRequestedMonster(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name == "*")
+            return false;
+        name = name.Trim();
+
+        lock (Sync)
+        {
+            if (Map == null || !Map.Synthesized || Map.Monsters.Any(m => Eq(m.Name, name)))
+                return false;
+
+            var cell = string.IsNullOrWhiteSpace(Cell) ? "Enter" : Cell;
+            var captured = _ctx.Catalog.FindMonster(0, name);
+            var level = captured?.Level > 0 ? captured.Level : SynthesizedMonsterLevel();
+            var hp = captured?.MaxHP > 0 ? captured.MaxHP : GenericHp(level);
+            var nextMapId = Map.Monsters.Count == 0 ? 1 : Map.Monsters.Max(m => m.MapID) + 1;
+            for (var copy = 0; copy < 2; copy++)
+            {
+                Map.Monsters.Add(new SimMonster
+                {
+                    MapID = nextMapId,
+                    MonID = captured?.ID > 0 ? captured.ID : 95_000 + nextMapId,
+                    Name = name,
+                    Cell = cell,
+                    MaxHP = hp,
+                    HP = hp,
+                    Level = level,
+                    Race = captured?.Race ?? "None",
+                    Data = captured,
+                    Synthesized = true
+                });
+                nextMapId++;
+            }
+
+            // Remember it so re-joining this map spawns it again.
+            if (!_ctx.ScriptMonsterHints.TryGetValue(Map.Name, out var hints))
+                _ctx.ScriptMonsterHints[Map.Name] = hints = new List<(string Cell, string MonsterName)>();
+            if (!hints.Any(h => Eq(h.MonsterName, name)))
+                hints.Add((cell, name));
+
+            Trace.Synthesize($"monster:{Map.Name}:{name}",
+                $"Monster '{name}' was requested on synthesized map '{Map.Name}' but no hint existed; spawned 2 in cell '{cell}' on demand.");
+            return true;
+        }
+    }
+
     private int SynthesizedMonsterLevel() => Math.Clamp(Math.Max(5, (int)Math.Round(Level * 0.65)), 5, 35);
 
     private int GenericHp(int level)
@@ -918,6 +970,40 @@ public sealed partial class SimWorld
         {
             SpawnCell = string.IsNullOrWhiteSpace(cell) ? Cell : cell;
             SpawnPad = string.IsNullOrWhiteSpace(pad) ? Pad : pad;
+        }
+    }
+
+    // ================================================================ Progress
+
+    /// <summary>
+    /// Fingerprint of everything that counts as player progress: level, XP, gold, coins, class rank, every item
+    /// stack (inventory, temp, bank, house), completed quests and dailies, story slot progress and reputation.
+    /// Map/cell changes, kills, deaths and quest accepts are deliberately excluded: a loop that only walks around,
+    /// dies or re-accepts the same quest is not making progress. Only compared within one run.
+    /// </summary>
+    public long ProgressSignature()
+    {
+        lock (Sync)
+        {
+            unchecked
+            {
+                long h = 17;
+                void Mix(long v) => h = h * 1_000_003 + v;
+
+                Mix(Level); Mix(XP); Mix(Gold); Mix(Coins); Mix(ClassRank);
+                foreach (var it in Inventory) { Mix(it.ID); Mix(it.Quantity); }
+                Mix(-1);
+                foreach (var it in TempInventory) { Mix(it.ID); Mix(it.Quantity); }
+                Mix(-2);
+                foreach (var it in Bank) { Mix(it.ID); Mix(it.Quantity); }
+                Mix(-3);
+                foreach (var it in House) { Mix(it.ID); Mix(it.Quantity); }
+                Mix(-4);
+                Mix(QuestsCompletedCount); Mix(CompletedQuests.Count); Mix(DailiesCompleted.Count);
+                foreach (var (slot, value) in SlotProgress) { Mix(slot); Mix(value); }
+                foreach (var f in Factions) { Mix(f.ID); Mix(f.TotalRep); }
+                return h;
+            }
         }
     }
 
@@ -1203,7 +1289,26 @@ public sealed partial class SimWorld
             {
                 if (dropped.Contains(drop.ItemID))
                     continue;
-                var chance = drop.EligibleKills > 0 ? drop.EstimatedDropChance : drop.DropEvents > 0 ? 1.0 : 0.0;
+
+                // Quest-gated items (AQW "sReqQuests") only drop while one of their quests is active.
+                if (drop.QuestGated && drop.RequiredQuestIds.Count > 0 && !drop.RequiredQuestIds.Any(ActiveQuests.Contains))
+                    continue;
+
+                double chance;
+                if (drop.EstimatedDropChance is { } observed)
+                {
+                    chance = observed;
+                }
+                else
+                {
+                    // Known source (observed or official list) without a trustworthy rate: never use 0 %, invent one.
+                    chance = Math.Clamp(Rules.GenericDropChance, 0, 1);
+                    var why = drop.QuestGated
+                        ? "quest-gated and not yet measured with the quest active"
+                        : drop.IsOfficialDrop && drop.DropEvents == 0 ? "on the official drop list but never observed dropping" : "rate not measured";
+                    Trace.Synthesize($"droprate:{monster.Name.ToLowerInvariant()}:{drop.ItemID}",
+                        $"'{drop.ItemName}' is a known drop of '{monster.Name}' ({why}): using an invented {chance:P0} chance.");
+                }
                 if (_ctx.Rng.NextDouble() >= chance)
                     continue;
                 var info = _ctx.Catalog.FindItem(drop.ItemID) ?? new ItemInfo { ID = drop.ItemID, Name = drop.ItemName, Temp = drop.Temp, MaxStack = 1000, Source = DataSource.Captured };

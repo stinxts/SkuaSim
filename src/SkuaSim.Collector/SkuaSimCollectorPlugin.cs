@@ -270,6 +270,50 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                 _engine.RecordQuestModel(quest, accepted: true, turnedIn: false);
             }
         });
+        if (_bot != null)
+            SyncActiveQuests(_bot);
+    }
+
+    /// <summary>
+    /// Mirrors the client's active quest IDs into the engine (RAM only, never persisted as a list). They are the
+    /// denominator of quest-gated drop rates and identify quest-gated map items.
+    /// </summary>
+    private void SyncActiveQuests(IScriptInterface bot)
+    {
+        try
+        {
+            var active = bot.Quests.Active;
+            if (active == null)
+                return;
+            var ids = active.Where(q => q != null).Select(q => q.ID).ToList();
+            EnqueueWork(() => _engine.SyncActiveQuests(ids));
+        }
+        catch
+        {
+            // Quest list unavailable during transitions; the engine keeps its last known state.
+        }
+    }
+
+    private const string RoomCapacityPath = "world.areaData.intMaxPlayers";
+
+    /// <summary>
+    /// Reads the room player cap from the game client after joining (read-only, no packet is sent). The path comes
+    /// from the OMNISCOPE investigation and is unverified, so every probe is counted in the packet census
+    /// ("probe:..." names) to confirm whether it works.
+    /// </summary>
+    private void ProbeRoomCapacity(IScriptInterface bot, string? mapName)
+    {
+        try
+        {
+            var cap = bot.Flash?.GetGameObject<int>(RoomCapacityPath, 0) ?? 0;
+            _engine.SchemaSampler.CountCommand(cap > 0 ? $"probe:{RoomCapacityPath}=found" : $"probe:{RoomCapacityPath}=missing");
+            if (cap > 0)
+                EnqueueWork(() => _engine.RecordRoomCapacity(mapName, cap, "runtime:" + RoomCapacityPath));
+        }
+        catch
+        {
+            _engine.SchemaSampler.CountCommand($"probe:{RoomCapacityPath}=error");
+        }
     }
 
     private void OnQuestTurnedIn(QuestTurninMessage message)
@@ -286,6 +330,8 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                 _engine.RecordQuestModel(quest, accepted: false, turnedIn: true);
             }
         });
+        if (_bot != null)
+            SyncActiveQuests(_bot);
     }
 
     private void OnPlayerDeath(PlayerDeathMessage message)
@@ -331,6 +377,8 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
 
                 EnqueueWork(() => _engine.RecordMapSnapshot(mapName, mapFile, cell, pad, cells, monsters));
                 CaptureLivePlayerSnapshot(bot);
+                SyncActiveQuests(bot);
+                ProbeRoomCapacity(bot, mapName);
             }
             catch
             {
@@ -433,6 +481,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                 if (IsCollectingActive() && _bot is { Player.LoggedIn: true })
                 {
                     CaptureLivePlayerSnapshot(_bot);
+                    SyncActiveQuests(_bot);
                     await Task.Delay(150, token).ConfigureAwait(false);
                 }
                 FlushSafe();
@@ -579,7 +628,26 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
             mirrors.Add(path);
         }
 
-        return new GameDatabaseStore(primaryFile, mirrors);
+        return new GameDatabaseStore(primaryFile, mirrors)
+        {
+            // Skua's QuestData.json improves the one-time v1 -> v2 migration (quest rewards vs. quest-required drops).
+            QuestHintsProvider = () => QuestCatalogHints.FromQuestDataFile(FindQuestDataFile())
+        };
+    }
+
+    private static string? FindQuestDataFile()
+    {
+        var candidates = new List<string>();
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(ClientFileSources.SkuaDIR))
+                candidates.Add(Path.Combine(ClientFileSources.SkuaDIR, "QuestData.json"));
+        }
+        catch { }
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        candidates.Add(Path.Combine(appData, "VibeSkua", "QuestData.json"));
+        candidates.Add(Path.Combine(appData, "Skua", "QuestData.json"));
+        return candidates.FirstOrDefault(File.Exists);
     }
 
     private static string GetPrimaryDataDirectory()
