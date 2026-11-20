@@ -1,8 +1,8 @@
 # SkuaSim — Project Context
 
 > This document continues the original design conversation started in the ArmyFarmerJoeDoAll workspace.
-> Origin conversation: `2d6d8a65-4a2d-4461-afda-7f4efa4981b4` (Antigravity).
-> Detailed plan artifact: `C:\Users\lucas\.gemini\antigravity\brain\2d6d8a65-4a2d-4461-afda-7f4efa4981b4\plano_ambiente_testes.md`
+> Origin: an earlier Antigravity design conversation (local transcripts, not part of this repository).
+> The original detailed plan artifact also lives with those local transcripts.
 
 ## Objective
 An **offline, reproducible test environment** for **any Skua/VibeSkua script**, designed to reproduce bug reports in detail and validate fixes. It does **not** recreate AQW or use copyrighted game assets/servers. Instead, it simulates the **Skua API** (`IScriptInterface`: Player, Map, Monsters, Inventory, Quests, Drops, Shops, Boosts, Config, Wait...) backed by an in-memory simulated game world.
@@ -34,17 +34,17 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
 ## Environment Discovered
 - **.NET SDK 10.0.400** installed.
 - **VibeSkua** (Avalonia fork of Skua):
-  - Application: `C:\Users\lucas\AppData\Local\VibeSkua\current\` (`VibeSkua.exe`, installed via Velopack)
+  - Application: `%LOCALAPPDATA%\VibeSkua\current\` (`VibeSkua.exe`, installed via Velopack)
     - API Assemblies (`Assemblies\`): `Skua.Core.dll`, `Skua.Core.Interfaces.dll`, `Skua.Core.Models.dll`, `Skua.Core.Utils.dll`, `Skua.Core.Generators.dll`, `Westwind.Scripting.dll`, `CommunityToolkit.Mvvm.dll`, `Newtonsoft.Json.dll`
     - Built-in plugins (`plugins\`): `ButlerV5.dll`, `Skua.Plugin.Cosmetics.dll`, `Skua.Plugin.DailyTracker.dll`
-  - User Data: `C:\Users\lucas\AppData\Roaming\VibeSkua\` (`Scripts` with 1,992 `.cs` scripts, `options`, `plugins`, `QuestData.json`)
-- **`C:\Users\lucas\AppData\Roaming\Skua\`**: actively used by `ButlerV5` (`character_locations\`, `army-control-jump.json`) and contains `plugins\`.
+  - User Data: `%APPDATA%\VibeSkua\` (`Scripts` with 1,992 `.cs` scripts, `options`, `plugins`, `QuestData.json`)
+- **`%APPDATA%\Skua\`**: actively used by `ButlerV5` (`character_locations\`, `army-control-jump.json`) and contains `plugins\`.
 
 ## Confirmed Decisions
 - **Target Compatibility:** Both **VibeSkua** and **official Skua** (sharing the `Skua.Core.*` architecture without bundling third-party client binaries).
 - **Project Location:** Everything lives self-contained inside this folder (`SkuaSim\`).
 - **Language:** All code, UI strings, logs, tests, and documentation in **English**.
-- **Reference Scripts:** `C:\Users\lucas\AppData\Roaming\VibeSkua\Scripts` (1,992 `.cs` scripts accessible for validation).
+- **Reference Scripts:** `%APPDATA%\VibeSkua\Scripts` (1,992 `.cs` scripts accessible for validation).
 
 ## Implementation Status
 ### Stage 1 — Collector (`SkuaSim.Collector`) ✅ Completed, Live-Audited & Installed
@@ -52,12 +52,12 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
 - **Automated Tests:** `tests/SkuaSim.Collector.Tests/` (**9/9 passing**; suites 7–9 use real anonymized packets and cover sampling privacy and schema v2)
 - **Live Protocol Hardening:** `ct.sara[].actionResult` parsing (monster hits/dodges + HoT/DoT `"typ": "d"`), VHL self-damage guard, instant `updateClass`/`equipItem` class sync + 350ms debounced refresh, `"stk"` aura stack counts, `"Attack1,Attack2"` auto-attack filtering, legacy noise cleanup, `casterId`/`uid`/`unm` redaction, and cross-session `PacketSchemaSampler` (`packet_schemas.json`, up to 12 distinct shapes per category, Mutex-merged).
 - **Installed Binary Locations** (last deployed 2026-11-20 with schema v2; deploy only with all clients closed — the DLL is locked while they run):
-  - `C:\Users\lucas\AppData\Roaming\VibeSkua\plugins\SkuaSim.Collector.dll`
-  - `C:\Users\lucas\AppData\Local\VibeSkua\current\plugins\SkuaSim.Collector.dll`
-  - `C:\Users\lucas\AppData\Roaming\Skua\plugins\SkuaSim.Collector.dll`
+  - `%APPDATA%\VibeSkua\plugins\SkuaSim.Collector.dll`
+  - `%LOCALAPPDATA%\VibeSkua\current\plugins\SkuaSim.Collector.dll`
+  - `%APPDATA%\Skua\plugins\SkuaSim.Collector.dll`
   - `dist\plugins\SkuaSim.Collector.dll`
 - **Collected Data Locations:**
-  - Primary: `C:\Users\lucas\AppData\Roaming\VibeSkua\SkuaSim\gamedata.json` (+ `packet_schemas.json`)
+  - Primary: `%APPDATA%\VibeSkua\SkuaSim\gamedata.json` (+ `packet_schemas.json`)
   - Automatic mirror in workspace: `data\gamedata.json` (+ `data\packet_schemas.json`)
   - Schema v2 since 2026-11-20 (migrated from v1: 52 impossible drop records removed, 369 temporary quest-required drops marked quest-gated). Backups: `SkuaSim\gamedata.v1-backup-20261120-203127.json` and `SkuaSim\backups\gamedata.pre-v2-manual-20261120-173107.json`.
 

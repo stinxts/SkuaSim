@@ -73,4 +73,4 @@ dotnet run --project src\SkuaSim.UI
 
 The project was built in Antigravity sessions; transcripts are under
 `%USERPROFILE%\.gemini\antigravity\brain\<id>\.system_generated\logs\transcript.jsonl`
-(origin `2d6d8a65…`, main development `d28451cc…`, OMNISCOPE plan `39b80778…`).
+(the origin design, the main development and the OMNISCOPE planning conversations; IDs are kept locally, not in this repository).
