@@ -219,6 +219,11 @@ public sealed class GameDataCatalog
 
     private static readonly HashSet<int> EmptyQuestSet = new();
 
+    private QuestUnlockCatalog? _unlocks;
+
+    /// <summary>Items whose ownership opens quests (quest pets, weapons, classes…), built on first use.</summary>
+    public QuestUnlockCatalog Unlocks => _unlocks ??= QuestUnlockCatalog.Build(this);
+
     /// <summary>Faction name by ID from the collected faction catalog (null when unknown).</summary>
     public string? FactionName(int factionId) =>
         factionId > 0 && Captured.Factions != null && Captured.Factions.TryGetValue(factionId, out var f) && !string.IsNullOrWhiteSpace(f.Name)

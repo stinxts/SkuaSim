@@ -244,6 +244,76 @@ public partial class ScenarioEditorViewModel : ViewModelBase
         }
     }
 
+    // ---------------------------------------------------------------- Quest pets & unlock items
+
+    /// <summary>Unlock items the character owns (kept in the scenario inventory).</summary>
+    public ObservableCollection<UnlockItemRow> OwnedUnlockItems { get; } = new();
+    public ObservableCollection<UnlockItemRow> UnlockSearchResults { get; } = new();
+    [ObservableProperty] public partial string UnlockSearchText { get; set; } = "";
+
+    private IReadOnlyList<SkuaSim.Core.Data.UnlockItem>? _unlockCatalog;
+    private IReadOnlyList<SkuaSim.Core.Data.UnlockItem> UnlockCatalog =>
+        _unlockCatalog ??= _hostService?.GetUnlockItems() ?? Array.Empty<SkuaSim.Core.Data.UnlockItem>();
+
+    public string UnlockCatalogInfo =>
+        $"{UnlockCatalog.Count:N0} items open quests ({UnlockCatalog.Count(i => i.IsPet):N0} pets). Owning one can change a script's path, e.g. a Paragon Pet's Legion Token quest.";
+
+    private SkuaSim.Core.Data.UnlockItem? FindUnlock(string? name, int? id) =>
+        UnlockCatalog.FirstOrDefault(u => (id is > 0 && u.Id == id) || (!string.IsNullOrWhiteSpace(name) && Eq(u.Name, name)));
+
+    private static bool Eq(string? a, string? b) => string.Equals(a?.Trim(), b?.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private UnlockItemRow ToRow(SkuaSim.Core.Data.UnlockItem u, bool owned) => new()
+    {
+        Id = u.Id,
+        Name = u.Name,
+        Category = u.Category,
+        Opens = u.Describe(),
+        QuestCount = u.Quests.Count,
+        OnAdd = owned ? null : AddUnlockItem,
+        OnRemove = owned ? RemoveUnlockItem : null
+    };
+
+    private void LoadOwnedUnlockItems(Scenario scenario)
+    {
+        OwnedUnlockItems.Clear();
+        foreach (var item in scenario.Inventory.Concat(scenario.Bank))
+            if (FindUnlock(item.Name, item.Id) is { } u && OwnedUnlockItems.All(r => r.Id != u.Id))
+                OwnedUnlockItems.Add(ToRow(u, owned: true));
+        OnPropertyChanged(nameof(UnlockCatalogInfo));
+    }
+
+    partial void OnUnlockSearchTextChanged(string value)
+    {
+        UnlockSearchResults.Clear();
+        var text = value?.Trim() ?? "";
+        if (text.Length < 2)
+            return;
+        // Match the item name or what it unlocks (e.g. "Legion Token" lists every pet whose quest rewards it).
+        foreach (var u in UnlockCatalog
+                     .Where(u => u.Name.Contains(text, StringComparison.OrdinalIgnoreCase) ||
+                                 u.RewardNames.Any(r => r.Contains(text, StringComparison.OrdinalIgnoreCase)))
+                     .Take(40))
+            UnlockSearchResults.Add(ToRow(u, owned: false));
+    }
+
+    private void AddUnlockItem(UnlockItemRow row)
+    {
+        if (OwnedUnlockItems.Any(r => r.Id == row.Id) || FindUnlock(row.Name, row.Id) is not { } u)
+            return;
+        OwnedUnlockItems.Add(ToRow(u, owned: true));
+        MarkDirty();
+    }
+
+    private void RemoveUnlockItem(UnlockItemRow row)
+    {
+        var existing = OwnedUnlockItems.FirstOrDefault(r => r.Id == row.Id);
+        if (existing == null)
+            return;
+        OwnedUnlockItems.Remove(existing);
+        MarkDirty();
+    }
+
     public void LoadFromScenario(Scenario scenario, string? sourcePath = null)
     {
         _suppressDirty = true;
@@ -290,6 +360,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
                 ? scenario.EffectiveStartUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
                 : "";
             StartAtCurrentTime = scenario.StartAtCurrentTime;
+            LoadOwnedUnlockItems(scenario);
 
             foreach (var row in EquipmentBoosts)
             {
@@ -359,6 +430,10 @@ public partial class ScenarioEditorViewModel : ViewModelBase
                 ? DateTime.SpecifyKind(startUtc, DateTimeKind.Utc)
                 : clone.StartDate; // keep the previous value when the text is not a valid date
         clone.StartAtCurrentTime = StartAtCurrentTime;
+        // Unlock items (quest pets…) live in the inventory: quests only accept / turn in with them in the bag.
+        clone.Inventory = clone.Inventory.Where(i => FindUnlock(i.Name, i.Id) == null).ToList();
+        foreach (var row in OwnedUnlockItems)
+            clone.Inventory.Add(new ItemSetup { Name = row.Name, Id = row.Id, Category = row.Category });
 
         clone.Location.Map = string.IsNullOrWhiteSpace(StartMap) ? "battleon" : StartMap.Trim();
         clone.Location.Cell = string.IsNullOrWhiteSpace(StartCell) ? "Enter" : StartCell.Trim();

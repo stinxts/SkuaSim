@@ -146,8 +146,25 @@ public sealed class SimulationHostService : IDisposable
         }
         gameDataPath ??= FindWorkspaceGameDataPath();
 
-        _cachedCatalog = GameDataCatalog.Load(gameDataPath, null);
+        // QuestData.json is needed for the quest-unlock catalog (quest pets…); missing file = collected quests only.
+        var questDataPath = SkuaHostBootstrapper.Installation?.QuestDataFile;
+        _cachedCatalog = GameDataCatalog.Load(gameDataPath, questDataPath != null && File.Exists(questDataPath) ? questDataPath : null);
         return _cachedCatalog;
+    }
+
+    /// <summary>Every item that opens quests (quest pets first), for the scenario editor.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public IReadOnlyList<UnlockItem> GetUnlockItems()
+    {
+        try
+        {
+            return GetOrLoadCatalog(forceReload: false).Unlocks.Items
+                .OrderByDescending(i => i.IsPet).ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        catch
+        {
+            return Array.Empty<UnlockItem>();
+        }
     }
 
     private static string? FindWorkspaceGameDataPath()

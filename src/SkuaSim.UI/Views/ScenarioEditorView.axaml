@@ -366,6 +366,48 @@
                             </Border>
                         </StackPanel>
                     </Border>
+
+                    <!-- 4. Quest Pets & Unlock Items (accept requirements from QuestData) -->
+                    <Border Classes="Card">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Quest Pets &amp; Unlock Items" Classes="SectionTitle" />
+                            <TextBlock Text="{Binding UnlockCatalogInfo}" Classes="MetricLabel" TextWrapping="Wrap" />
+                            <TextBox Text="{Binding UnlockSearchText}"
+                                     PlaceholderText="Search an item or what it unlocks (e.g. Paragon, Legion Token, Drudgen)"
+                                     ToolTip.Tip="Items whose ownership opens quests. They are added to the inventory: AQW only accepts and turns in these quests with the item in the bag." />
+                            <ItemsControl ItemsSource="{Binding UnlockSearchResults}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="models:UnlockItemRow">
+                                        <Grid ColumnDefinitions="*,Auto" Margin="0,1">
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="{Binding Label}" Classes="BodyText" />
+                                                <TextBlock Text="{Binding Opens}" Classes="MetricLabel" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                            <Button Grid.Column="1" Content="Add" Command="{Binding AddCommand}" VerticalAlignment="Center" Padding="10,3" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <Border Classes="SubCard">
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Owned (in the inventory)" Classes="MetricValue" Foreground="#A78BFA" />
+                                    <ItemsControl ItemsSource="{Binding OwnedUnlockItems}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="models:UnlockItemRow">
+                                                <Grid ColumnDefinitions="*,Auto" Margin="0,1">
+                                                    <StackPanel Grid.Column="0">
+                                                        <TextBlock Text="{Binding Label}" Classes="BodyText" />
+                                                        <TextBlock Text="{Binding Opens}" Classes="MetricLabel" TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                    <Button Grid.Column="1" Content="Remove" Command="{Binding RemoveCommand}" VerticalAlignment="Center" Padding="10,3" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
             </ScrollViewer>
 

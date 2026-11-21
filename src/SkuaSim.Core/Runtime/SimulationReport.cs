@@ -45,6 +45,9 @@ public sealed class SimulationReport
     public WorldSnapshot InitialState { get; init; } = new();
     public WorldSnapshot FinalState { get; init; } = new();
     public List<SynthesizedDataRecord> SynthesizedData { get; init; } = new();
+
+    /// <summary>Items that open quests (quest pets…) the script checked for and the character does not own.</summary>
+    public List<World.MissingUnlockItem> MissingUnlockItems { get; init; } = new();
     public Dictionary<string, long> UnimplementedCalls { get; init; } = new();
     public Dictionary<string, long> TopApiCalls { get; init; } = new();
     public List<TraceEntry> ScriptLogs { get; init; } = new();
@@ -132,6 +135,16 @@ public sealed class SimulationReport
         sb.AppendLine($"| Quests Accepted / Completed | {QuestsAccepted:N0} / {QuestsCompleted:N0} |");
         sb.AppendLine($"| Maps Visited | {(MapsVisited.Count > 0 ? string.Join(", ", MapsVisited.Select(m => $"`{m}`")) : "_none_")} |");
         sb.AppendLine();
+
+        if (MissingUnlockItems.Count > 0)
+        {
+            sb.AppendLine("## Paths That Depend on Items the Character Does Not Own");
+            sb.AppendLine("> The script checked for these items; each one opens quests (quest pets, weapons, classes…), so owning it would likely change the script's path or rewards. Add one to the scenario (inventory) to simulate that path.");
+            sb.AppendLine();
+            foreach (var m in MissingUnlockItems)
+                sb.AppendLine($"- **{m.Name}** ({m.Category}, #{m.Id}) — checked x{m.Checks}, first at `{FormatVirtual(TimeSpan.FromMilliseconds(m.FirstVirtualMs))}`; opens {m.QuestCount} quest(s): {m.Opens}");
+            sb.AppendLine();
+        }
 
         if (SynthesizedData.Count > 0)
         {

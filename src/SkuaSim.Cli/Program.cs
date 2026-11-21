@@ -30,8 +30,100 @@ internal static class CliEntry
             "run" => RunSimulation(rest, installation),
             "calendar-update" => RunCalendarUpdate(rest, installation),
             "calendar-show" => RunCalendarShow(rest, installation),
+            "whatif" => RunWhatIf(rest, installation),
             _ => RunUnknown(cmd, installation)
         };
+    }
+
+    /// <summary>
+    /// "What if the character owned these items?" Runs the script twice with the same seed — the scenario as it is, and
+    /// with the --add items in the inventory (quest pets, unlock weapons…) — and compares what each run achieved.
+    /// </summary>
+    private static int RunWhatIf(string[] args, SkuaInstallation installation)
+    {
+        var adds = GetOptions(args, "--add");
+        if (args.Length == 0 || args[0].StartsWith("--", StringComparison.Ordinal) || adds.Count == 0)
+        {
+            Console.Error.WriteLine("Usage: skuasim whatif <script.cs> --add \"Item name\" [--add ...] [--scenario <file.json>] [--max-virtual-min <num>] [--seed <int>] [--gamedata <path>] [--report <path.md>]");
+            return 1;
+        }
+        var scriptPath = ResolveScriptPath(args[0], installation);
+        var scenarioPath = GetOption(args, "--scenario") ?? GetOption(args, "-s");
+        Scenario LoadScenario() => !string.IsNullOrEmpty(scenarioPath) ? Scenario.Load(scenarioPath) : new Scenario();
+        var minutes = GetOption(args, "--max-virtual-min") is { } m &&
+                      double.TryParse(m, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var vm) ? vm : 60;
+        int? seed = GetOption(args, "--seed") is { } s && int.TryParse(s, out var sv) ? sv : null;
+        var gameData = GetOption(args, "--gamedata");
+
+        var runner = new SimulationRunner(installation);
+        SimulationReport Run(Scenario scenario, string label)
+        {
+            scenario.Limits.MaxVirtualMinutes = minutes;
+            Console.WriteLine($"Running {label}...");
+            return runner.Run(new SimulationRunOptions { ScriptPath = scriptPath, Scenario = scenario, SeedOverride = seed, GameDataPath = gameData });
+        }
+
+        var baseline = Run(LoadScenario(), "the scenario as it is");
+        var variantScenario = LoadScenario();
+        foreach (var name in adds)
+            if (!variantScenario.Inventory.Any(i => string.Equals(i.Name, name, StringComparison.OrdinalIgnoreCase)))
+                variantScenario.Inventory.Add(new ItemSetup { Name = name });
+        var variant = Run(variantScenario, "with " + string.Join(", ", adds));
+
+        var markdown = WhatIfMarkdown(Path.GetFileName(scriptPath), adds, baseline, variant);
+        Console.WriteLine();
+        Console.WriteLine(markdown);
+        if ((GetOption(args, "--report") ?? GetOption(args, "-o")) is { } reportPath)
+        {
+            File.WriteAllText(Path.GetFullPath(reportPath), markdown);
+            Console.WriteLine($"Report saved to: {Path.GetFullPath(reportPath)}");
+        }
+        return baseline.Outcome is SimulationOutcome.CompileError ? 2 : 0;
+    }
+
+    private static string WhatIfMarkdown(string script, List<string> adds, SimulationReport a, SimulationReport b)
+    {
+        static Dictionary<string, long> Owned(SkuaSim.Core.World.WorldSnapshot s) =>
+            s.Inventory.Concat(s.Bank).GroupBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => (long)g.Sum(i => i.Quantity), StringComparer.OrdinalIgnoreCase);
+        static Dictionary<string, long> Gained(SimulationReport r)
+        {
+            var start = Owned(r.InitialState);
+            return Owned(r.FinalState).Select(kv => (kv.Key, Delta: kv.Value - start.GetValueOrDefault(kv.Key)))
+                .Where(x => x.Delta != 0).ToDictionary(x => x.Key, x => x.Delta, StringComparer.OrdinalIgnoreCase);
+        }
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"# What if — `{script}` with {string.Join(", ", adds.Select(x => $"**{x}**"))}");
+        sb.AppendLine($"Same seed ({a.Seed}) and limits; only the added item(s) differ.");
+        sb.AppendLine();
+        sb.AppendLine("| | Without | With |");
+        sb.AppendLine("|---|---|---|");
+        sb.AppendLine($"| Outcome | {a.Outcome} | {b.Outcome} |");
+        sb.AppendLine($"| Virtual time | {a.VirtualDuration:hh\\:mm\\:ss} | {b.VirtualDuration:hh\\:mm\\:ss} |");
+        sb.AppendLine($"| Kills | {a.Kills:N0} | {b.Kills:N0} |");
+        sb.AppendLine($"| Quest turn-ins | {a.QuestTurnIns.Values.Sum():N0} | {b.QuestTurnIns.Values.Sum():N0} |");
+        sb.AppendLine($"| Gold gained | {a.FinalState.Gold - a.InitialState.Gold:N0} | {b.FinalState.Gold - b.InitialState.Gold:N0} |");
+
+        var quests = a.QuestTurnIns.Keys.Union(b.QuestTurnIns.Keys).OrderBy(q => q)
+            .Where(q => a.QuestTurnIns.GetValueOrDefault(q) != b.QuestTurnIns.GetValueOrDefault(q)).ToList();
+        foreach (var q in quests)
+            sb.AppendLine($"| Quest {q} turn-ins | {a.QuestTurnIns.GetValueOrDefault(q):N0} | {b.QuestTurnIns.GetValueOrDefault(q):N0} |");
+
+        var ga = Gained(a);
+        var gb = Gained(b);
+        foreach (var item in ga.Keys.Union(gb.Keys, StringComparer.OrdinalIgnoreCase)
+                     .Where(k => ga.GetValueOrDefault(k) != gb.GetValueOrDefault(k) && !adds.Contains(k, StringComparer.OrdinalIgnoreCase))
+                     .OrderByDescending(k => Math.Abs(gb.GetValueOrDefault(k) - ga.GetValueOrDefault(k))).Take(15))
+            sb.AppendLine($"| {item} | {ga.GetValueOrDefault(item):+#,0;-#,0;0} | {gb.GetValueOrDefault(item):+#,0;-#,0;0} |");
+
+        var stillMissing = b.MissingUnlockItems.Where(m => !adds.Contains(m.Name, StringComparer.OrdinalIgnoreCase)).Take(10).ToList();
+        if (stillMissing.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Other items the script checked and the character still does not own: " + string.Join(", ", stillMissing.Select(x => x.Name)) + ".");
+        }
+        return sb.ToString();
     }
 
     private static string CalendarPathFor(string[] args, SkuaInstallation installation) =>
@@ -292,6 +384,16 @@ internal static class CliEntry
         return null;
     }
 
+    /// <summary>Every value of a repeatable flag (e.g. several --add).</summary>
+    private static List<string> GetOptions(string[] args, string flag)
+    {
+        var values = new List<string>();
+        for (var i = 0; i < args.Length - 1; i++)
+            if (string.Equals(args[i], flag, StringComparison.OrdinalIgnoreCase))
+                values.Add(args[++i]);
+        return values;
+    }
+
     private static int RunUnknown(string cmd, SkuaInstallation installation)
     {
         Console.Error.WriteLine($"Unknown command: '{cmd}'");
@@ -310,6 +412,7 @@ internal static class CliEntry
         Console.WriteLine("  skuasim run <script.cs> [options]");
         Console.WriteLine("  skuasim calendar-update [--calendar <path>]   Download the AE calendar (artix.com/calendar) locally");
         Console.WriteLine("  skuasim calendar-show [--calendar <path>] [--date <utc>]");
+        Console.WriteLine("  skuasim whatif <script.cs> --add \"Item\" [--add ...] [--scenario <file.json>] [--max-virtual-min <num>]   Compare a run with and without items (quest pets...)");
         Console.WriteLine();
         Console.WriteLine("Run Options:");
         Console.WriteLine("  --scenario, -s <file.json>     Scenario JSON file describing player/world state");

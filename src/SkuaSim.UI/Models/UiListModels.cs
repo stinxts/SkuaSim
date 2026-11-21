@@ -285,6 +285,26 @@ public partial class GearSlotBoostEditorRow : ObservableObject
     }
 }
 
+/// <summary>An item that opens quests (quest pet, weapon, class…) in the editor's "Quest Pets &amp; Unlock Items" panel.</summary>
+public sealed partial class UnlockItemRow : ObservableObject
+{
+    public int Id { get; init; }
+    public string Name { get; init; } = "";
+    public string Category { get; init; } = "";
+    public string Opens { get; init; } = "";
+    public int QuestCount { get; init; }
+    public bool IsPet => string.Equals(Category, "Pet", StringComparison.OrdinalIgnoreCase);
+    public string Label => $"{Name}  ({Category}, {QuestCount} quest{(QuestCount == 1 ? "" : "s")})";
+    public Action<UnlockItemRow>? OnAdd { get; init; }
+    public Action<UnlockItemRow>? OnRemove { get; init; }
+
+    [CommunityToolkit.Mvvm.Input.RelayCommand]
+    private void Add() => OnAdd?.Invoke(this);
+
+    [CommunityToolkit.Mvvm.Input.RelayCommand]
+    private void Remove() => OnRemove?.Invoke(this);
+}
+
 public partial class EnhancementCheckItem : ObservableObject
 {
     public string Name { get; init; } = "";

@@ -40,6 +40,7 @@ flowchart LR
 7. **Real Rewards & Timing:** XP comes from quests and kills, class points from kills, gold from quests, kills and selling items, reputation from quests. Boosts add up — the highest gear bonus of the type (gear of the same type never stacks) + consumable +100 % + server +100 % (1000 rep with a server boost = 2000). Class points per kill follow AQW's rule `230 + 25 × class rank`, reduced when the monster is more than 10 levels below the character (-10 % per level, at least 5 %). Kills give the collector's measured base XP/gold (rule `10 × level` XP and `3 × level` gold when unmeasured, flagged), monsters respawn after their measured delay (~2.4 s in AQW today; the median of measured monsters or AQW's official ~4 s as flagged fallbacks), and reputation comes from the observed quest turn-in rewards, with AQW's rank table (rank 10 = 302,500).
 8. **Server Calendar:** A scenario `startDate` sets the virtual date (or `startAtCurrentTime: true` / "Use PC time" in the editor starts at the PC clock). Daily quests reset at 00:00 US Eastern (server time), weekly quests on Friday and monthly quests on the 1st. Optionally, the server-wide double XP/gold/rep/CP boosts listed in the **AE calendar** (`skuasim calendar-update`, from artix.com/calendar — the same source as VibeSkua's Calendar tool) are applied for the virtual date.
 9. **AQW Stat & Combat Engine (`StatEngine`):** Computes AQW primary/secondary stats (`STR`, `INT`, `END`, `DEX`, `WIS`, `LCK`, `AP`, `SP`, `Crit`, `Crit Multiplier`, `50% Haste cap`, `Dodge/Evasion`), calibrated by captured class skills (`sAct`) and combat telemetry (`ct`), alongside Awe/Forge enhancement procs and AQW's highest-in-category gear boost stacking rules.
+10. **Quest Pets & Unlock Items:** 946 QuestData quests can only be accepted while the character owns an item (`AcceptRequirements`): 317 need a quest pet (188 pets, e.g. the Paragon Pets' Legion Token quests), the rest weapons, classes, armors or house items. As in AQW, the item must be in the **inventory** to accept and to turn in (the bank does not count). Scripts branch on these items (`Core.CheckInventory("Shogun Paragon Pet")`), so the report lists **"Paths That Depend on Items the Character Does Not Own"**, the scenario editor has a **Quest Pets & Unlock Items** panel, and `skuasim whatif <script> --add "<item>"` compares a run with and without the item (e.g. Legion Token farm, 20 virtual minutes: 790 → 1,250 tokens with the Shogun Paragon Pet). A user-run Skua script, `SkuaSim_ExportMyAccount.cs` (kept on the user's Desktop, not in this repository), writes a local scenario of the logged-in character: level, class, member, gold, owned unlock items, quest-slot progress and reputation (no account name).
 
 ---
 
@@ -132,6 +133,8 @@ Terminal interface for scripting and automated regression runs: `db-stats`, `com
 | `--trace <file.jsonl>` | Stream the full API trace |
 | `--export-scenario <file.json>` | Save the character at the end of the run as a new scenario, to chain scripts |
 | `--gamedata <path>` | Use another `gamedata.json` |
+
+`whatif <script.cs> --add "<item>" [--add ...]` runs the script twice with the same seed (as is, and with the items in the inventory) and prints the difference (quests, kills, gold, items gained).
 
 Exit codes: `0` completed/stopped, `2` compile error or script exception, `3` stalled.
 

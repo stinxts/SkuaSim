@@ -49,6 +49,7 @@ internal static class CoreTests
             TestSchemaV2QuestGatedAndUnknownRateDrops(runner, tempDir);
             TestRealDataRewardsRespawnHouseResetsAndCalendar(runner, tempDir);
             TestBackgroundTaskDeterminism(runner, tempDir);
+            TestQuestPetsAndUnlockItems(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -1202,6 +1203,62 @@ internal static class CoreTests
         Assert(Fingerprint(a) == Fingerprint(b) && a.FinalState.Gold == b.FinalState.Gold && a.VirtualDuration == b.VirtualDuration,
             $"Same seed must repeat the interleaving exactly:\n--- run 1\n{Fingerprint(a)}\n--- run 2\n{Fingerprint(b)}");
         Console.WriteLine($"   OK: {logs.Count} log lines identical in 2 runs ({logs.Count(l => l.StartsWith("bg"))} from background tasks), {a.VirtualDuration} virtual");
+    }
+
+    /// <summary>
+    /// Quest pets (QuestData accept requirements): quest 5755 "Time for Some Spring Cleaning" needs the Shogun Paragon Pet
+    /// in the inventory (the bank does not count — AQW rule), IsAvailable follows Skua's checks, world.getQuestValue
+    /// returns story progress, and a checked-but-missing pet is listed in the report.
+    /// </summary>
+    private static void TestQuestPetsAndUnlockItems(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("17. Testing quest pets / unlock items (inventory rule, IsAvailable, getQuestValue, report list)...");
+        var script = Path.Combine(tempDir, "PetQuestBot.cs");
+        File.WriteAllText(script, """
+        using Skua.Core.Interfaces;
+
+        public class PetQuestBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bool owned = bot.Inventory.Contains("Shogun Paragon Pet", 1) || bot.Bank.Contains("Shogun Paragon Pet", 1);
+                int slot = bot.Flash.CallGameFunction<int>("world.getQuestValue", 31);
+                bool available = bot.Quests.IsAvailable(5755);
+                bot.Quests.Accept(5755);
+                bot.Log($"owned={owned} slot={slot} available={available} accepted={bot.Quests.IsInProgress(5755)}");
+            }
+        }
+        """);
+
+        SimulationReport Run(string where)
+        {
+            var scenario = new Scenario
+            {
+                Name = $"Shogun pet in {where}",
+                Seed = 1,
+                Player = new PlayerSetup { Username = "Pet", Level = 100, Class = "Warrior" },
+                Quests = new QuestSetup { Completed = new List<int> { 793 } }, // Legion story done: quest slot 31 = 5
+                Limits = new LimitsSetup { MaxVirtualMinutes = 5, MaxRealSeconds = 60 }
+            };
+            var pet = new ItemSetup { Name = "Shogun Paragon Pet", Id = 38621, Category = "Pet" };
+            if (where == "inventory") scenario.Inventory.Add(pet);
+            if (where == "bank") scenario.Bank.Add(pet);
+            var report = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = scenario });
+            Assert(report.Outcome == SimulationOutcome.Completed, $"{where}: expected Completed, got {report.Outcome} ({report.ExceptionText ?? report.StopReason})");
+            return report;
+        }
+        string Line(SimulationReport r) => r.ScriptLogs.Select(l => l.Text).LastOrDefault(t => t.Contains("owned=")) ?? "";
+
+        var none = Run("none");
+        var bank = Run("bank");
+        var inv = Run("inventory");
+        Assert(Line(none).Contains("owned=False slot=5 available=False accepted=False"), $"No pet: {Line(none)}");
+        Assert(Line(bank).Contains("owned=True slot=5 available=False accepted=False"), $"Pet in the bank must not open the quest: {Line(bank)}");
+        Assert(Line(inv).Contains("owned=True slot=5 available=True accepted=True"), $"Pet in the inventory opens the quest: {Line(inv)}");
+        Assert(none.MissingUnlockItems.Any(m => m.Name == "Shogun Paragon Pet" && m.Opens.Contains("5755")),
+            "A checked pet the character does not own must be listed with the quest it opens");
+        Assert(!inv.MissingUnlockItems.Any(m => m.Name == "Shogun Paragon Pet"), "An owned pet must not be listed as missing");
+        Console.WriteLine($"   OK: none/bank/inventory = {Line(none)} | {Line(bank)} | {Line(inv)}");
     }
 
     private static void TestRealDataRewardsRespawnHouseResetsAndCalendar(SimulationRunner runner, string tempDir)

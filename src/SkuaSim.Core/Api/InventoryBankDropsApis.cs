@@ -170,8 +170,8 @@ public sealed class BankApi : ApiBase
     public void Open() => World.BankLoaded = true;
     public void Load(bool waitForLoad) => World.BankLoaded = true;
 
-    public bool Contains(string name, int quantity) => World.Quantity(World.Bank, name, null) >= quantity;
-    public bool Contains(int id, int quantity) => World.Quantity(World.Bank, null, id) >= quantity;
+    public bool Contains(string name, int quantity) { World.NoteItemProbe(name, null); return World.Quantity(World.Bank, name, null) >= quantity; }
+    public bool Contains(int id, int quantity) { World.NoteItemProbe(null, id); return World.Quantity(World.Bank, null, id) >= quantity; }
 
     public bool TryGetItem(string name, out InventoryItem? item)
     {
@@ -228,8 +228,8 @@ public sealed class HouseInvApi : ApiBase
     public int UsedSlots => Items.Count;
     public int FreeSlots => Math.Max(0, Slots - UsedSlots);
 
-    public bool Contains(string name, int quantity) => World.Quantity(World.House, name, null) >= quantity;
-    public bool Contains(int id, int quantity) => World.Quantity(World.House, null, id) >= quantity;
+    public bool Contains(string name, int quantity) { World.NoteItemProbe(name, null); return World.Quantity(World.House, name, null) >= quantity; }
+    public bool Contains(int id, int quantity) { World.NoteItemProbe(null, id); return World.Quantity(World.House, null, id) >= quantity; }
 
     public bool TryGetItem(string name, out InventoryItem? item)
     {

@@ -527,6 +527,8 @@ public sealed partial class SimWorld
         var key = id is > 0 ? "#" + id : name?.Trim();
         if (string.IsNullOrEmpty(key) || quantity <= 0)
             return;
+        if (!fromTemp)
+            NoteItemProbe(name, id);
         lock (Sync)
         {
             _recentQueries.TryGetValue(key, out var prev);
@@ -1913,14 +1915,20 @@ public sealed partial class SimWorld
                 reason = "daily/weekly quest already completed today";
             else
             {
-                // Accept requirements are ownership checks: inventory, bank or the house inventory. House items (e.g.
-                // "Prime Fiend Shard" for quest 9555) open quests without being in the house map.
+                // Accept requirements must be in the inventory (bag), as for turn-ins: an item in the bank does not count
+                // (user-confirmed AQW rule, 2026-11-22; CoreBots unbanks them before accepting). House items (e.g.
+                // "Prime Fiend Shard" for quest 9555) count from the house inventory.
                 var missing = q.AcceptRequirements?.FirstOrDefault(r =>
-                    Quantity(Inventory, r.Name, r.ID) + Quantity(Bank, r.Name, r.ID) + Quantity(House, r.Name, r.ID) < Math.Max(1, r.Quantity));
+                    Quantity(Inventory, r.Name, r.ID) + (IsHouseItem(r) ? Quantity(House, r.Name, r.ID) : 0) < Math.Max(1, r.Quantity));
                 if (missing != null)
+                {
                     reason = IsHouseItem(missing)
                         ? $"missing accept requirement '{missing.Name}' (a house item: add it to the scenario's \"house\" list)"
-                        : $"missing accept requirement '{missing.Name}'";
+                        : Quantity(Bank, missing.Name, missing.ID) > 0
+                            ? $"accept requirement '{missing.Name}' is in the bank (it must be in the inventory)"
+                            : $"missing accept requirement '{missing.Name}'";
+                    NoteItemProbe(missing.Name, missing.ID);
+                }
             }
 
             if (reason != null)
@@ -1954,9 +1962,19 @@ public sealed partial class SimWorld
             if (!ActiveQuests.Contains(id))
                 return false;
             var q = GetOrLoadQuest(id)!;
-            return q.Requirements.All(r => Quantity(r.Temp ? TempInventory : Inventory, r.Name, r.ID) >= Math.Max(1, r.Quantity));
+            return q.Requirements.All(r => Quantity(r.Temp ? TempInventory : Inventory, r.Name, r.ID) >= Math.Max(1, r.Quantity))
+                   && MissingAcceptRequirementsForTurnIn(q).Count == 0;
         }
     }
+
+    /// <summary>
+    /// The turn-in also needs the quest's accept requirements (quest pet, weapon…) in the inventory, not the bank
+    /// (user-confirmed AQW rule, 2026-11-22). House items count from the house inventory.
+    /// </summary>
+    private List<ItemBase> MissingAcceptRequirementsForTurnIn(Quest q) =>
+        (q.AcceptRequirements ?? new List<ItemBase>())
+            .Where(r => r != null && !r.Temp && Quantity(Inventory, r.Name, r.ID) + (IsHouseItem(r) ? Quantity(House, r.Name, r.ID) : 0) < Math.Max(1, r.Quantity))
+            .ToList();
 
     public bool CompleteQuest(int id, int rewardItemId, bool log = true)
     {
@@ -1972,7 +1990,10 @@ public sealed partial class SimWorld
                         ? "quest not accepted"
                         : "missing " + string.Join(", ", q.Requirements
                             .Where(r => Quantity(r.Temp ? TempInventory : Inventory, r.Name, r.ID) < Math.Max(1, r.Quantity))
-                            .Select(r => $"{r.Name} {Quantity(r.Temp ? TempInventory : Inventory, r.Name, r.ID)}/{r.Quantity}"));
+                            .Select(r => $"{r.Name} {Quantity(r.Temp ? TempInventory : Inventory, r.Name, r.ID)}/{r.Quantity}")
+                            .Concat(MissingAcceptRequirementsForTurnIn(q).Select(r => Quantity(Bank, r.Name, r.ID) > 0
+                                ? $"{r.Name} (in the bank; it must be in the inventory)"
+                                : $"{r.Name} (accept requirement)")));
                     Trace.World($"Complete quest {id} ({q.Name}) failed: {reason}.");
                 }
                 return false;

@@ -414,6 +414,7 @@ public sealed class SimulationRunner
             QuestTurnIns = new Dictionary<int, int>(ctx.World.QuestTurnIns),
             InitialState = initialSnapshot,
             FinalState = ctx.World.Snapshot(),
+            MissingUnlockItems = ctx.World.MissingUnlockItems(),
             EndScenario = ctx.World.ExportScenario(Path.GetFileNameWithoutExtension(scriptFullPath)),
             SynthesizedData = trace.Synthesized.Values.OrderBy(s => s.FirstVirtualMs).ToList(),
             UnimplementedCalls = trace.Unimplemented.ToDictionary(k => k.Key, k => k.Value),

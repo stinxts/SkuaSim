@@ -456,6 +456,9 @@ public sealed class FlashApi : ApiBase
             return "true";
         }
 
+        if (string.Equals(path, "world.getQuestValue", StringComparison.OrdinalIgnoreCase))
+            return QuestSlotValue(args).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
         if (string.Equals(path, "world.abandonQuest", StringComparison.OrdinalIgnoreCase) &&
             args is { Length: > 0 } && int.TryParse(args[0]?.ToString(), out var qid))
         {
@@ -465,12 +468,31 @@ public sealed class FlashApi : ApiBase
         return "true";
     }
 
+    /// <summary>
+    /// "world.getQuestValue(slot)": the character's progress in a quest-chain slot (AQW stores story progress per slot;
+    /// a quest is done when the slot value reaches its "Value"). CoreBots.isCompletedBefore relies on it.
+    /// </summary>
+    private int QuestSlotValue(object[] args)
+    {
+        if (args is not { Length: > 0 } || !int.TryParse(args[0]?.ToString(), out var slot) || slot < 0)
+            return 0;
+        lock (World.Sync)
+            return World.SlotProgress.GetValueOrDefault(slot);
+    }
+
     public T CallGameFunction<T>(string path, object[] args)
     {
         if (string.Equals(path, "world.maximumQuestTurnIns", StringComparison.OrdinalIgnoreCase) &&
             typeof(T) == typeof(int))
         {
             return (T)(object)1;
+        }
+        if (string.Equals(path, "world.getQuestValue", StringComparison.OrdinalIgnoreCase))
+        {
+            var value = QuestSlotValue(args);
+            if (typeof(T) == typeof(int)) return (T)(object)value;
+            if (typeof(T) == typeof(long)) return (T)(object)(long)value;
+            if (typeof(T) == typeof(string)) return (T)(object)value.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
         return typeof(T) == typeof(bool) ? (T)(object)true : default!;
     }

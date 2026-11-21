@@ -125,7 +125,7 @@ public sealed class QuestsApi : ApiBase
     public bool IsAvailable(int id)
     {
         var q = World.GetOrLoadQuest(id);
-        return q != null && World.IsUnlocked(q) && (!q.Once || !World.HasBeenCompleted(q));
+        return q != null && World.IsQuestAvailable(q);
     }
 
     public bool IsDailyComplete(int id) => World.DailiesCompleted.Contains(id);
