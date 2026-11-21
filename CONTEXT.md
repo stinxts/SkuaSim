@@ -24,12 +24,12 @@ An **offline, reproducible test environment** for **any Skua/VibeSkua script**, 
 2. **Data-Driven World**: import `QuestData.json` + Collector database (`gamedata.json`) + JSON scenario format + AQW `StatEngine` (**✅ Done**)
 3. **Visual Interface (`SkuaSim.UI`)**: standalone Avalonia 12 dashboard ("Skua without Flash") with multi-resolution scaling, live client/AQW stats state, real AQW gear & enhancement scenario editor, Skua-faithful `Script Options` + `.cfg` import, color-coded Logs/Errors/Trace, and `.md`/`.json` report export (**✅ Done**)
 3.4. **Simulator Robustness**: `KillQuest` AST hints + on-demand monsters on synthesized maps, no-progress (`Stalled`) detector, process-stable hashing + cross-process determinism test, `CLAUDE.md` (**✅ Done 2026-11-20**)
-3.5. **Collector Corrections & Schema v2**: protocol verification sampling, monster level/race/wDPS fix, drop attribution fix, schema v2 (migration + backup, quest-gated rates, passive official drops, map-item quests, reward types, experimental room cap) (**🔄 Steps 1–3 done; Step 4 next: real XP/gold per kill + respawn times**)
+3.5. **Collector Corrections & Schema v2/v3**: protocol verification sampling, monster level/race/wDPS fix, drop attribution fix, schema v2 (migration + backup, quest-gated rates, passive official drops, map-item quests, reward types), schema v3 (real XP/gold/rep per kill, respawn times, quest-set kill counting, room occupancy) (**🔄 Steps 1–4 done; next: deploy v3, simulator consumption, Step 5**)
 4. **Multi-Client (Army), Live Loadouts, Potions & Aura/Boss Combat**: up to 20 concurrent clients sharing rooms/monsters/party, Army sync coordination, `Solo`/`Farm`/`Dodge`/`Boss` role classes + live class/enhancement swaps, Potions/Elixirs/Tonics/Scrolls (`UltrasLW`), and active aura/buff & Ultra boss simulation (**🔜 After 3.5; architecture to be discussed first**)
 5. **Fault Injection, Assertions & Templates**: lag/disconnect/drop failure injection, stall/infinite-loop detector, scenario assertions, diagnostic generator & bug report template (**🔜 Planned**)
 6. **Replay & Public Release**: real session log replay + external developer distribution packaging (CLI flags, official Skua parity, starter DB, license, release archive) (**🔜 Planned**)
 
-Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** ✅ → **Visual UI (`SkuaSim.UI`) & Polish** ✅ → **Simulator Robustness (3.4)** ✅ → **Collector Corrections & Schema v2 (3.5)** 🔄 → **Multi-Client (Army) & Aura/Boss Combat** 🔜 → **Fault Injection & Assertions** → **Replay & Release Packaging**.
+Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** ✅ → **Visual UI (`SkuaSim.UI`) & Polish** ✅ → **Simulator Robustness (3.4)** ✅ → **Collector Corrections & Schema v2/v3 (3.5)** 🔄 → **Multi-Client (Army) & Aura/Boss Combat** 🔜 → **Fault Injection & Assertions** → **Replay & Release Packaging**.
 
 ## Environment Discovered
 - **.NET SDK 10.0.400** installed.
@@ -49,9 +49,9 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
 ## Implementation Status
 ### Stage 1 — Collector (`SkuaSim.Collector`) ✅ Completed, Live-Audited & Installed
 - **Source Code:** `src/SkuaSim.Collector/` (`SkuaSimCollectorPlugin.cs`, `Parsing/PacketCollectorEngine.cs`, `Diagnostics/PacketSchemaSampler.cs`, `Storage/GameDatabaseStore.cs`, `Models/CapturedDataModels.cs`)
-- **Automated Tests:** `tests/SkuaSim.Collector.Tests/` (**9/9 passing**; suites 7–9 use real anonymized packets and cover sampling privacy and schema v2)
+- **Automated Tests:** `tests/SkuaSim.Collector.Tests/` (**10/10 passing**; suites 7–10 use real anonymized packets and cover sampling privacy and schemas v2/v3)
 - **Live Protocol Hardening:** `ct.sara[].actionResult` parsing (monster hits/dodges + HoT/DoT `"typ": "d"`), VHL self-damage guard, instant `updateClass`/`equipItem` class sync + 350ms debounced refresh, `"stk"` aura stack counts, `"Attack1,Attack2"` auto-attack filtering, legacy noise cleanup, `casterId`/`uid`/`unm` redaction, and cross-session `PacketSchemaSampler` (`packet_schemas.json`, up to 12 distinct shapes per category, Mutex-merged).
-- **Installed Binary Locations** (last deployed 2026-11-20 with schema v2; deploy only with all clients closed — the DLL is locked while they run):
+- **Installed Binary Locations** (last deployed 2026-11-20 21:30 with schema v3, hash 7D41017D4B5E; deploy only with all clients closed — the DLL is locked while they run):
   - `%APPDATA%\VibeSkua\plugins\SkuaSim.Collector.dll`
   - `%LOCALAPPDATA%\VibeSkua\current\plugins\SkuaSim.Collector.dll`
   - `%APPDATA%\Skua\plugins\SkuaSim.Collector.dll`
@@ -59,7 +59,7 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
 - **Collected Data Locations:**
   - Primary: `%APPDATA%\VibeSkua\SkuaSim\gamedata.json` (+ `packet_schemas.json`)
   - Automatic mirror in workspace: `data\gamedata.json` (+ `data\packet_schemas.json`)
-  - Schema v2 since 2026-11-20 (migrated from v1: 52 impossible drop records removed, 369 temporary quest-required drops marked quest-gated). Backups: `SkuaSim\gamedata.v1-backup-20261120-203127.json` and `SkuaSim\backups\gamedata.pre-v2-manual-20261120-173107.json`.
+  - Schema v2 since 2026-11-20 (migrated from v1: 52 impossible drop records removed, 369 temporary quest-required drops marked quest-gated). Backups: `SkuaSim\gamedata.v1-backup-20261120-203127.json` and `SkuaSim\backups\gamedata.pre-v2-manual-20261120-173107.json`. The v3 Collector migrates v2 → v3 on its first flush (dated `gamedata.v2-backup-<UTC>.json`, nothing deleted).
 
 ### Stage 2 — Simulator Core & CLI (`SkuaSim.Core` + `SkuaSim.Cli`) ✅ Completed & Verified
 - **Source Code:**
@@ -88,9 +88,10 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
 - No-progress watchdog (`SimContext.CheckProgress`, virtual-time based): outcome `Stalled`, `limits.maxNoProgressMinutes` (default 60), UI field and banner, CLI `--max-no-progress-min`, exit code 3.
 - `World/StableHash` replaces `string.GetHashCode()` for monster/faction IDs; Core test 13 compares two separate processes.
 
-### Stage 3.5 — Collector Corrections & Schema v2 🔄 Steps 1–3 completed (2026-11-20)
+### Stage 3.5 — Collector Corrections & Schemas v2/v3 🔄 Steps 1–4 completed (2026-11-20/21)
 - **Audit** of the live `gamedata.json`: monster level never captured (0/821), quest rewards credited as monster drops (49 impossible records), diluted quest-gated rates (82 drops < 1 %), no real XP/gold per kill or respawn data.
 - **Step 1:** protocol verification sampling (allowlisted world packets, command census, value-free skeletons; house/inventory never sampled). Verified keys are listed in PLAN.md.
 - **Step 2:** `moveToArea` parsed with the real keys (`monBranch.iLvl`, `sRace`, `wDPS`); drops credited only to the monster killed in the last 5 s; quest turn-in rewards excluded; `getQuests` rewards with type/rate.
-- **Step 3:** schema v2 — dated backup + migration, quest-gated rates measured with the quest active (`Bot.Quests.Active`, RAM only), passive `monsterDrops`, quest-gated map items, experimental room cap, nullable `EstimatedDropChance`; the simulator never rolls an unknown rate as 0 % and respects quest gating.
-- **Next:** Step 4 (real XP/gold/CP/rep per kill from `addGoldExp`, per-monster respawn from `respawnMon`, confirm the room-cap path), then Step 5 and simulator consumption — see PLAN.md "Next Implementations & Open Decisions".
+- **Step 3:** schema v2 — dated backup + migration, quest-gated rates measured with the quest active (`Bot.Quests.Active`, RAM only), passive `monsterDrops`, quest-gated map items, nullable `EstimatedDropChance`; the simulator never rolls an unknown rate as 0 % and respects quest gating.
+- **Step 4 (schema v3, 2026-11-21):** from a live session — `addGoldExp` totals include the bonus (`bonusExp`/`bonusGold`/`bonusRep`), so base XP/gold/rep per kill are stored per monster (zeros from capped characters counted apart); respawn = kill → `["respawnMon", "-1", MonMapID]`, per spawn and per monster; the client has no room cap (`world.areaData.intMaxPlayers` missing in 58/58 probes), replaced by peak `Bot.Map.PlayerCount`; quest-gated denominators no longer double-count kills made with several required quests active (`KillsByActiveQuestSet`). Migration v2 → v3 dry-run on live data: 24 monsters recomputed, nothing deleted.
+- **Next:** deploy the v3 Collector and collect a session, then simulator consumption and Step 5 — see PLAN.md "Next Implementations & Open Decisions".

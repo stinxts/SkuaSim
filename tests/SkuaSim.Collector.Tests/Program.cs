@@ -862,7 +862,7 @@ try
     Assert(!File.ReadAllText(realSchemaPath).Contains("74055984"), "Legacy house samples must be removed retroactively");
     Console.WriteLine($"   OK: Level/Race/wDPS parsed, quest reward excluded ({realEng.SessionQuestRewardsExcluded}), unattributed drop skipped, privacy rules enforced");
 
-    Console.WriteLine("9. Testing schema v2 (migration + backup, quest-gated rates, passive monsterDrops, map-item quests, room cap)...");
+    Console.WriteLine("9. Testing schema v2 (migration + backup, quest-gated rates, passive monsterDrops, map-item quests, occupancy)...");
     // (a) v1 -> v2 migration with a dated backup and provable-error cleanup.
     var v2Dir = Path.Combine(tempDir, "v2");
     Directory.CreateDirectory(v2Dir);
@@ -885,7 +885,7 @@ try
     var v2Store = new GameDatabaseStore(v2Path) { QuestHintsProvider = () => hints };
     var migrated = v2Store.FlushDelta(new GameDatabase());
     var mv = migrated.Monsters["id:700"];
-    Assert(migrated.SchemaVersion == 2 && migrated.MigrationLog.Count == 1, "Database must be migrated to v2 with a log entry");
+    Assert(migrated.SchemaVersion == GameDatabase.CurrentSchemaVersion && migrated.MigrationLog.Count == 2, "Database must be migrated v1->v2->v3 with one log entry per step");
     Assert(v2Store.LastMigrationBackupPath != null && File.Exists(v2Store.LastMigrationBackupPath) &&
            File.ReadAllText(v2Store.LastMigrationBackupPath).Contains("\"SchemaVersion\":1"), "A dated v1 backup must be written before migrating");
     Assert(!mv.Drops.ContainsKey(1), "Impossible drop records (more drops than kills) must be removed");
@@ -914,8 +914,8 @@ try
     var qDelta = qEng.TakeDeltaSnapshot();
     var gorilla = qDelta.Monsters["id:250"];
     var slain = gorilla.Drops[5574];
-    Assert(gorilla.KillCount == 3 && gorilla.TrackedKills == 2 && gorilla.KillsWhileQuestActive.GetValueOrDefault(802) == 1,
-        $"Kills must be tracked per active quest only once the list is known (Kill={gorilla.KillCount}, Tracked={gorilla.TrackedKills}, Q802={gorilla.KillsWhileQuestActive.GetValueOrDefault(802)})");
+    Assert(gorilla.KillCount == 3 && gorilla.TrackedKills == 2 && gorilla.KillsByActiveQuestSet.GetValueOrDefault("802") == 1 && gorilla.KillsByActiveQuestSet.GetValueOrDefault("") == 1,
+        $"Kills must be tracked per active quest set only once the list is known (Kill={gorilla.KillCount}, Tracked={gorilla.TrackedKills}, sets={string.Join(";", gorilla.KillsByActiveQuestSet)})");
     Assert(slain.QuestGated && slain.RequiredQuestIds.SetEquals(new[] { 795, 802 }) && slain.TrackedDropEvents == 1 &&
            slain.RateBasis == DropRates.QuestActiveKills && slain.EstimatedDropChance == 1.0,
         $"A quest-gated drop's rate must use quest-active kills (basis={slain.RateBasis}, chance={slain.EstimatedDropChance})");
@@ -940,13 +940,14 @@ try
     mEng.SyncActiveQuests(new[] { 7277 });
     mEng.ProcessClientPacket("%xt%zm%getMapItem%1%5044%");
     mEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"addItems","items":{"52566":{"ItemID":52566,"sName":"Star of the Sandsea","bTemp":true,"sType":"Quest Item","iStk":1,"iQty":1,"sReqQuests":"7277"}}} } }""");
-    // (e) Room cap observed after joining.
-    mEng.RecordRoomCapacity("arcangrove-12345", 6, "runtime:world.areaData.intMaxPlayers");
+    // (e) Room occupancy (peak player count; the client exposes no room cap).
+    mEng.RecordPlayerCount("arcangrove-12345", 6);
+    mEng.RecordPlayerCount("arcangrove-12345", 4);
     var mDelta = mEng.TakeDeltaSnapshot();
     var mapItem = mDelta.Maps["arcangrove"].MapItems[5044];
     Assert(mapItem.GrantedItemIDs.Contains(52566) && mapItem.RequiredQuestIds.Contains(7277) &&
            mapItem.GrantObservations == 1 && mapItem.ActiveQuestCounts.GetValueOrDefault(7277) == 1, "Map items must record their requiring/active quests");
-    Assert(mDelta.Maps["arcangrove"].MaxPlayers == 6, "Room cap must be recorded");
+    Assert(mDelta.Maps["arcangrove"].PeakPlayersObserved == 6 && mDelta.Maps["arcangrove"].PlayerCountSamples == 2, "Peak room occupancy must be recorded");
 
     // (f) Store merge sums the new counters and recomputes the rate basis from the merged totals.
     var mergeStore = new GameDatabaseStore(Path.Combine(v2Dir, "merge.json"));
@@ -954,10 +955,76 @@ try
     mergeStore.FlushDelta(mDelta);
     var mergedV2 = mergeStore.FlushDelta(official.Key == "id:250" ? new GameDatabase { Monsters = { [official.Key] = official } } : new GameDatabase());
     var mg = mergedV2.Monsters["id:250"];
-    Assert(mergedV2.SchemaVersion == 2 && mg.KillsWhileQuestActive.GetValueOrDefault(802) == 1 && mg.Drops[5574].RateBasis == DropRates.QuestActiveKills &&
-           mg.Drops[104953].IsOfficialDrop && mergedV2.Maps["arcangrove"].MaxPlayers == 6 && mergedV2.Maps["arcangrove"].MapItems[5044].RequiredQuestIds.Contains(7277),
-        "Merged v2 database must keep quest-active counters, official flags, map-item quests and room caps");
-    Console.WriteLine($"   OK: migrated v1->v2 ({migrated.MigrationLog[0].Split(':').Last().Trim()[..60]}...), gated rates, official drops, map items, room cap");
+    Assert(mergedV2.SchemaVersion == GameDatabase.CurrentSchemaVersion && mg.KillsByActiveQuestSet.GetValueOrDefault("802") == 1 && mg.Drops[5574].RateBasis == DropRates.QuestActiveKills &&
+           mg.Drops[104953].IsOfficialDrop && mergedV2.Maps["arcangrove"].PeakPlayersObserved == 6 && mergedV2.Maps["arcangrove"].MapItems[5044].RequiredQuestIds.Contains(7277),
+        "Merged database must keep quest-set counters, official flags, map-item quests and peak occupancy");
+    Console.WriteLine($"   OK: migrated v1->v2 ({migrated.MigrationLog[0].Split(':').Last().Trim()[..60]}...), gated rates, official drops, map items, peak occupancy");
+
+    Console.WriteLine("10. Testing schema v3 (kill rewards, respawn, quest-set kills, v2->v3 migration)...");
+    var v3Eng = new PacketCollectorEngine();
+    v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","strMapName":"chaoscrypt","mondef":[{"sRace":"Chaos","strMonName":"Chaorrupted Wolf","intLevel":12,"MonID":900}],"monmap":[{"MonID":900,"strFrame":"r2","MonMapID":1},{"MonID":900,"strFrame":"r2","MonMapID":2}],"monBranch":[{"intHP":670,"intHPMax":670,"iLvl":12,"wDPS":30,"MonMapID":1,"MonID":900},{"intHP":670,"intHPMax":670,"iLvl":12,"wDPS":30,"MonMapID":2,"MonID":900}]} } }""");
+
+    // (a) Kill rewards from real addGoldExp shapes: totals include the bonus (base = total - bonus); zeros (max level /
+    // gold cap) are counted apart; quest rewards (typ "q") are ignored here.
+    v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"bonusGold":18,"intGold":30,"typ":"m","intExp":50,"id":2,"bonusExp":10,"cmd":"addGoldExp"} } }""");
+    v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"intExp":480,"cmd":"addGoldExp","typ":"m","bonusGold":144,"intGold":288,"id":1} } }""");
+    v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"addGoldExp","typ":"m","intExp":0,"intGold":0,"id":1} } }""");
+    v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"typ":"q","intExp":625,"intGold":0,"bonusExp":125,"cmd":"addGoldExp"} } }""");
+
+    // (b) Quest-set kills: an item required by quests 10 and 11 must count a kill with both active only once.
+    v3Eng.SyncActiveQuests(new[] { 10, 11 });
+    v3Eng.RecordMonsterKilled(1);
+    v3Eng.RecordMonsterKilled(2);
+    var respawnFrom = DateTime.UtcNow;
+    v3Eng.SyncActiveQuests(new[] { 10 });
+    Thread.Sleep(450);
+    v3Eng.RecordMonsterKilled(1);
+    v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"addItems","items":{"77001":{"ItemID":77001,"sName":"Wolf Fang","bTemp":true,"sType":"Quest Item","iStk":5,"iQty":1,"sReqQuests":"10,11"}}} } }""");
+
+    // (c) Respawn: kill of MonMapID 2 -> ["respawnMon", "-1", "2"] (real str packet layout).
+    Thread.Sleep(Math.Max(0, 600 - (int)(DateTime.UtcNow - respawnFrom).TotalMilliseconds));
+    v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "str", "dataObj": [ "respawnMon", "-1", "2" ] } }""");
+    v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "str", "dataObj": [ "respawnMon", "-1", "2" ] } }"""); // duplicate: no pending death
+    var v3Delta = v3Eng.TakeDeltaSnapshot();
+    var wolf = v3Delta.Monsters["id:900"];
+    var kr = wolf.KillRewards;
+    Assert(kr.Samples == 3 && kr.ExpSamples == 2 && kr.TotalBaseExp == 40 + 480 && kr.MinBaseExp == 40 && kr.MaxBaseExp == 480 && kr.ZeroExpSamples == 1 &&
+           kr.GoldSamples == 2 && kr.TotalBaseGold == 12 + 144 && kr.ZeroGoldSamples == 1 && Math.Abs(kr.AverageBaseGold - 78) < 0.01,
+        $"Kill rewards must store base values and skip zeros (exp={kr.TotalBaseExp}/{kr.ExpSamples}, gold={kr.TotalBaseGold}/{kr.GoldSamples})");
+    var fang = wolf.Drops[77001];
+    Assert(wolf.KillsByActiveQuestSet.GetValueOrDefault("10,11") == 2 && wolf.KillsByActiveQuestSet.GetValueOrDefault("10") == 1 &&
+           fang.QuestGated && fang.EligibleKills == 3 && fang.EstimatedDropChance is { } fangRate && Math.Abs(fangRate - 0.3333) < 0.001,
+        $"Each kill must count once for an item required by several active quests (eligible={fang.EligibleKills}, chance={fang.EstimatedDropChance})");
+    var wolfSpawn = v3Delta.Maps["chaoscrypt"].Monsters[2];
+    Assert(wolf.Respawn.Samples == 1 && wolfSpawn.Respawn.Samples == 1 && wolfSpawn.Respawn.MinMs >= 500 && wolfSpawn.Respawn.MinMs < 5000,
+        $"A respawn sample must be recorded once per death (monster={wolf.Respawn.Samples}, spawn={wolfSpawn.Respawn.Samples}, ms={wolfSpawn.Respawn.MinMs})");
+
+    // (d) v2 -> v3 migration: dated backup, nothing removed, legacy per-quest counts use the max (not the sum).
+    var v3Dir = Path.Combine(tempDir, "v3");
+    Directory.CreateDirectory(v3Dir);
+    var v3Path = Path.Combine(v3Dir, "gamedata.json");
+    var legacyDb = new GameDatabase { SchemaVersion = 2 };
+    var mumbler = new CapturedMonster { Key = "id:901", ID = 901, Name = "Mumbler", KillCount = 50, TrackedKills = 20 };
+    mumbler.KillsWhileQuestActive[10] = 20;
+    mumbler.KillsWhileQuestActive[11] = 20;
+    mumbler.Drops[77002] = new CapturedDropStat { ItemID = 77002, ItemName = "Mumble", Temp = true, QuestGated = true, RequiredQuestIds = { 10, 11 },
+                                                  DropEvents = 10, TrackedDropEvents = 10, EligibleKills = 40, RateBasis = DropRates.QuestActiveKills };
+    legacyDb.Monsters[mumbler.Key] = mumbler;
+    File.WriteAllText(v3Path, Newtonsoft.Json.JsonConvert.SerializeObject(legacyDb));
+    var v3Store = new GameDatabaseStore(v3Path);
+    var mergedV3 = v3Store.FlushDelta(v3Delta);
+    var mm = mergedV3.Monsters["id:901"].Drops[77002];
+    Assert(mergedV3.SchemaVersion == 3 && mergedV3.MigrationLog.Count == 1 && Directory.GetFiles(v3Dir, "gamedata.v2-backup-*.json").Length == 1,
+        "A v2 file must be backed up and migrated to v3");
+    Assert(mm.EligibleKills == 20 && mm.EstimatedDropChance is { } mmRate && Math.Abs(mmRate - 0.5) < 0.001,
+        $"Legacy per-quest counts must not be summed (eligible={mm.EligibleKills}, chance={mm.EstimatedDropChance})");
+    var mergedWolf = mergedV3.Monsters["id:900"];
+    Assert(mergedWolf.KillRewards.TotalBaseExp == 520 && mergedWolf.Respawn.Samples == 1 && mergedV3.Maps["chaoscrypt"].Monsters[2].Respawn.Samples == 1 &&
+           mergedWolf.KillsByActiveQuestSet.GetValueOrDefault("10,11") == 2, "Merge must keep kill rewards, respawn samples and quest-set kills");
+    var mergedTwice = v3Store.FlushDelta(new GameDatabase());
+    Assert(mergedTwice.Monsters["id:900"].KillRewards.Samples == 3 && Directory.GetFiles(v3Dir, "gamedata.v2-backup-*.json").Length == 1,
+        "A v3 file must not be migrated again and empty flushes must not change counters");
+    Console.WriteLine($"   OK: base XP {kr.AverageBaseExp}/kill, base gold {kr.AverageBaseGold}/kill, respawn {wolfSpawn.Respawn.MinMs} ms, quest-set rate {fang.EstimatedDropChance:P1}, v2->v3 migrated");
 
     Console.WriteLine("   OK: All Collector tests passed successfully!");
 }

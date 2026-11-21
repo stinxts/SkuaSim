@@ -61,6 +61,45 @@ public sealed class QuestCatalogHints
 
 public static class GameDatabaseMigrations
 {
+    /// <summary>Runs every pending migration in order (v1 → v2 → v3). Returns the log lines added.</summary>
+    public static List<string> MigrateToCurrent(GameDatabase db, QuestCatalogHints? externalHints)
+    {
+        var lines = new List<string>();
+        if (db.SchemaVersion < 2)
+            lines.Add(MigrateToV2(db, externalHints));
+        if (db.SchemaVersion < 3)
+            lines.Add(MigrateToV3(db));
+        return lines;
+    }
+
+    /// <summary>
+    /// v2 → v3. Deletes nothing. New fields (kill rewards, respawn, quest-set kills, peak players) start empty. The
+    /// per-quest legacy kill counts are frozen and quest-gated rates are recomputed with the maximum of them instead of
+    /// the sum (the sum counted a kill once per active required quest). The never-populated room cap fields
+    /// (MaxPlayers*) are dropped by the new model.
+    /// </summary>
+    public static string MigrateToV3(GameDatabase db)
+    {
+        if (db.SchemaVersion >= 3)
+            return "already v3";
+
+        int recomputed = 0;
+        foreach (var monster in db.Monsters.Values)
+        {
+            if (monster.KillsWhileQuestActive.Count == 0)
+                continue;
+            DropRates.Recompute(monster);
+            recomputed++;
+        }
+
+        db.SchemaVersion = 3;
+        var summary = $"{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}Z v2->v3: no records removed; recomputed quest-gated rates of " +
+                      $"{recomputed} monster(s) with legacy per-quest kill counts (max instead of sum, which double-counted " +
+                      "kills made with several required quests active). New: kill rewards, respawn times, quest-set kills, peak players.";
+        db.MigrationLog.Add(summary);
+        return summary;
+    }
+
     /// <summary>
     /// Migrates a v1 database to v2 in place. The only records deleted are provably wrong ones: drops with more drop
     /// events than the monster has kills (impossible; caused by the old "first monster in the cell" fallback).

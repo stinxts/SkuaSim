@@ -294,25 +294,25 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
         }
     }
 
-    private const string RoomCapacityPath = "world.areaData.intMaxPlayers";
-
     /// <summary>
-    /// Reads the room player cap from the game client after joining (read-only, no packet is sent). The path comes
-    /// from the OMNISCOPE investigation and is unverified, so every probe is counted in the packet census
-    /// ("probe:..." names) to confirm whether it works.
+    /// Samples how many players are in the current room (Skua Map.PlayerCount: a number, no names). The client does
+    /// not expose the room cap ("world.areaData.intMaxPlayers" was missing in all 58 probes), so the peak count per
+    /// map is kept as a lower bound.
     /// </summary>
-    private void ProbeRoomCapacity(IScriptInterface bot, string? mapName)
+    private void SamplePlayerCount(IScriptInterface bot)
     {
         try
         {
-            var cap = bot.Flash?.GetGameObject<int>(RoomCapacityPath, 0) ?? 0;
-            _engine.SchemaSampler.CountCommand(cap > 0 ? $"probe:{RoomCapacityPath}=found" : $"probe:{RoomCapacityPath}=missing");
-            if (cap > 0)
-                EnqueueWork(() => _engine.RecordRoomCapacity(mapName, cap, "runtime:" + RoomCapacityPath));
+            if (!bot.Map.Loaded)
+                return;
+            var mapName = bot.Map.Name;
+            var count = bot.Map.PlayerCount;
+            if (count > 0)
+                EnqueueWork(() => _engine.RecordPlayerCount(mapName, count));
         }
         catch
         {
-            _engine.SchemaSampler.CountCommand($"probe:{RoomCapacityPath}=error");
+            // Player list unavailable during transitions.
         }
     }
 
@@ -378,7 +378,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                 EnqueueWork(() => _engine.RecordMapSnapshot(mapName, mapFile, cell, pad, cells, monsters));
                 CaptureLivePlayerSnapshot(bot);
                 SyncActiveQuests(bot);
-                ProbeRoomCapacity(bot, mapName);
+                SamplePlayerCount(bot);
             }
             catch
             {
@@ -482,6 +482,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                 {
                     CaptureLivePlayerSnapshot(_bot);
                     SyncActiveQuests(_bot);
+                    SamplePlayerCount(_bot);
                     await Task.Delay(150, token).ConfigureAwait(false);
                 }
                 FlushSafe();

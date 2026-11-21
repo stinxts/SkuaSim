@@ -70,6 +70,9 @@ public sealed partial class PacketCollectorEngine
         public DateTime LastAttackUtc { get; set; } = DateTime.MinValue;
         public DateTime LastDeathCountedUtc { get; set; } = DateTime.MinValue;
 
+        /// <summary>Death time awaiting its "respawnMon" (MinValue when the monster is alive or already measured).</summary>
+        public DateTime PendingRespawnSinceUtc { get; set; } = DateTime.MinValue;
+
         public string Key => GameDatabase.GetMonsterKey(MonsterID, Name);
     }
 
@@ -126,7 +129,7 @@ public sealed partial class PacketCollectorEngine
     private static readonly HashSet<string> HandledServerCommands = new(StringComparer.Ordinal)
     {
         "moveToArea", "ct", "event", "updateClass", "equipItem", "sAct", "stu",
-        "dropItem", "addItems", "loadShop", "getQuests", "ccqr", "monsterDrops"
+        "dropItem", "addItems", "loadShop", "getQuests", "ccqr", "monsterDrops", "addGoldExp"
     };
 
     public void ProcessExtensionPacketJObject(JObject root)
@@ -140,7 +143,11 @@ public sealed partial class PacketCollectorEngine
             {
                 SchemaSampler.CountCommand("str:" + strParts[0]);
                 lock (_sync)
+                {
                     SchemaSampler.TryCaptureStringPacket(strParts, _selfPlayerEntityId, _selfUsername, _currentMapName);
+                    if (string.Equals(strParts[0]!.ToString(), "respawnMon", StringComparison.Ordinal))
+                        HandleRespawnMon(strParts, DateTime.UtcNow);
+                }
             }
             return;
         }
@@ -206,6 +213,9 @@ public sealed partial class PacketCollectorEngine
                     break;
                 case "monsterDrops":
                     HandleMonsterDropsPacket(dataObj);
+                    break;
+                case "addGoldExp":
+                    HandleAddGoldExpPacket(dataObj);
                     break;
             }
         }
@@ -1311,6 +1321,7 @@ public sealed partial class PacketCollectorEngine
                 return;
 
             active.LastDeathCountedUtc = now;
+            active.PendingRespawnSinceUtc = now;
             active.CurrentHP = 0;
 
             var mon = GetOrCreateMonster(active.MonsterID, active.Name);
@@ -1339,8 +1350,9 @@ public sealed partial class PacketCollectorEngine
     }
 
     /// <summary>
-    /// Counts a kill. When the active quest list is known, also counts it as a tracked kill per active quest:
-    /// the denominator of quest-gated drop rates (those items can only drop while one of their quests is active).
+    /// Counts a kill. When the active quest list is known, also counts it as a tracked kill under the exact active
+    /// quest set: the denominator of quest-gated drop rates (those items can only drop while one of their quests is
+    /// active). Keying by the whole set makes each kill count once even when several required quests are active.
     /// </summary>
     private void CountKill(CapturedMonster mon)
     {
@@ -1348,8 +1360,8 @@ public sealed partial class PacketCollectorEngine
         if (_activeQuestsKnown)
         {
             mon.TrackedKills++;
-            foreach (var questId in _activeQuestIds)
-                mon.KillsWhileQuestActive[questId] = mon.KillsWhileQuestActive.GetValueOrDefault(questId) + 1;
+            var setKey = DropRates.QuestSetKey(_activeQuestIds);
+            mon.KillsByActiveQuestSet[setKey] = mon.KillsByActiveQuestSet.GetValueOrDefault(setKey) + 1;
         }
         DropRates.Recompute(mon);
     }
@@ -1375,19 +1387,87 @@ public sealed partial class PacketCollectorEngine
         get { lock (_sync) return _activeQuestsKnown; }
     }
 
-    /// <summary>Records the room player cap read from the game client after joining (never pre-join or server-wide).</summary>
-    public void RecordRoomCapacity(string? mapName, int maxPlayers, string source)
+    /// <summary>
+    /// Records how many players are in the current room of a map (Skua Map.PlayerCount). Only the peak is kept: a lower
+    /// bound of the room cap, which the client does not expose. A count, never names.
+    /// </summary>
+    public void RecordPlayerCount(string? mapName, int playerCount)
     {
         var normMap = GameDatabase.NormalizeMapName(mapName);
-        if (string.IsNullOrEmpty(normMap) || maxPlayers <= 0)
+        if (string.IsNullOrEmpty(normMap) || playerCount <= 0)
             return;
         lock (_sync)
         {
             var map = GetOrCreateMap(normMap);
-            map.MaxPlayers = maxPlayers;
-            map.MaxPlayersSource = source;
-            map.MaxPlayersObservedUtc = DateTime.UtcNow;
+            map.PlayerCountSamples++;
+            if (playerCount > map.PeakPlayersObserved)
+            {
+                map.PeakPlayersObserved = playerCount;
+                map.PeakPlayersObservedUtc = DateTime.UtcNow;
+            }
         }
+    }
+
+    // Respawn samples outside this window are discarded (missed packets, map changes, stale deaths).
+    private const long MinRespawnSampleMs = 500;
+    private const long MaxRespawnSampleMs = 10 * 60 * 1000;
+
+    public long SessionRespawnSamples { get; private set; }
+
+    /// <summary>
+    /// String packet ["respawnMon", roomId, MonMapID] (verified from live samples, e.g. ["respawnMon", "-1", "13"]).
+    /// The delay since the recorded kill of that MonMapID is a respawn sample for the spawn and for the monster.
+    /// </summary>
+    private void HandleRespawnMon(JArray parts, DateTime nowUtc)
+    {
+        if (parts.Count < 3 || !int.TryParse(parts[2]?.ToString(), out var monMapId) ||
+            !_mapMonsters.TryGetValue(monMapId, out var active))
+            return;
+
+        var since = active.PendingRespawnSinceUtc;
+        active.PendingRespawnSinceUtc = DateTime.MinValue;
+        if (active.MaxHP > 0)
+            active.CurrentHP = active.MaxHP;
+        if (since == DateTime.MinValue || string.IsNullOrEmpty(_currentMapName))
+            return;
+
+        var ms = (long)(nowUtc - since).TotalMilliseconds;
+        if (ms < MinRespawnSampleMs || ms > MaxRespawnSampleMs)
+            return;
+
+        var map = GetOrCreateMap(_currentMapName);
+        if (!map.Monsters.TryGetValue(monMapId, out var spawn))
+        {
+            spawn = new CapturedMapMonsterSpawn { MapID = monMapId, MonsterID = active.MonsterID, Name = active.Name, Cell = active.Cell };
+            map.Monsters[monMapId] = spawn;
+        }
+        spawn.Respawn.Add(ms);
+        GetOrCreateMonster(active.MonsterID, active.Name).Respawn.Add(ms);
+        SessionRespawnSamples++;
+    }
+
+    public long SessionKillRewardSamples { get; private set; }
+
+    /// <summary>
+    /// "addGoldExp" (verified keys): { typ "m" (monster) | "q" (quest), id = MonMapID for typ "m", intExp, bonusExp,
+    /// intGold, bonusGold, iRep, bonusRep, FactionID }. Totals include the bonus, so base = total - bonus. Only monster
+    /// kills are recorded here; quest rewards come from getQuests.
+    /// </summary>
+    private void HandleAddGoldExpPacket(JObject dataObj)
+    {
+        if (!string.Equals(dataObj["typ"]?.ToString(), "m", StringComparison.OrdinalIgnoreCase))
+            return;
+        var monMapId = ParseInt(dataObj["id"]);
+        if (monMapId <= 0 || !_mapMonsters.TryGetValue(monMapId, out var active))
+            return;
+
+        var mon = GetOrCreateMonster(active.MonsterID, active.Name);
+        mon.KillRewards.Add(
+            ParseInt(dataObj["intExp"]), ParseInt(dataObj["bonusExp"]),
+            ParseInt(dataObj["intGold"]), ParseInt(dataObj["bonusGold"]),
+            ParseInt(dataObj["iRep"]), ParseInt(dataObj["bonusRep"]),
+            ParseInt(dataObj["FactionID"]));
+        SessionKillRewardSamples++;
     }
 
     private void MarkQuestTurnIn(int questId)

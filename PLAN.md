@@ -52,7 +52,7 @@ flowchart LR
 | **2 — Data-Driven World** | Import `QuestData.json` + Collector `gamedata.json` + JSON scenario format + AQW `StatEngine` | ✅ Done | Reproduce specific user states (level, class, real AQW boosted gear, Awe/Forge unlocks, boosts, quests) |
 | **3 — Visual Interface (`SkuaSim.UI`)** | Avalonia 12 desktop dashboard ("Skua without Flash") + UX & Collector protocol polish | ✅ Done | Multi-resolution UI (HD–8K), live client/stats state, real AQW gear & enhancement editor, Skua-faithful `Script Options` + `.cfg` import, unlimited virtual & real execution limits, color-coded Logs/Diagnostics/Trace, and `.md`/`.json` export |
 | **3.4 — Simulator Robustness** | `KillQuest` AST hints + on-demand monsters on synthesized maps, no-progress (`Stalled`) detector, process-stable hashing + cross-process determinism test, `CLAUDE.md` | ✅ Done (2026-11-20) | Infinite loops on uncaptured maps (e.g. `/lair`, 38 virtual hours) now finish or stop as `Stalled` within the configured virtual time |
-| **3.5 — Collector Corrections, Schema v2 & Real Rewards (`SkuaSim.Collector`)** | Protocol verification sampling, monster level/race fix, drop attribution fix, schema v2 with backup, quest-gated `EligibleKills`, passive `monsterDrops`, room `MaxPlayers`, quest-gated map items, quest reward types, real XP/gold per kill, respawn times | 🔄 In progress (Steps 1–3 done; Step 4 next) | Simulator stops inventing monster levels, XP/gold and respawn timers, and stops rolling drops that are actually quest rewards |
+| **3.5 — Collector Corrections, Schema v2/v3 & Real Rewards (`SkuaSim.Collector`)** | Protocol verification sampling, monster level/race fix, drop attribution fix, schema v2 with backup, quest-gated `EligibleKills`, passive `monsterDrops`, quest-gated map items, quest reward types, schema v3: real XP/gold/rep per kill, respawn times, quest-set kill counting, room occupancy | 🔄 In progress (Steps 1–4 done; Step 5 and simulator consumption next) | Simulator stops inventing monster levels, XP/gold and respawn timers, and stops rolling drops that are actually quest rewards |
 | **4 — Multi-Client (Army), Live Loadouts, Potions & Boss/Aura Combat** | Up to 20 concurrent clients, `Solo`/`Farm`/`Dodge`/`Boss` role classes + live class/enhancement swaps, Potions/Elixirs/Tonics/Scrolls (`UltrasLW`), and active aura/zone/Ultra boss combat | 🔜 Next | Test Army scripts (`ArmyFarmerJoeDoAll.cs`), `UltrasLW` potion/taunt teams, and dynamic CBO class/enhancement switching end-to-end |
 | **5 — Faults, Asserts & Bug Templates** | Fault injection (lag/disconnect/drop droughts), scenario `asserts`, diagnostic generator & bug report template | 🔜 Planned | End-to-end workflow: "bug → scenario → reproduce → fix → automated regression test passes" |
 | **6 — Replay, OMNISCOPE Unification & Public Packaging** | Real session log replay, official Skua parity, OMNISCOPE SWF/Cross-Ref integration (`wtffidy/VibeSkua`), CLI flags (`merge-data`, `init-scenario`), and release bundle | 🔜 Planned | Reproduce server-dependent edge cases, unify offline map/drop/combat intelligence with OMNISCOPE, and distribute cleanly to external developers |
@@ -73,8 +73,9 @@ Revised after a data-quality audit of the live `gamedata.json` (13.7k flushes, 8
 2. ✅ Command census (names and counts only) + value-free skeletons for unknown commands.
 3. ✅ Session played (incl. WeeklyReleaseGeneratorV3 and MergeTemplateHelperV3). **Verified protocol facts:**
    - `moveToArea`: `mondef` { `MonID`, `strMonName`, `intLevel`, `sRace`, `strMonFileName` }, `monmap` { `MonMapID`, `MonID`, `strFrame`, `intRSS` (always `-1`, not a respawn time) }, **`monBranch`** (capital B) { `MonMapID`, `MonID`, **`iLvl`**, `intHP`, `intHPMax`, **`wDPS`** }. No room player cap in this packet.
-   - `addGoldExp`: { `typ` (`"m"` monster / `"q"` quest), `id` (MonMapID), `intExp`, `intGold`, `bonusGold`, `iRep`, `bonusRep`, `FactionID` } — boost bonuses arrive separately; `intExp` is `0` at level cap.
-   - Monster respawn arrives as the **string** packet `respawnMon` (~1 per kill); `mtls` { `id`, `o` { `intHP`, `intState`, `intMP` } } carries monster state updates.
+   - `addGoldExp`: { `typ` (`"m"` monster / `"q"` quest), `id` (MonMapID, monster only), `intExp`, `bonusExp`, `intGold`, `bonusGold`, `iRep`, `bonusRep`, `FactionID` } — the totals **include** the bonus (e.g. `intGold` 2500 with `bonusGold` 1500 = base 1000; `intExp` 625 with `bonusExp` 125 = base 500); `intExp` is `0` at level cap. No class-point key has been observed.
+   - Monster respawn arrives as the **string** packet `["respawnMon", "-1", "<MonMapID>"]` (~1 per kill; second element is the room ID); `mtls` { `id`, `o` { `intHP`, `intState`, `intMP` } } carries monster state updates.
+   - The client does **not** expose the room player cap: `world.areaData.intMaxPlayers` was missing in all 58 probes. Skua's `Bot.Map.PlayerCount` gives the current occupancy.
    - Items in `dropItem`/`addItems`/`monsterDrops` carry **`sReqQuests`** (IDs of the quests that use the item) — a passive quest-gated signal.
    - `getQuests` rewards: `reward[]` { `ItemID`, `iQty`, `iType`, `iRate` } + `oRewards` item definitions (e.g. `itemsS`).
    - `monsterDrops` { `MonMapID`, `items` keyed by ItemID with `questGated[]`/`questObjective[]` (quest **names**), `sReqQuests`, `bTemp` } — no drop rates.
@@ -89,15 +90,17 @@ Revised after a data-quality audit of the live `gamedata.json` (13.7k flushes, 8
 7. ✅ `GameDatabaseStore` copies a v1 file to `gamedata.v1-backup-<UTC>.json` and migrates it on the next flush (`GameDatabaseMigrations.MigrateToV2`, logged in `MigrationLog`). **Cleanup rules, revised after a dry run on the live data:** only provably wrong records are deleted (52 drops with more drop events than kills). Removing "quest-reward-only" items was dropped — the dry run showed it would delete real drops that are also quest rewards (e.g. Shurpu Blaze Token from Xan, ~78 %). Live data: 1,080 drops kept, 369 temporary quest-required drops marked quest-gated (`unverified`); backup `gamedata.v1-backup-20261120-203127.json` + a manual copy in `SkuaSim\backups\`.
 8. ✅ Quest-gated precision: drops carry `QuestGated`, `RequiredQuestIds`, `QuestGatedNames`, `QuestObjectives`, `TrackedDropEvents` and `RateBasis` (`all_kills` / `quest_active_kills` / `unverified`); monsters carry `TrackedKills` and `KillsWhileQuestActive`. Rates are derived in one place (`DropRates.Recompute`) and `EstimatedDropChance` is **null** when there is no trustworthy measurement. The active quest list comes from `Bot.Quests.Active` (RAM only) and nothing is tracked until it is known. Gating follows the server: `sReqQuests` is set for **temporary** quest-required items only (verified on live samples), so the migration marks only temporary items.
 9. ✅ Official drops captured passively from `monsterDrops` (items keyed by ItemID or as an array): `IsOfficialDrop`, quest-gated flags and names; observed counts and rates untouched. No active request mode was added.
-10. ✅ (experimental) Room `MaxPlayers` read after joining from the client path `world.areaData.intMaxPlayers` (read-only, no packet); every probe is counted in the packet census (`probe:...=found/missing`) to confirm the path. `MaxPlayers`, `MaxPlayersSource`, `MaxPlayersObservedUtc` on maps.
+10. ✅ ~~Room `MaxPlayers` from `world.areaData.intMaxPlayers`~~ — probe always missing; replaced in v3 by peak occupancy (item 15).
 11. ✅ Quest-gated map items: `RequiredQuestIds` (from the granted items' `sReqQuests`), `GrantObservations` and `ActiveQuestCounts`.
 12. ✅ Quest reward types: `RewardType` (`iType`) and `RatePercent` (`iRate`) on quest rewards (done in Step 2).
 - ✅ Simulator side (needed so v2 data is safe to consume): quest-gated drops only drop while one of their quests is active; a known drop without a trustworthy rate uses `World.GenericDropChance` with a Violet `droprate:` warning instead of 0 %. Collector tests 9/9, Core tests 14/14.
 
-**Step 4 — Missing data (next):**
-13. Real XP, gold, class points and reputation per kill from `addGoldExp` (`typ: "m"`, `id` = MonMapID, `intExp`, `intGold`, `bonusGold`, `iRep`, `bonusRep`, `FactionID`): store base values (bonus fields subtracted; ignore `intExp = 0` samples from level-capped characters) per monster.
-14. Per-monster respawn time: interval between the kill and the `respawnMon` string packet (first confirm its argument layout from the new `proto_str_respawnMon` samples), with `mtls` as a cross-check.
-15. Confirm or discard the room-cap path from the census (`probe:world.areaData.intMaxPlayers=found|missing`); if missing, investigate `world.areaData` keys read-only.
+**Step 4 — Missing data, schema v3 (`SchemaVersion: 2 → 3`):** ✅ Done and deployed (2026-11-21); live migration happens on the first flush
+13. ✅ Per-kill rewards from `addGoldExp` `typ: "m"` → `CapturedMonster.KillRewards`: base XP/gold/rep (total − bonus), min/max/average, `FactionIds`; `0` values (max level / gold cap) are counted in `ZeroExpSamples`/`ZeroGoldSamples` and never averaged. Quest (`typ: "q"`) rewards are not recorded here. Class points: no key observed, not parsed.
+14. ✅ Respawn time = kill → `respawnMon` for the same MonMapID (samples outside 0.5 s–10 min discarded; one sample per death) → `CapturedRespawnStats` on the map spawn and on the monster (`Samples`, `MinMs`, `MaxMs`, `AverageMs`).
+15. ✅ Room cap: the client path does not exist, so the probe was removed. Maps now store `PeakPlayersObserved` (from `Bot.Map.PlayerCount` on join and every flush; a count, never names), a **lower bound** of the cap, plus `PlayerCountSamples`.
+- ✅ Fix: quest-gated denominators double-counted kills made with several required quests active (the per-quest counts were summed). Kills are now keyed by the exact active quest set (`KillsByActiveQuestSet`, e.g. `"8814,8815,9172"`) and a drop's eligible kills are the sum over sets that contain any of its quests. Legacy v2 per-quest counts are frozen and contribute their **maximum** (a lower bound).
+- ✅ Migration v2 → v3 (`GameDatabaseMigrations.MigrateToCurrent` runs v1→v2→v3): dated `gamedata.v2-backup-<UTC>.json`, nothing deleted, quest-gated rates recomputed. Dry run on the live data: 24 monsters recomputed, file 7.6 → 8.4 MB (new empty fields). Collector tests 10/10 (test 10 uses real `addGoldExp`/`respawnMon` shapes).
 
 **Step 5 — Quality & infrastructure:**
 16. Key class combat stats by level band and enhancement signature (or only blend when compatible) — today endgame gear inflates crit/dodge for any scenario with that class.
@@ -105,7 +108,7 @@ Revised after a data-quality audit of the live `gamedata.json` (13.7k flushes, 8
 18. Remove the hardcoded OneDrive mirror path default (needed before a public release).
 19. Resolve `monsterDrops` quest **names** (`questGated`) to quest IDs when `sReqQuests` is empty, so those drops can leave `unverified`.
 
-**Then, in the simulator:** consume monster `WeaponDps` and real XP/gold per kill, per-monster respawn, quest-gated `GetMapItem` (require one of `RequiredQuestIds` to be active), quest reward types/rates, and `MaxPlayers` for Phase 4 room routing.
+**Then, in the simulator:** consume monster `WeaponDps`, `KillRewards` (base XP/gold/rep per kill, with the scenario's boosts applied on top), per-spawn `Respawn` (fallback: monster average, then the fixed 12 s with a Violet warning), quest-gated `GetMapItem` (require one of `RequiredQuestIds` to be active), quest reward types/rates, and `PeakPlayersObserved` as a lower bound for Phase 4 room routing.
 
 **Known data limitations after v2:** v1-era quest-reward contamination that is not provably impossible is kept (not separable); permanent quest items (e.g. Mystic Quills 0.04 %) keep a diluted all-kills rate because the server does not flag them in `sReqQuests`.
 
@@ -113,9 +116,9 @@ Revised after a data-quality audit of the live `gamedata.json` (13.7k flushes, 8
 
 ## Next Implementations (in order) & Open Decisions
 **Next, in order:**
-1. **Phase 3.5 Step 4** — real XP/gold/CP/rep per kill (`addGoldExp`) and per-monster respawn (`respawnMon`); confirm the room-cap path.
-2. **Phase 3.5 Step 5** — class combat stats by level/gear, enhancement profile, mirror path, quest-name → ID resolution.
-3. **Simulator consumption** of the new data (WeaponDps, XP/gold, respawn, quest-gated map items, reward types/rates).
+1. **Play a session with the v3 Collector** (deployed) to fill `KillRewards`/`Respawn`/`PeakPlayersObserved`.
+2. **Simulator consumption** of the new data (WeaponDps, XP/gold, respawn, quest-gated map items, reward types/rates).
+3. **Phase 3.5 Step 5** — class combat stats by level/gear, enhancement profile, mirror path, quest-name → ID resolution.
 4. **Phase 4** — after the design discussion below.
 
 **Open decisions (to discuss before implementing):**

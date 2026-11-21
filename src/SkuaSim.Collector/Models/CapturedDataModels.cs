@@ -13,8 +13,15 @@ public sealed class GameDatabase
     /// RateBasis), passive official drops (IsOfficialDrop), room MaxPlayers, quest-gated map items, quest reward
     /// types, monster level/WeaponDps. Files written before v2 deserialize with SchemaVersion = 1 and are migrated
     /// (with a dated backup) by GameDatabaseStore on the next flush.
+    /// <para>
+    /// v3 (2026-11-21): base XP/gold/reputation per kill (<see cref="CapturedKillRewards"/>, from "addGoldExp"),
+    /// respawn times (<see cref="CapturedRespawnStats"/>, kill → "respawnMon"), kills keyed by the exact active quest
+    /// set (<see cref="CapturedMonster.KillsByActiveQuestSet"/>, fixes double counting when several required quests
+    /// are active), and room occupancy (<see cref="CapturedMap.PeakPlayersObserved"/>) replacing the unreachable
+    /// client-side room cap.
+    /// </para>
     /// </summary>
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
 
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
     public DateTime LastUpdatedUtc { get; set; } = DateTime.UtcNow;
@@ -79,13 +86,17 @@ public sealed class CapturedMap
     /// </summary>
     public Dictionary<string, CapturedZoneEvent> ZoneEvents { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Room player cap read from the game client after joining (null when not observed). Not server-wide iMax.</summary>
-    public int? MaxPlayers { get; set; }
+    /// <summary>
+    /// Highest player count seen in a room of this map (Skua Map.PlayerCount, sampled on join and periodically).
+    /// A lower bound of the room cap, which the client does not expose (the "world.areaData.intMaxPlayers" probe
+    /// was missing in every room). 0 = never sampled.
+    /// </summary>
+    public int PeakPlayersObserved { get; set; }
 
-    /// <summary>Where <see cref="MaxPlayers"/> came from, e.g. "runtime:world.areaData.intMaxPlayers".</summary>
-    public string? MaxPlayersSource { get; set; }
+    public DateTime? PeakPlayersObservedUtc { get; set; }
 
-    public DateTime? MaxPlayersObservedUtc { get; set; }
+    /// <summary>Number of player-count samples taken on this map.</summary>
+    public long PlayerCountSamples { get; set; }
 }
 
 public sealed class CapturedMapMonsterSpawn
@@ -102,6 +113,129 @@ public sealed class CapturedMapMonsterSpawn
 
     /// <summary>Server-side monster weapon DPS from moveToArea "monBranch[].wDPS" (0 when unknown).</summary>
     public int WeaponDps { get; set; }
+
+    /// <summary>Respawn delay of this spawn (kill → "respawnMon" with this MonMapID).</summary>
+    public CapturedRespawnStats Respawn { get; set; } = new();
+}
+
+/// <summary>Respawn delay samples: time from a recorded kill to the server's "respawnMon" for the same MonMapID.</summary>
+public sealed class CapturedRespawnStats
+{
+    public long Samples { get; set; }
+    public long TotalMs { get; set; }
+    public long? MinMs { get; set; }
+    public long? MaxMs { get; set; }
+
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double AverageMs => Samples > 0 ? Math.Round((double)TotalMs / Samples, 0) : 0.0;
+
+    public void Add(long ms)
+    {
+        Samples++;
+        TotalMs += ms;
+        MinMs = MinMs.HasValue ? Math.Min(MinMs.Value, ms) : ms;
+        MaxMs = MaxMs.HasValue ? Math.Max(MaxMs.Value, ms) : ms;
+    }
+
+    public void Merge(CapturedRespawnStats? other)
+    {
+        if (other == null || other.Samples <= 0)
+            return;
+        Samples += other.Samples;
+        TotalMs += other.TotalMs;
+        if (other.MinMs.HasValue) MinMs = MinMs.HasValue ? Math.Min(MinMs.Value, other.MinMs.Value) : other.MinMs;
+        if (other.MaxMs.HasValue) MaxMs = MaxMs.HasValue ? Math.Max(MaxMs.Value, other.MaxMs.Value) : other.MaxMs;
+    }
+}
+
+/// <summary>
+/// Rewards per monster kill from "addGoldExp" (typ "m"). Values are stored as base values: the packet's intExp/intGold/iRep
+/// already include boosts and membership bonus, which arrive separately as bonusExp/bonusGold/bonusRep
+/// (e.g. intGold 2500 with bonusGold 1500 = base 1000). A 0 means the reward was not granted (e.g. a max-level
+/// character gets intExp 0, a gold-capped one intGold 0): those are counted apart and never averaged in.
+/// </summary>
+public sealed class CapturedKillRewards
+{
+    public long Samples { get; set; }
+
+    public long ExpSamples { get; set; }
+    public long TotalBaseExp { get; set; }
+    public int? MinBaseExp { get; set; }
+    public int? MaxBaseExp { get; set; }
+    public long ZeroExpSamples { get; set; }
+
+    public long GoldSamples { get; set; }
+    public long TotalBaseGold { get; set; }
+    public int? MinBaseGold { get; set; }
+    public int? MaxBaseGold { get; set; }
+    public long ZeroGoldSamples { get; set; }
+
+    public long RepSamples { get; set; }
+    public long TotalBaseRep { get; set; }
+    public HashSet<int> FactionIds { get; set; } = new();
+
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double AverageBaseExp => ExpSamples > 0 ? Math.Round((double)TotalBaseExp / ExpSamples, 1) : 0.0;
+
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double AverageBaseGold => GoldSamples > 0 ? Math.Round((double)TotalBaseGold / GoldSamples, 1) : 0.0;
+
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double AverageBaseRep => RepSamples > 0 ? Math.Round((double)TotalBaseRep / RepSamples, 1) : 0.0;
+
+    public void Add(int totalExp, int bonusExp, int totalGold, int bonusGold, int totalRep, int bonusRep, int factionId)
+    {
+        Samples++;
+        if (totalExp > 0)
+        {
+            var exp = Math.Max(0, totalExp - Math.Max(0, bonusExp));
+            ExpSamples++;
+            TotalBaseExp += exp;
+            MinBaseExp = MinBaseExp.HasValue ? Math.Min(MinBaseExp.Value, exp) : exp;
+            MaxBaseExp = MaxBaseExp.HasValue ? Math.Max(MaxBaseExp.Value, exp) : exp;
+        }
+        else
+            ZeroExpSamples++;
+
+        if (totalGold > 0)
+        {
+            var gold = Math.Max(0, totalGold - Math.Max(0, bonusGold));
+            GoldSamples++;
+            TotalBaseGold += gold;
+            MinBaseGold = MinBaseGold.HasValue ? Math.Min(MinBaseGold.Value, gold) : gold;
+            MaxBaseGold = MaxBaseGold.HasValue ? Math.Max(MaxBaseGold.Value, gold) : gold;
+        }
+        else
+            ZeroGoldSamples++;
+
+        if (totalRep > 0)
+        {
+            RepSamples++;
+            TotalBaseRep += Math.Max(0, totalRep - Math.Max(0, bonusRep));
+            if (factionId > 0)
+                FactionIds.Add(factionId);
+        }
+    }
+
+    public void Merge(CapturedKillRewards? other)
+    {
+        if (other == null || other.Samples <= 0)
+            return;
+        Samples += other.Samples;
+        ExpSamples += other.ExpSamples;
+        TotalBaseExp += other.TotalBaseExp;
+        if (other.MinBaseExp.HasValue) MinBaseExp = MinBaseExp.HasValue ? Math.Min(MinBaseExp.Value, other.MinBaseExp.Value) : other.MinBaseExp;
+        if (other.MaxBaseExp.HasValue) MaxBaseExp = MaxBaseExp.HasValue ? Math.Max(MaxBaseExp.Value, other.MaxBaseExp.Value) : other.MaxBaseExp;
+        ZeroExpSamples += other.ZeroExpSamples;
+        GoldSamples += other.GoldSamples;
+        TotalBaseGold += other.TotalBaseGold;
+        if (other.MinBaseGold.HasValue) MinBaseGold = MinBaseGold.HasValue ? Math.Min(MinBaseGold.Value, other.MinBaseGold.Value) : other.MinBaseGold;
+        if (other.MaxBaseGold.HasValue) MaxBaseGold = MaxBaseGold.HasValue ? Math.Max(MaxBaseGold.Value, other.MaxBaseGold.Value) : other.MaxBaseGold;
+        ZeroGoldSamples += other.ZeroGoldSamples;
+        RepSamples += other.RepSamples;
+        TotalBaseRep += other.TotalBaseRep;
+        FactionIds.UnionWith(other.FactionIds);
+    }
 }
 
 public sealed class CapturedMapItem
@@ -146,8 +280,25 @@ public sealed class CapturedMonster
     /// <summary>Kills recorded while the player's active quest list was known (v2+ collectors only).</summary>
     public long TrackedKills { get; set; }
 
-    /// <summary>Quest ID -> tracked kills of this monster with that quest active (basis for quest-gated drop rates).</summary>
+    /// <summary>
+    /// Legacy (v2 collectors, frozen since v3): quest ID -> tracked kills with that quest active. Summing it over an
+    /// item's quests double-counts kills made with several of them active, so <see cref="DropRates"/> only uses the
+    /// maximum of these legacy counts (a lower bound) on top of <see cref="KillsByActiveQuestSet"/>.
+    /// </summary>
     public Dictionary<int, long> KillsWhileQuestActive { get; set; } = new();
+
+    /// <summary>
+    /// Tracked kills keyed by the exact set of active quest IDs at kill time ("" = none active; ascending IDs joined
+    /// with ","). A quest-gated drop's denominator is the sum over sets containing any of its required quests, so each
+    /// kill counts once.
+    /// </summary>
+    public Dictionary<string, long> KillsByActiveQuestSet { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>XP/gold/reputation per kill (from "addGoldExp" typ "m"), as base values without boosts.</summary>
+    public CapturedKillRewards KillRewards { get; set; } = new();
+
+    /// <summary>Respawn delay across all spawns of this monster (per-spawn values are on the map's spawn entry).</summary>
+    public CapturedRespawnStats Respawn { get; set; } = new();
 
     /// <summary>Last time an official "monsterDrops" list was observed for this monster.</summary>
     public DateTime? OfficialDropsObservedUtc { get; set; }
@@ -273,15 +424,47 @@ public static class DropRates
     public const string QuestActiveKills = "quest_active_kills";
     public const string Unverified = "unverified";
 
+    /// <summary>Key of <see cref="CapturedMonster.KillsByActiveQuestSet"/>: ascending distinct positive IDs joined with ",".</summary>
+    public static string QuestSetKey(IEnumerable<int> questIds) =>
+        string.Join(",", questIds.Where(id => id > 0).Distinct().OrderBy(id => id));
+
+    /// <summary>
+    /// Kills that could have produced a quest-gated drop: v3 kills whose active quest set contains any required quest
+    /// (each kill once) plus, for v2 legacy counts, the largest per-quest count (a lower bound of their union).
+    /// </summary>
+    public static long QuestActiveEligibleKills(CapturedMonster monster, IReadOnlyCollection<int> requiredQuestIds)
+    {
+        if (requiredQuestIds.Count == 0)
+            return 0;
+
+        long eligible = 0;
+        foreach (var (setKey, kills) in monster.KillsByActiveQuestSet)
+        {
+            if (kills <= 0 || setKey.Length == 0)
+                continue;
+            foreach (var part in setKey.Split(','))
+            {
+                if (int.TryParse(part, out var id) && requiredQuestIds.Contains(id))
+                {
+                    eligible += kills;
+                    break;
+                }
+            }
+        }
+
+        long legacy = 0;
+        foreach (var questId in requiredQuestIds)
+            legacy = Math.Max(legacy, monster.KillsWhileQuestActive.GetValueOrDefault(questId));
+        return eligible + legacy;
+    }
+
     public static void Recompute(CapturedMonster monster)
     {
         foreach (var drop in monster.Drops.Values)
         {
             if (drop.QuestGated)
             {
-                long eligible = 0;
-                foreach (var questId in drop.RequiredQuestIds)
-                    eligible += monster.KillsWhileQuestActive.GetValueOrDefault(questId);
+                var eligible = QuestActiveEligibleKills(monster, drop.RequiredQuestIds);
 
                 if (eligible > 0 && drop.TrackedDropEvents > 0)
                 {
