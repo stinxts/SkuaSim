@@ -5,13 +5,13 @@
   "StartDate": "2026-11-21T12:00:00Z",
   "Player": {
     "Username": "SimPlayer",
-    "Level": 50,
-    "Gold": 1000000,
+    "Level": 25,
+    "Gold": 100000,
     "Coins": 10000,
     "IsMember": false,
     "AccessLevel": 0,
     "Guild": "",
-    "Class": "Legion Revenant",
+    "Class": "Dragonslayer",
     "ClassRank": 10,
     "Invulnerable": false,
     "CompleteEquipment": true,
@@ -43,15 +43,7 @@
     "RepBoost": false,
     "ServerBoost": false,
     "AeCalendarServerBoosts": true,
-    "EquipmentBoosts": [
-      {
-        "Slot": "Pet",
-        "ItemName": "Polly Roger",
-        "Meta": "Undead:1.30,Chaos:1.30,Dragonkin:1.30,Human:1.30,Elemental:1.30",
-        "BoostType": "None",
-        "Percent": 0
-      }
-    ]
+    "EquipmentBoosts": []
   },
   "Enhancements": {
     "UnlockedAwe": [

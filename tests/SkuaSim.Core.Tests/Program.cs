@@ -1227,6 +1227,15 @@ internal static class CoreTests
             "Class points must follow 230 + 25 x rank with the AQW level-gap penalty, rounded up");
         Assert(!baseline.SynthesizedData.Any(s => s.Key.StartsWith("classpoints:")), "Class points are a verified rule, never synthesized");
 
+        // Boss mechanic: Escherion takes no damage while the Staff of Inversion lives; a fought monster reports state 2.
+        var staff = new SimMonster { MapID = 2, Name = "Staff of Inversion", Cell = "Boss", MaxHP = 1000, HP = 1000 };
+        var escherion = new SimMonster { MapID = 3, Name = "Escherion", Cell = "Boss", MaxHP = 6000, HP = 6000, Engaged = true };
+        Assert(BossMechanics.ProtectorFor("escherion", escherion, new[] { staff, escherion }) == staff && escherion.State == 2,
+            "Escherion must be protected by a living Staff of Inversion and report state 2 while fought");
+        staff.HP = 0;
+        Assert(BossMechanics.ProtectorFor("escherion", escherion, new[] { staff, escherion }) == null &&
+               BossMechanics.ProtectorFor("otherMap", escherion, new[] { escherion }) == null, "No protection once the staff is dead or on other maps");
+
         // Complete equipment (default): empty Weapon/Helm/Cape slots get basic gear enhanced at the character's level;
         // when disabled only a weapon is ensured (AQW has no weaponless state).
         bool HasGear(SimulationReport r, string name) => r.FinalState.Inventory.Any(i => i.Name == name && i.Equipped);

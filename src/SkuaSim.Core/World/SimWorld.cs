@@ -36,6 +36,12 @@ public sealed class SimMonster
     public long NextAttackMs { get; set; }
     public bool Alive => HP > 0;
 
+    /// <summary>Being fought by the player: reported as AQW monster state 2 (scripts such as CoreBots.KillEscherion check it).</summary>
+    public bool Engaged { get; set; }
+
+    /// <summary>AQW monster state: 0 dead, 1 idle, 2 in combat.</summary>
+    public int State => !Alive ? 0 : Engaged ? 2 : 1;
+
     public Monster ToModel() => new()
     {
         Name = Name,
@@ -45,7 +51,7 @@ public sealed class SimMonster
         MapID = MapID,
         HP = HP,
         MaxHP = MaxHP,
-        State = Alive ? 1 : 0,
+        State = State,
         FileName = FileName
     };
 }
@@ -1217,6 +1223,8 @@ public sealed partial class SimWorld
         }
     }
 
+    private SimMonster? _lastInvulnerableNote;
+
     private bool CombatTick()
     {
         lock (Sync)
@@ -1231,6 +1239,19 @@ public sealed partial class SimWorld
             }
 
             var damage = RollCombatDamageTick(target, out var isCrit);
+            target.Engaged = true;
+            if (BossMechanics.ProtectorFor(MapName, target, Map?.Monsters) is { } protector)
+            {
+                // Boss invulnerable while its protector lives (e.g. Escherion while the Staff of Inversion is alive).
+                damage = 0;
+                if (_lastInvulnerableNote != target)
+                {
+                    _lastInvulnerableNote = target;
+                    Trace.World($"{target.Name} is invulnerable while {protector.Name} (MapID {protector.MapID}) is alive: no damage dealt.");
+                }
+            }
+            else if (_lastInvulnerableNote == target)
+                _lastInvulnerableNote = null;
             PlayerAttacks++;
             if (isCrit)
                 PlayerCrits++;
@@ -1298,6 +1319,7 @@ public sealed partial class SimWorld
     private void OnMonsterDeath(SimMonster monster)
     {
         monster.HP = 0;
+        monster.Engaged = false;
         Kills++;
         KillsByMonster[monster.Name] = KillsByMonster.GetValueOrDefault(monster.Name) + 1;
 
@@ -1317,6 +1339,7 @@ public sealed partial class SimWorld
         {
             lock (Sync)
             {
+                monster.Engaged = false;
                 if (Map == map)
                     monster.HP = monster.MaxHP;
             }
@@ -1548,10 +1571,28 @@ public sealed partial class SimWorld
                 if (drop.QuestGated && drop.RequiredQuestIds.Count > 0 && !drop.RequiredQuestIds.Any(ActiveQuests.Contains))
                     continue;
 
+                // A temporary item a quest requires (QuestData) is quest-only too, even when the collector recorded it as
+                // a normal drop: its all-kills rate is diluted by kills made without the quest (e.g. "Defeated
+                // Escherion": 5 drops in 1,040 kills), so it is gated here and that diluted rate is not used.
+                var inferredGated = false;
+                if (!drop.QuestGated && (drop.Temp || _ctx.Catalog.FindItem(drop.ItemID)?.Temp == true) &&
+                    _ctx.Catalog.QuestsRequiringTempItem(drop.ItemID) is { Count: > 0 } requiringQuests)
+                {
+                    if (!requiringQuests.Any(ActiveQuests.Contains))
+                        continue;
+                    inferredGated = true;
+                }
+
                 double chance;
-                if (drop.EstimatedDropChance is { } observed)
+                if (!inferredGated && drop.EstimatedDropChance is { } observed)
                 {
                     chance = observed;
+                }
+                else if (inferredGated)
+                {
+                    chance = Math.Clamp(Rules.GenericDropChance, 0, 1);
+                    Trace.Synthesize($"droprate:{monster.Name.ToLowerInvariant()}:{drop.ItemID}",
+                        $"'{drop.ItemName}' is a temporary quest item of '{monster.Name}' recorded without its quest: its measured rate is diluted, using an invented {chance:P0} chance while the quest is active.");
                 }
                 else
                 {

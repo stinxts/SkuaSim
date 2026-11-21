@@ -197,6 +197,28 @@ public sealed class GameDataCatalog
 
     private (double, int)? _sellFraction;
 
+    private Dictionary<int, HashSet<int>>? _questsRequiringTempItem;
+
+    /// <summary>
+    /// Quests (QuestData.json) that require <paramref name="itemId"/> as a temporary item. AQW only drops such items while
+    /// one of those quests is active (the same rule the v2 migration uses for "sReqQuests").
+    /// </summary>
+    public IReadOnlySet<int> QuestsRequiringTempItem(int itemId)
+    {
+        if (_questsRequiringTempItem == null)
+        {
+            var map = new Dictionary<int, HashSet<int>>();
+            foreach (var q in Quests.Values)
+                foreach (var r in q.Requirements ?? new List<ItemBase>())
+                    if (r != null && r.Temp && r.ID > 0)
+                        (map.TryGetValue(r.ID, out var set) ? set : map[r.ID] = new HashSet<int>()).Add(q.ID);
+            _questsRequiringTempItem = map;
+        }
+        return _questsRequiringTempItem.TryGetValue(itemId, out var quests) ? quests : EmptyQuestSet;
+    }
+
+    private static readonly HashSet<int> EmptyQuestSet = new();
+
     /// <summary>Faction name by ID from the collected faction catalog (null when unknown).</summary>
     public string? FactionName(int factionId) =>
         factionId > 0 && Captured.Factions != null && Captured.Factions.TryGetValue(factionId, out var f) && !string.IsNullOrWhiteSpace(f.Name)
