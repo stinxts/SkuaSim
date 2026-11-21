@@ -38,7 +38,7 @@ flowchart LR
 5. **Honest Drop Rates:** Captured drops are rolled with their observed rate. Quest-gated items only drop while one of their quests is active. A known drop without a trustworthy measured rate (official list only, or quest-gated but not yet measured with the quest active) uses an invented, Violet-flagged chance — never 0 %, which would make scripts loop forever.
 6. **No-Progress (Stalled) Detector:** If the player's level, XP, gold, items, quests, story progress and reputation stay unchanged for `limits.maxNoProgressMinutes` of virtual time (default `60`, `0` disables), the run stops with outcome **Stalled** and names the API calls the script kept repeating — so infinite loops are caught automatically instead of running until someone clicks Stop. The CLI exits with code `3` (`--max-no-progress-min` overrides the scenario).
 7. **Real Rewards & Timing:** XP comes from quests and kills, class points from kills, gold from quests, kills and selling items, reputation from quests. Boosts add up — the highest gear bonus of the type (gear of the same type never stacks) + consumable +100 % + server +100 % (1000 rep with a server boost = 2000). Class points per kill follow AQW's rule `230 + 25 × class rank`, reduced when the monster is more than 10 levels below the character (-10 % per level, at least 5 %). Kills give the collector's measured base XP/gold (rule `10 × level` XP and `3 × level` gold when unmeasured, flagged), monsters respawn after their measured delay (~2.4 s in AQW today; the median of measured monsters or AQW's official ~4 s as flagged fallbacks), and reputation comes from the observed quest turn-in rewards, with AQW's rank table (rank 10 = 302,500).
-8. **Server Calendar:** A scenario `startDate` sets the virtual date. Daily quests reset at 00:00 US Eastern (server time), weekly quests on Friday and monthly quests on the 1st. Optionally, the server-wide double XP/gold/rep/CP boosts listed in the **AE calendar** (`skuasim calendar-update`, from artix.com/calendar — the same source as VibeSkua's Calendar tool) are applied for the virtual date.
+8. **Server Calendar:** A scenario `startDate` sets the virtual date (or `startAtCurrentTime: true` / "Use PC time" in the editor starts at the PC clock). Daily quests reset at 00:00 US Eastern (server time), weekly quests on Friday and monthly quests on the 1st. Optionally, the server-wide double XP/gold/rep/CP boosts listed in the **AE calendar** (`skuasim calendar-update`, from artix.com/calendar — the same source as VibeSkua's Calendar tool) are applied for the virtual date.
 9. **AQW Stat & Combat Engine (`StatEngine`):** Computes AQW primary/secondary stats (`STR`, `INT`, `END`, `DEX`, `WIS`, `LCK`, `AP`, `SP`, `Crit`, `Crit Multiplier`, `50% Haste cap`, `Dodge/Evasion`), calibrated by captured class skills (`sAct`) and combat telemetry (`ct`), alongside Awe/Forge enhancement procs and AQW's highest-in-category gear boost stacking rules.
 
 ---
@@ -121,15 +121,16 @@ Terminal interface for scripting and automated regression runs: `db-stats`, `com
 | `run` option | Meaning |
 |---|---|
 | `--scenario, -s <file.json>` | Scenario describing the player/world state |
-| `--seed <int>` | Random seed (default `42`) |
+| `--seed <int\|random>` | Seed of the random rolls (drops, quest reward rates, crits, dodges, damage spread); same seed = same run (default `42`; `random` draws a new one, shown in the report — the UI has a **Random** button next to the Seed box) |
 | `--max-virtual-min <min>` | Virtual time limit (scenario default `360`; `0` = unlimited) |
 | `--max-real-sec <sec>` | Wall-clock limit (default `0` = unlimited) |
 | `--max-no-progress-min <min>` | Stop as Stalled after this long without progress (default `60`; `0` = off) |
-| `--start-date <utc>` | Virtual start, e.g. `2026-11-20T19:00:00Z` (default `2026-01-01T12:00Z`) |
+| `--start-date <utc\|now>` | Virtual start, e.g. `2026-11-20T19:00:00Z`, or `now` for the PC clock (default `2026-01-01T12:00Z`); the report prints the resolved start to reproduce a `now` run |
 | `--ae-calendar` | Apply the AE calendar's server boosts for the virtual date |
 | `--calendar <path>` | Calendar file (default `ae_calendar.json` next to `gamedata.json`) |
 | `--report, -o <file.md\|.json>` | Save the execution report |
 | `--trace <file.jsonl>` | Stream the full API trace |
+| `--export-scenario <file.json>` | Save the character at the end of the run as a new scenario, to chain scripts |
 | `--gamedata <path>` | Use another `gamedata.json` |
 
 Exit codes: `0` completed/stopped, `2` compile error or script exception, `3` stalled.

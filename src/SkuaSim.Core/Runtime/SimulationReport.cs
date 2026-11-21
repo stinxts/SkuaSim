@@ -21,6 +21,10 @@ public sealed class SimulationReport
     public required string ScriptPath { get; init; }
     public string? ScenarioName { get; init; }
     public int Seed { get; init; }
+
+    /// <summary>The character at the end of the run as a new scenario ("Export Scenario"); not part of the report JSON.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public Scenarios.Scenario? EndScenario { get; init; }
     public SimulationOutcome Outcome { get; init; }
     public string? StopReason { get; init; }
     public string? ExceptionText { get; init; }
@@ -52,6 +56,9 @@ public sealed class SimulationReport
     /// <summary>Virtual start time (scenario "startDate" or the default 2026-01-01 12:00 UTC).</summary>
     public DateTime StartUtc { get; init; }
 
+    /// <summary>True when <see cref="StartUtc"/> was taken from the PC clock (scenario "startAtCurrentTime").</summary>
+    public bool StartFromPcClock { get; init; }
+
     /// <summary>Daily (and weekly/monthly) server resets crossed during the run (00:00 US Eastern).</summary>
     public int ServerResets { get; init; }
 
@@ -80,6 +87,8 @@ public sealed class SimulationReport
         {
             var startEt = Data.AeCalendar.ToEastern(StartUtc);
             sb.AppendLine($"- **Virtual Start:** `{StartUtc:yyyy-MM-dd HH:mm} UTC` ({startEt:ddd yyyy-MM-dd HH:mm} server time){(ServerResets > 0 ? $", {ServerResets} daily reset(s) crossed" : "")}");
+            if (StartFromPcClock)
+                sb.AppendLine($"  - Taken from the PC clock; reproduce with `--start-date {StartUtc:yyyy-MM-ddTHH:mm:ssZ}` (or `\"startDate\"` in the scenario) and the same seed.");
         }
         if (!string.IsNullOrEmpty(CalendarInfo))
         {

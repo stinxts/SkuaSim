@@ -1,7 +1,6 @@
 {
   "Name": "Shaman rank 1 -> 10 (level 100)",
   "Description": "Validation scenario: a level 100 account ranks up a fresh Shaman with Tools/RankUpEquippedClass.cs (icestormarena). Compare with the real manual rank-up collected on 2026-11-22.",
-  "Seed": 42,
   "Player": {
     "Username": "SimShaman",
     "Level": 100,

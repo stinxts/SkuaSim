@@ -1,7 +1,6 @@
 {
   "name": "Low-Level Player (Level 10)",
   "description": "Simulates a Level 10 non-member starting a leveling farm from battleon.",
-  "seed": 42,
   "player": {
     "username": "NewHero",
     "level": 10,

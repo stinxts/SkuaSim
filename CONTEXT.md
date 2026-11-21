@@ -52,7 +52,7 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
 - **Source Code:** `src/SkuaSim.Collector/` (`SkuaSimCollectorPlugin.cs`, `Parsing/PacketCollectorEngine.cs`, `Diagnostics/PacketSchemaSampler.cs`, `Storage/GameDatabaseStore.cs`, `Models/CapturedDataModels.cs`)
 - **Automated Tests:** `tests/SkuaSim.Collector.Tests/` (**10/10 passing**; suites 7–10 use real anonymized packets and cover sampling privacy and schemas v2/v3)
 - **Live Protocol Hardening:** `ct.sara[].actionResult` parsing (monster hits/dodges + HoT/DoT `"typ": "d"`), VHL self-damage guard, instant `updateClass`/`equipItem` class sync + 350ms debounced refresh, `"stk"` aura stack counts, `"Attack1,Attack2"` auto-attack filtering, legacy noise cleanup, `casterId`/`uid`/`unm` redaction, and cross-session `PacketSchemaSampler` (`packet_schemas.json`, up to 12 distinct shapes per category, Mutex-merged).
-- **Installed Binary Locations** (last deployed 2026-11-20 21:30 with schema v3, hash 7D41017D4B5E; deploy only with all clients closed — the DLL is locked while they run):
+- **Installed Binary Locations** (last deployed 2026-11-22 with schema v3 + account-switch reset, SHA-256 prefix 7EDBD4FBAB2B; deploy only with all clients closed — the DLL is locked while they run):
   - `%APPDATA%\VibeSkua\plugins\SkuaSim.Collector.dll`
   - `%LOCALAPPDATA%\VibeSkua\current\plugins\SkuaSim.Collector.dll`
   - `%APPDATA%\Skua\plugins\SkuaSim.Collector.dll`

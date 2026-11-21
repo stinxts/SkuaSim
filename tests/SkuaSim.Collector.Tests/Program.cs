@@ -1061,6 +1061,23 @@ try
         "Kill CP must also be split by the character level (from the last levelUp / live player state)");
     Assert(wolfKr.CpByRankAndLevelGap.Count == 1 && wolfKr.CpByRankAndLevelGap["4|15"].Samples == 1,
         $"Kill CP must be keyed by class rank (10,000 CP = rank 4) and level gap (30 - 15): {string.Join(",", wolfKr.CpByRankAndLevelGap.Keys)}");
+
+    // (e3) Class swap (CoreBots Solo/Farm/Dodge/Boss) and account switch on the same client.
+    const string wolfMap = """{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","strMapName":"icestormarena","mondef":[{"sRace":"None","strMonName":"Arctic Wolf","intLevel":15,"MonID":3986}],"monmap":[{"MonID":3986,"strFrame":"r6","MonMapID":9}],"monBranch":[{"intHP":1130,"intHPMax":1130,"iLvl":15,"wDPS":17,"MonMapID":9,"MonID":3986}]} } }""";
+    const string wolfKill = """{ "params": { "type": "json", "dataObj": {"bonusCP":0,"intGold":45,"bonusGold":0,"cmd":"addGoldExp","id":9,"typ":"m","intExp":150,"iCP":255} } }""";
+    var swapEng = new PacketCollectorEngine();
+    swapEng.ProcessExtensionPacketJson(wolfMap);
+    swapEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"levelUp","intLevel":30,"intExpToLevel":131150,"xp":12} } }""");
+    swapEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"updateClass","iCP":10000,"sClassCat":"M2","sClassName":"Rogue","uid":1} } }""");
+    swapEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"updateClass","iCP":0,"sClassCat":"C1","sClassName":"Mage","uid":1} } }""");
+    swapEng.ProcessExtensionPacketJson(wolfKill); // the new class (rank 1) earns the CP
+    swapEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"loadInventoryBig"} } }"""); // another account logs in
+    swapEng.ProcessExtensionPacketJson(wolfMap);
+    swapEng.ProcessExtensionPacketJson(wolfKill); // level/rank of the new account not known yet
+    var swapKr = swapEng.TakeDeltaSnapshot().Monsters["id:3986"].KillRewards;
+    Assert(swapKr.CpSamples == 2 && swapKr.CpByRankAndLevelGap.Count == 1 && swapKr.CpByRankAndLevelGap["1|15"].Samples == 1 &&
+           swapKr.CpByPlayerLevel[30].Samples == 1 && swapEng.CharacterContextResets == 1,
+        $"A class swap must switch the rank, and a login must drop the previous account's level/rank: {string.Join(",", swapKr.CpByRankAndLevelGap.Keys)}");
     Assert(PacketCollectorEngine.ClassRankForCp(899) == 1 && PacketCollectorEngine.ClassRankForCp(900) == 2 &&
            PacketCollectorEngine.ClassRankForCp(302_499) == 9 && PacketCollectorEngine.ClassRankForCp(302_500) == 10,
         "Class rank thresholds must follow AQW's table (900 … 302,500)");

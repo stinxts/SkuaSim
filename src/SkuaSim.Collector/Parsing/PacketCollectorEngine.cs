@@ -252,6 +252,11 @@ public sealed partial class PacketCollectorEngine
                 case "levelUp":
                     HandleLevelUpPacket(dataObj);
                     break;
+                case "loadInventoryBig":
+                    // Sent once per login. Its content (the inventory) is never read; only the event matters: a
+                    // character just logged in, so the previous character's level/class/rank must not be reused.
+                    ResetCharacterContextLocked();
+                    break;
                 case "sellItem":
                     HandleSellItemResponse(dataObj);
                     break;

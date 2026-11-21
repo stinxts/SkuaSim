@@ -172,9 +172,14 @@
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Spacing="3">
                                     <TextBlock Text="Virtual Start (UTC, blank = 2026-01-01 12:00)" Classes="MetricLabel" />
-                                    <TextBox Text="{Binding StartDateText}"
-                                             PlaceholderText="e.g. 2026-11-20T19:00:00Z"
-                                             ToolTip.Tip="Virtual start time in UTC. Drives the day of week, AQW's daily reset (00:00 US Eastern; weekly on Friday, monthly on the 1st) and the AE calendar boosts." />
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                        <TextBox Grid.Column="0" Text="{Binding StartDateText}"
+                                                 IsEnabled="{Binding !StartAtCurrentTime}"
+                                                 PlaceholderText="e.g. 2026-11-20T19:00:00Z"
+                                                 ToolTip.Tip="Virtual start time in UTC. Drives the day of week, AQW's daily reset (00:00 US Eastern; weekly on Friday, monthly on the 1st) and the AE calendar boosts." />
+                                        <CheckBox Grid.Column="1" Content="Use PC time" IsChecked="{Binding StartAtCurrentTime}"
+                                                  ToolTip.Tip="Start at the PC's current time (read when the run starts). The report shows the exact start, so the run can be reproduced by typing it here." />
+                                    </Grid>
                                 </StackPanel>
                             </Grid>
 

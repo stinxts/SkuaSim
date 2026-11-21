@@ -163,7 +163,7 @@ internal static class CliEntry
     {
         if (args.Length == 0)
         {
-            Console.Error.WriteLine("Error: missing script path. Usage: skuasim run <script.cs> [--scenario <file.json>] [--seed <int>] [--max-virtual-min <num>] [--max-real-sec <num>] [--max-no-progress-min <num>] [--start-date <utc>] [--ae-calendar] [--report <path.md>] [--trace <path.jsonl>]");
+            Console.Error.WriteLine("Error: missing script path. Usage: skuasim run <script.cs> [--scenario <file.json>] [--seed <int|random>] [--max-virtual-min <num>] [--max-real-sec <num>] [--max-no-progress-min <num>] [--start-date <utc|now>] [--ae-calendar] [--report <path.md>] [--trace <path.jsonl>] [--export-scenario <path.json>]");
             return 1;
         }
 
@@ -172,8 +172,13 @@ internal static class CliEntry
         var scenario = !string.IsNullOrEmpty(scenarioPath) ? Scenario.Load(scenarioPath) : new Scenario();
 
         int? seedOverride = null;
-        if (GetOption(args, "--seed") is { } seedStr && int.TryParse(seedStr, out var parsedSeed))
-            seedOverride = parsedSeed;
+        if (GetOption(args, "--seed") is { } seedStr)
+        {
+            if (string.Equals(seedStr, "random", StringComparison.OrdinalIgnoreCase))
+                seedOverride = SimulationRunner.NewRandomSeed(); // printed in the report as "Seed"
+            else if (int.TryParse(seedStr, out var parsedSeed))
+                seedOverride = parsedSeed;
+        }
 
         if (GetOption(args, "--max-virtual-min") is { } vMinStr &&
             double.TryParse(vMinStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var vMin))
@@ -189,13 +194,19 @@ internal static class CliEntry
 
         if (GetOption(args, "--start-date") is { } startText)
         {
-            if (!DateTime.TryParse(startText, System.Globalization.CultureInfo.InvariantCulture,
+            if (string.Equals(startText, "now", StringComparison.OrdinalIgnoreCase))
+                scenario.StartAtCurrentTime = true;
+            else if (!DateTime.TryParse(startText, System.Globalization.CultureInfo.InvariantCulture,
                     System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var start))
             {
-                Console.Error.WriteLine($"Error: invalid --start-date '{startText}' (use e.g. 2026-11-20T19:00:00Z).");
+                Console.Error.WriteLine($"Error: invalid --start-date '{startText}' (use e.g. 2026-11-20T19:00:00Z or now).");
                 return 1;
             }
-            scenario.StartDate = DateTime.SpecifyKind(start, DateTimeKind.Utc);
+            else
+            {
+                scenario.StartDate = DateTime.SpecifyKind(start, DateTimeKind.Utc);
+                scenario.StartAtCurrentTime = false;
+            }
         }
         if (args.Any(a => string.Equals(a, "--ae-calendar", StringComparison.OrdinalIgnoreCase)))
             scenario.Boosts.AeCalendarServerBoosts = true;
@@ -230,6 +241,21 @@ internal static class CliEntry
             else
                 File.WriteAllText(fullReportPath, markdown);
             Console.WriteLine($"Report saved to: {fullReportPath}");
+        }
+
+        if (GetOption(args, "--export-scenario") is { } exportPath)
+        {
+            if (report.EndScenario == null)
+                Console.Error.WriteLine("No scenario exported: the run did not start (compile error or stopped before execution).");
+            else
+            {
+                var fullExportPath = Path.GetFullPath(exportPath);
+                var exportDir = Path.GetDirectoryName(fullExportPath);
+                if (!string.IsNullOrEmpty(exportDir))
+                    Directory.CreateDirectory(exportDir);
+                File.WriteAllText(fullExportPath, report.EndScenario.ToJson());
+                Console.WriteLine($"End-of-run scenario saved to: {fullExportPath}");
+            }
         }
 
         return report.Outcome switch
@@ -287,17 +313,18 @@ internal static class CliEntry
         Console.WriteLine();
         Console.WriteLine("Run Options:");
         Console.WriteLine("  --scenario, -s <file.json>     Scenario JSON file describing player/world state");
-        Console.WriteLine("  --seed <int>                   Random seed for deterministic simulation (default: 42)");
+        Console.WriteLine("  --seed <int|random>            Seed of the random rolls (drops, crits...); same seed = same run (default: 42; random draws one, shown in the report)");
         Console.WriteLine("  --max-virtual-min <minutes>    Maximum simulated virtual time in minutes (default: 360)");
         Console.WriteLine("  --max-real-sec <seconds>       Maximum wall-clock time in seconds (default: 0 = unlimited)");
         Console.WriteLine("  --max-no-progress-min <min>    Stop as Stalled after this many virtual minutes without player");
         Console.WriteLine("                                 progress (default: 60, 0 = disabled)");
-        Console.WriteLine("  --start-date <utc>             Virtual start time, e.g. 2026-11-20T19:00:00Z (default: 2026-01-01T12:00Z);");
+        Console.WriteLine("  --start-date <utc|now>         Virtual start time, e.g. 2026-11-20T19:00:00Z, or now for the PC clock (default: 2026-01-01T12:00Z);");
         Console.WriteLine("                                 drives day of week and daily/weekly resets (00:00 US Eastern, weekly on Friday)");
         Console.WriteLine("  --ae-calendar                  Apply the AE calendar's server boosts for the virtual date");
         Console.WriteLine("  --calendar <path>              Calendar file (default: data\\ae_calendar.json next to gamedata.json)");
         Console.WriteLine("  --report, -o <file.md|.json>   Save the execution report to disk");
         Console.WriteLine("  --trace <file.jsonl>           Stream full API trace to JSONL file");
+        Console.WriteLine("  --export-scenario <file.json>  Save the character at the end of the run as a new scenario (chain runs)");
         Console.WriteLine();
         Console.WriteLine("Exit codes (run): 0 = completed/stopped, 2 = compile error or script exception, 3 = stalled");
     }

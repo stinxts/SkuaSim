@@ -62,7 +62,7 @@
             </Grid>
 
             <!-- Row 2: Scenario, Seed, Virtual Duration, Speed, and Execution Buttons -->
-            <Grid ColumnDefinitions="Auto,190,*,Auto,Auto,68,Auto,Auto,Auto,126,Auto,Auto,Auto,Auto" ColumnSpacing="6">
+            <Grid ColumnDefinitions="Auto,190,*,Auto,Auto,Auto,Auto,Auto,Auto,126,Auto,Auto,Auto,Auto" ColumnSpacing="6">
                 <TextBlock Grid.Column="0" Text="Scenario:" VerticalAlignment="Center" Classes="MetricLabel" />
                 <ComboBox Grid.Column="1"
                           ItemsSource="{Binding AvailableScenarios}"
@@ -82,7 +82,13 @@
                 <Button Grid.Column="3" Content="Browse..." Command="{Binding BrowseScenarioCommand}" />
 
                 <TextBlock Grid.Column="4" Text="Seed:" VerticalAlignment="Center" Classes="MetricLabel" Margin="4,0,0,0" />
-                <TextBox Grid.Column="5" Text="{Binding SeedText}" HorizontalContentAlignment="Center" VerticalAlignment="Center" />
+                <StackPanel Grid.Column="5" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                    <TextBox Width="96" Text="{Binding SeedText}" PlaceholderText="42"
+                             HorizontalContentAlignment="Center" VerticalAlignment="Center"
+                             ToolTip.Tip="Same seed = the same run. Change it only to try another luck on random rolls (e.g. a 1 % drop)." />
+                    <Button Content="Random" Command="{Binding RandomSeedCommand}" Padding="8,5"
+                            ToolTip.Tip="Put a new random seed in the box (once). It stays until you change it, so the run can be repeated." />
+                </StackPanel>
 
                 <TextBlock Grid.Column="6" Text="Virtual Limit:" VerticalAlignment="Center" Classes="MetricLabel" Margin="4,0,0,0" />
                 <StackPanel Grid.Column="7" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">

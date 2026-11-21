@@ -23,6 +23,21 @@ public sealed class Scenario
     /// </summary>
     public DateTime? StartDate { get; set; }
 
+    /// <summary>
+    /// Start at the PC's current time (read once when the run starts, whole seconds) instead of <see cref="StartDate"/>.
+    /// The resolved start is printed in the report, so the run can be reproduced with that exact <see cref="StartDate"/>.
+    /// </summary>
+    public bool StartAtCurrentTime { get; set; }
+
+    /// <summary>Virtual start for a run that begins now: the PC time when <see cref="StartAtCurrentTime"/>, else the fixed start.</summary>
+    public DateTime ResolveStartUtc()
+    {
+        if (!StartAtCurrentTime)
+            return EffectiveStartUtc;
+        var now = DateTime.UtcNow;
+        return new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+    }
+
     [JsonIgnore]
     public DateTime EffectiveStartUtc => StartDate is { } d
         ? (d.Kind == DateTimeKind.Utc ? d : d.Kind == DateTimeKind.Local ? d.ToUniversalTime() : DateTime.SpecifyKind(d, DateTimeKind.Utc))
@@ -88,6 +103,10 @@ public sealed class PlayerSetup
     /// <summary>Name of the class to equip (added to the inventory if missing).</summary>
     public string? Class { get; set; }
     public int ClassRank { get; set; } = 10;
+    /// <summary>Class points of the equipped class (progress inside its rank; null = the rank's threshold).</summary>
+    public int? ClassPoints { get; set; }
+    /// <summary>XP inside the current level (null = 0).</summary>
+    public int? Xp { get; set; }
     /// <summary>Optional fixed MaxHealth override. Null computes AQW health from Level, Class, END, and Enhancements.</summary>
     public int? MaxHealth { get; set; }
     /// <summary>Optional fixed DPS override. Null computes AQW DPS from Class, Primary/Secondary Stats, Crit, Haste, and Enhancements.</summary>

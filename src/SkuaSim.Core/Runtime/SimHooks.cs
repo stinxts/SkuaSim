@@ -9,10 +9,16 @@ public interface ISimTimeSource
     long ElapsedMilliseconds { get; }
     void Sleep(int milliseconds);
     Task Delay(int milliseconds, CancellationToken cancellationToken);
+    Task StartFlow(Func<Task?> body, CancellationToken cancellationToken);
+    Task<T> StartFlow<T>(Func<Task<T>?> body, CancellationToken cancellationToken);
+    int NextScriptRandomSeed();
+    /// <summary>Lets virtual time pass (in fixed steps) until <paramref name="done"/> or the virtual timeout; false on timeout.</summary>
+    bool PumpUntil(Func<bool> done, long timeoutMs);
 }
 
 /// <summary>
-/// Static hooks that compiled scripts call instead of real-time APIs. The script compiler rewrites
+/// Static hooks that compiled scripts call instead of real-time APIs. The script compiler rewrites Task.Run,
+/// Task.WaitAll/WaitAny, new Random(),
 /// Thread.Sleep, Task.Delay, DateTime.Now/UtcNow/Today, DateTimeOffset.Now/UtcNow, Environment.TickCount(64)
 /// and Stopwatch to these members, so scripts run on the simulator's virtual clock (fast and deterministic).
 /// When no simulation is active, every member falls back to the real system behavior.
@@ -54,6 +60,76 @@ public static class SimHooks
 
     public static Task Delay(TimeSpan delay, CancellationToken cancellationToken) =>
         Delay((int)Math.Clamp(delay.TotalMilliseconds, 0, int.MaxValue), cancellationToken);
+
+    // Task.Run → managed flows (one script thread at a time, in virtual-time order; see SimClock.Flows.cs). Same
+    // overload set as Task.Run so the rewritten call binds to the same shape.
+    public static Task Run(Action action) => Run(action, CancellationToken.None);
+
+    public static Task Run(Action action, CancellationToken cancellationToken) =>
+        _source is { } src
+            ? src.StartFlow(() => { action(); return null; }, cancellationToken)
+            : Task.Run(action, cancellationToken);
+
+    public static Task Run(Func<Task?> function) => Run(function, CancellationToken.None);
+
+    public static Task Run(Func<Task?> function, CancellationToken cancellationToken) =>
+        _source is { } src ? src.StartFlow(function, cancellationToken) : Task.Run(function, cancellationToken);
+
+    public static Task<TResult> Run<TResult>(Func<TResult> function) => Run(function, CancellationToken.None);
+
+    public static Task<TResult> Run<TResult>(Func<TResult> function, CancellationToken cancellationToken) =>
+        _source is { } src
+            ? src.StartFlow<TResult>(() => Task.FromResult(function()), cancellationToken)
+            : Task.Run(function, cancellationToken);
+
+    public static Task<TResult> Run<TResult>(Func<Task<TResult>?> function) => Run(function, CancellationToken.None);
+
+    public static Task<TResult> Run<TResult>(Func<Task<TResult>?> function, CancellationToken cancellationToken) =>
+        _source is { } src ? src.StartFlow(function, cancellationToken) : Task.Run(function, cancellationToken);
+
+    // Task.WaitAll / Task.WaitAny: the waiting thread keeps virtual time (and the other flows) moving instead of
+    // blocking, and the timeout is virtual. Exceptions and return values come from the real API once it is settled.
+    public static void WaitAll(params Task[] tasks) => WaitAll(tasks, Timeout.Infinite, CancellationToken.None);
+
+    public static bool WaitAll(Task[] tasks, int millisecondsTimeout) => WaitAll(tasks, millisecondsTimeout, CancellationToken.None);
+
+    public static bool WaitAll(Task[] tasks, TimeSpan timeout) => WaitAll(tasks, ToTimeoutMs(timeout), CancellationToken.None);
+
+    public static void WaitAll(Task[] tasks, CancellationToken cancellationToken) => WaitAll(tasks, Timeout.Infinite, cancellationToken);
+
+    public static bool WaitAll(Task[] tasks, int millisecondsTimeout, CancellationToken cancellationToken)
+    {
+        if (_source is not { } src)
+            return Task.WaitAll(tasks, millisecondsTimeout, cancellationToken);
+        var settled = src.PumpUntil(() => cancellationToken.IsCancellationRequested || tasks.All(t => t.IsCompleted), TimeoutOrMax(millisecondsTimeout));
+        cancellationToken.ThrowIfCancellationRequested();
+        return settled && Task.WaitAll(tasks, 0, CancellationToken.None);
+    }
+
+    public static int WaitAny(params Task[] tasks) => WaitAny(tasks, Timeout.Infinite, CancellationToken.None);
+
+    public static int WaitAny(Task[] tasks, int millisecondsTimeout) => WaitAny(tasks, millisecondsTimeout, CancellationToken.None);
+
+    public static int WaitAny(Task[] tasks, TimeSpan timeout) => WaitAny(tasks, ToTimeoutMs(timeout), CancellationToken.None);
+
+    public static int WaitAny(Task[] tasks, CancellationToken cancellationToken) => WaitAny(tasks, Timeout.Infinite, cancellationToken);
+
+    public static int WaitAny(Task[] tasks, int millisecondsTimeout, CancellationToken cancellationToken)
+    {
+        if (_source is not { } src)
+            return Task.WaitAny(tasks, millisecondsTimeout, cancellationToken);
+        src.PumpUntil(() => cancellationToken.IsCancellationRequested || tasks.Any(t => t.IsCompleted), TimeoutOrMax(millisecondsTimeout));
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.WaitAny(tasks, 0, CancellationToken.None);
+    }
+
+    private static int ToTimeoutMs(TimeSpan timeout) =>
+        timeout == Timeout.InfiniteTimeSpan ? Timeout.Infinite : (int)Math.Clamp(timeout.TotalMilliseconds, 0, int.MaxValue);
+
+    private static long TimeoutOrMax(int millisecondsTimeout) => millisecondsTimeout < 0 ? long.MaxValue : millisecondsTimeout;
+
+    /// <summary>A script's <c>new Random()</c>: seeded from the run seed (creation order), so it repeats with it.</summary>
+    public static Random NewRandom() => _source is { } src ? new Random(src.NextScriptRandomSeed()) : new Random();
 
     public static DateTime Now => _source?.Now ?? DateTime.Now;
     public static DateTime UtcNow => _source != null ? _source.Now.ToUniversalTime() : DateTime.UtcNow;

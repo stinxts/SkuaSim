@@ -152,7 +152,7 @@ public sealed class SimulationRunner
     public SimulationSession Start(SimulationRunOptions options, SimulationSessionOptions? sessionOptions = null)
     {
         var scriptFullPath = Path.GetFullPath(options.ScriptPath);
-        var seed = options.SeedOverride ?? options.Scenario.Seed ?? 42;
+        var seed = options.SeedOverride ?? options.Scenario.Seed ?? DefaultSeed;
         return new SimulationSession(
             scriptFullPath,
             options.Scenario.Name,
@@ -160,6 +160,19 @@ public sealed class SimulationRunner
             sessionOptions ?? new SimulationSessionOptions(),
             session => ExecuteSession(options, scriptFullPath, seed, session));
     }
+
+    /// <summary>
+    /// Seed used when neither the caller nor the scenario sets one. Fixed on purpose (user decision, 2026-11-22): AQW
+    /// answers within the same patterns, so a run must repeat exactly; the seed only picks which luck the random rolls
+    /// get (drops, quest reward rates, crits/dodges, damage spread). Type another seed to try a different drop luck.
+    /// </summary>
+    public const int DefaultSeed = 42;
+
+    /// <summary>
+    /// A new seed on request (UI "Random" button, CLI <c>--seed random</c>). Drawn before the run, outside the simulation
+    /// logic; the run then uses it like any typed seed and the report shows it, so the result can be repeated.
+    /// </summary>
+    public static int NewRandomSeed() => System.Security.Cryptography.RandomNumberGenerator.GetInt32(1, int.MaxValue);
 
     private SimulationReport ExecuteSession(SimulationRunOptions options, string scriptFullPath, int seed, SimulationSession session)
     {
@@ -203,7 +216,9 @@ public sealed class SimulationRunner
         var questDataPath = options.QuestDataPath ?? _installation.QuestDataFile;
         var catalog = GameDataCatalog.Load(gameDataPath, questDataPath);
 
-        var clock = new SimClock(scenario.EffectiveStartUtc)
+        // The only wall-clock read that can shape a run: the opt-in "start at the PC's current time". It happens once,
+        // before the run, and the resolved start is reported so the run stays reproducible with an explicit startDate.
+        var clock = new SimClock(scenario.ResolveStartUtc())
         {
             MaxVirtualMs = scenario.Limits.MaxVirtualMinutes <= 0
                 ? 0
@@ -212,6 +227,7 @@ public sealed class SimulationRunner
 
         using var trace = new SimulationTrace(options.TraceOutputPath, () => clock.NowMs, ms => clock.Format(ms));
         SimServiceProvider.Attach(trace);
+        trace.Info($"Seed {seed}.");
 
         var ctx = new SimContext(scenario, catalog, clock, trace, seed, _installation.Flavor)
         {
@@ -331,6 +347,9 @@ public sealed class SimulationRunner
 
         // Give the script thread a short grace window to unwind after StopRequested.
         scriptDone.Wait(1500);
+        // The script is over: background tasks still waiting for a turn are cancelled (as when Skua stops a bot),
+        // and cleanup code (ScriptStopping handlers) may start new ones that simply run free.
+        clock.EndFlows();
 
         try
         {
@@ -395,6 +414,7 @@ public sealed class SimulationRunner
             QuestTurnIns = new Dictionary<int, int>(ctx.World.QuestTurnIns),
             InitialState = initialSnapshot,
             FinalState = ctx.World.Snapshot(),
+            EndScenario = ctx.World.ExportScenario(Path.GetFileNameWithoutExtension(scriptFullPath)),
             SynthesizedData = trace.Synthesized.Values.OrderBy(s => s.FirstVirtualMs).ToList(),
             UnimplementedCalls = trace.Unimplemented.ToDictionary(k => k.Key, k => k.Value),
             TopApiCalls = trace.CallCounts.OrderByDescending(kv => kv.Value).Take(25).ToDictionary(k => k.Key, k => k.Value),
@@ -403,6 +423,7 @@ public sealed class SimulationRunner
             RecentTimeline = trace.RecentTimeline.ToList(),
             TraceFilePath = options.TraceOutputPath,
             StartUtc = clock.Epoch,
+            StartFromPcClock = scenario.StartAtCurrentTime,
             ServerResets = ctx.World.ServerResetsApplied,
             CalendarInfo = scenario.Boosts.AeCalendarServerBoosts
                 ? ctx.Calendar is { } cal

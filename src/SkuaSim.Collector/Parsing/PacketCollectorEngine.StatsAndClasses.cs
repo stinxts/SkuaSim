@@ -64,7 +64,13 @@ public sealed partial class PacketCollectorEngine
             if (selfEntityId is > 0)
                 _selfPlayerEntityId = selfEntityId.Value;
             if (!string.IsNullOrWhiteSpace(selfUsername))
-                _selfUsername = selfUsername.Trim();
+            {
+                var user = selfUsername.Trim();
+                // Another account logged in on this client: the level/class/CP still held belong to the previous one.
+                if (!string.IsNullOrEmpty(_selfUsername) && !string.Equals(_selfUsername, user, StringComparison.OrdinalIgnoreCase))
+                    ResetCharacterContextLocked();
+                _selfUsername = user;
+            }
             if (!string.IsNullOrWhiteSpace(className))
             {
                 var trimmed = className.Trim();
@@ -243,7 +249,26 @@ public sealed partial class PacketCollectorEngine
         return rank;
     }
 
-    private int CurrentClassRank() => _currentClassCp >= 0 ? ClassRankForCp(_currentClassCp) : _classRankHint;
+    /// <summary>
+    /// A (re)login on this client: forget the character level, class, class CP and rank hint (RAM only) so kills made
+    /// before the new account's values arrive are not recorded with the previous account's level or rank. Each Skua
+    /// client runs its own collector, so several accounts logged in at once never share this state; only an account
+    /// switch on the same client can leave it stale. Called under <c>_sync</c>.
+    /// </summary>
+    private void ResetCharacterContextLocked()
+    {
+        _currentLevel = 0;
+        _currentClassName = string.Empty;
+        _currentClassCp = -1;
+        _classRankHint = 0;
+        _lastSelfHp = -1;
+        CharacterContextResets++;
+    }
+
+    /// <summary>How many times this session the character context was reset by a (re)login.</summary>
+    public int CharacterContextResets { get; private set; }
+
+    private int CurrentClassRank() =>_currentClassCp >= 0 ? ClassRankForCp(_currentClassCp) : _classRankHint;
 
     internal void HandleEquipItemPacket(JObject dataObj)
     {

@@ -95,6 +95,7 @@ public partial class DiagnosticsViewModel : ViewModelBase
     {
         ExportMarkdownReportCommand.NotifyCanExecuteChanged();
         ExportJsonReportCommand.NotifyCanExecuteChanged();
+        ExportEndScenarioCommand.NotifyCanExecuteChanged();
     }
 
     public void Reset()
@@ -318,6 +319,30 @@ public partial class DiagnosticsViewModel : ViewModelBase
     }
 
     private bool CanExportReport() => HasReport && _lastReport != null;
+
+    private bool CanExportEndScenario() => HasReport && _lastReport?.EndScenario != null;
+
+    /// <summary>Saves the character at the end of the run as a new scenario, to start another script from there.</summary>
+    [RelayCommand(CanExecute = nameof(CanExportEndScenario))]
+    private async Task ExportEndScenarioAsync()
+    {
+        if (_dialogService == null || _lastReport?.EndScenario is not { } endScenario)
+            return;
+
+        var baseName = Path.GetFileNameWithoutExtension(_lastReport.ScriptPath);
+        var path = await _dialogService.PickSaveFileAsync(
+            "Export End-of-Run Scenario",
+            Directory.Exists("scenarios") ? Path.GetFullPath("scenarios") : Directory.GetCurrentDirectory(),
+            $"after_{baseName}.json",
+            "json",
+            new[] { ("Scenario", new[] { "*.json" }), ("All Files", new[] { "*.*" }) });
+
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+
+        await File.WriteAllTextAsync(path, endScenario.ToJson());
+        ExportStatusText = $"Saved scenario {Path.GetFileName(path)}";
+    }
 
     [RelayCommand(CanExecute = nameof(CanExportReport))]
     private async Task ExportMarkdownReportAsync()

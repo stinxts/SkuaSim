@@ -302,6 +302,8 @@
                            IsVisible="{Binding ExportStatusText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
                 <Button Content="Export .md" Command="{Binding ExportMarkdownReportCommand}" />
                 <Button Content="Export .json" Command="{Binding ExportJsonReportCommand}" />
+                <Button Content="Export Scenario" Command="{Binding ExportEndScenarioCommand}"
+                        ToolTip.Tip="Save the character at the end of this run (level, XP, gold, items, enhancements, reputation, quests, location) as a new scenario, to run the next script from there." />
             </StackPanel>
         </Grid>
     </Border>

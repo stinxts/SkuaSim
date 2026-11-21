@@ -137,6 +137,9 @@ public partial class ScenarioEditorViewModel : ViewModelBase
     /// <summary>Virtual start time in UTC ("" = scenario default 2026-01-01 12:00 UTC).</summary>
     [ObservableProperty] public partial string StartDateText { get; set; } = "";
 
+    /// <summary>Start at the PC's current time instead of <see cref="StartDateText"/>.</summary>
+    [ObservableProperty] public partial bool StartAtCurrentTime { get; set; }
+
     // Master & Per-Category checkboxes for Awe & Forge
     [ObservableProperty] public partial bool AllAweSelected { get; set; }
     [ObservableProperty] public partial bool AllForgeSelected { get; set; }
@@ -252,7 +255,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
 
             ScenarioName = scenario.Name ?? "";
             ScenarioDescription = scenario.Description ?? "";
-            SeedText = (scenario.Seed ?? 42).ToString(CultureInfo.InvariantCulture);
+            SeedText = scenario.Seed?.ToString(CultureInfo.InvariantCulture) ?? "";
 
             var p = scenario.Player;
             Username = p.Username ?? "SimPlayer";
@@ -286,6 +289,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
             StartDateText = scenario.StartDate is { } start
                 ? scenario.EffectiveStartUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
                 : "";
+            StartAtCurrentTime = scenario.StartAtCurrentTime;
 
             foreach (var row in EquipmentBoosts)
             {
@@ -330,7 +334,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
 
         clone.Name = string.IsNullOrWhiteSpace(ScenarioName) ? "Custom Scenario" : ScenarioName.Trim();
         clone.Description = ScenarioDescription?.Trim() ?? "";
-        clone.Seed = toolbarSeedOverride ?? ParseIntOr(SeedText, 42);
+        clone.Seed = toolbarSeedOverride ?? (int.TryParse(SeedText?.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var editorSeed) ? editorSeed : null);
 
         clone.Player.Username = string.IsNullOrWhiteSpace(Username) ? "SimPlayer" : Username.Trim();
         clone.Player.Level = Math.Clamp(ParseIntOr(LevelText, 100), 1, 100);
@@ -354,6 +358,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var startUtc)
                 ? DateTime.SpecifyKind(startUtc, DateTimeKind.Utc)
                 : clone.StartDate; // keep the previous value when the text is not a valid date
+        clone.StartAtCurrentTime = StartAtCurrentTime;
 
         clone.Location.Map = string.IsNullOrWhiteSpace(StartMap) ? "battleon" : StartMap.Trim();
         clone.Location.Cell = string.IsNullOrWhiteSpace(StartCell) ? "Enter" : StartCell.Trim();
@@ -418,7 +423,6 @@ public partial class ScenarioEditorViewModel : ViewModelBase
         {
             Name = "Lv 1 Starter Mage",
             Description = "Fresh level 1 non-member account using AQW StatEngine defaults.",
-            Seed = 42,
             Player = new PlayerSetup
             {
                 Username = "StarterMage",
@@ -444,7 +448,6 @@ public partial class ScenarioEditorViewModel : ViewModelBase
         {
             Name = "Lv 100 Endgame Meta",
             Description = "Level 100 character with All Awe + All Forge enhancements and real AQW endgame boost loadout.",
-            Seed = 42,
             Player = new PlayerSetup
             {
                 Username = "EndgameHero",
@@ -781,6 +784,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
     partial void OnAeCalendarServerBoostsChanged(bool value) => MarkDirty();
     partial void OnCompleteEquipmentChanged(bool value) { MarkDirty(); RefreshStatsPreview(); }
     partial void OnStartDateTextChanged(string value) => MarkDirty();
+    partial void OnStartAtCurrentTimeChanged(bool value) => MarkDirty();
 
     partial void OnVirtualDurationUnitChanged(string value)
     {

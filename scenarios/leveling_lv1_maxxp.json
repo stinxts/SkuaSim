@@ -1,7 +1,6 @@
 {
   "Name": "Leveling 1 -> 100 with maximum XP bonus",
   "Description": "Validation scenario: Farm/Leveling.cs from level 1 with a 2x XP boost, a server XP boost and the best XP gear (Empowered Higure +35 % XP). Expected XP multiplier 1 + 1 + 1 + 0.35 = 3.35.",
-  "Seed": 42,
   "Player": {
     "Username": "SimLeveler",
     "Level": 1,

@@ -1,7 +1,6 @@
 {
   "name": "FarmerJoe Starter (Level 1 Mage, Fresh Account)",
   "description": "Simulates a brand-new level 1 non-member account starting 0FarmerJoeDoAll.cs from scratch with Rank 1 Mage, Default Staff, zero quest progress, and zero gold.",
-  "seed": 42,
   "player": {
     "username": "StarterMage",
     "level": 1,

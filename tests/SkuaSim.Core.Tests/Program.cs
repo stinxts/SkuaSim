@@ -48,6 +48,7 @@ internal static class CoreTests
             TestCrossProcessDeterminism(tempDir);
             TestSchemaV2QuestGatedAndUnknownRateDrops(runner, tempDir);
             TestRealDataRewardsRespawnHouseResetsAndCalendar(runner, tempDir);
+            TestBackgroundTaskDeterminism(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -80,7 +81,7 @@ internal static class CoreTests
 
                 // 2. Complete quest #2 (Chieftain's Head) by farming on northmountain cell r2
                 Core.RegisterQuests(2);
-                while (!Bot.ShouldExit && Bot.Quests.Completed.Count < 1 && Bot.Player.Gold < 500100)
+                while (!Bot.ShouldExit && Bot.Quests.Completed.Count < 1 && Bot.Player.Gold < 510000) // safety cap only: the quest watcher (a background flow) turns the quest in
                 {
                     Core.KillMonster("northmountain", "r2", "Left", "*", log: false);
                 }
@@ -132,6 +133,28 @@ internal static class CoreTests
         Assert(report1.FinalState.QuestDetails.Any(q => q.Id == 2 && q.TurnIns >= 1), "Expected Quest #2 turn-in in QuestDetails");
         Assert(report1.FinalState.MapsVisited.Contains("northmountain", StringComparer.OrdinalIgnoreCase), "Expected northmountain in MapsVisited");
         Console.WriteLine($"   OK: Completed in {report1.VirtualDuration} virtual time ({report1.RealDuration.TotalSeconds:F2}s real), Kills={report1.Kills}, QuestsCompleted={report1.QuestsCompleted}");
+
+        // Export Scenario: the end of run 1 becomes the start of a new run (chained scripts).
+        var exported = report1.EndScenario;
+        Assert(exported != null && exported.Seed == scenario.Seed && exported.StartDate == report1.StartUtc + TimeSpan.FromSeconds(Math.Floor(report1.VirtualDuration.TotalSeconds)),
+            "The exported scenario must start at the end of the run (same seed setting)");
+        Assert(exported!.Player.Level == report1.FinalState.Level && exported.Player.Gold == report1.FinalState.Gold &&
+               exported.Player.Class == "ArchPaladin" && exported.Location.Map == report1.FinalState.Map &&
+               exported.Quests.Completed.SequenceEqual(report1.FinalState.CompletedQuests.OrderBy(id => id)),
+            $"The exported scenario must keep level, gold, class, location and completed quests (lv {exported.Player.Level}/{report1.FinalState.Level}, " +
+            $"gold {exported.Player.Gold}/{report1.FinalState.Gold}, class {exported.Player.Class}, map {exported.Location.Map}/{report1.FinalState.Map}, " +
+            $"completed [{string.Join(",", exported.Quests.Completed)}] vs [{string.Join(",", report1.FinalState.CompletedQuests)}])");
+        var reloaded = System.Text.Json.JsonSerializer.Deserialize<Scenario>(exported.ToJson(), Scenario.JsonOptions)!;
+        var idleScript = Path.Combine(tempDir, "IdleBot.cs");
+        File.WriteAllText(idleScript, "using Skua.Core.Interfaces;\npublic class IdleBot { public void ScriptMain(IScriptInterface bot) { bot.Sleep(1000); } }\n");
+        var chained = runner.Run(new SimulationRunOptions { ScriptPath = idleScript, Scenario = reloaded });
+        Assert(chained.Outcome == SimulationOutcome.Completed && chained.Seed == scenario.Seed &&
+               chained.FinalState.Gold == report1.FinalState.Gold && chained.FinalState.Level == report1.FinalState.Level &&
+               chained.FinalState.Inventory.Any(i => i.Name == "Ancient Relic" && i.Quantity == 3) &&
+               chained.FinalState.Inventory.Any(i => i.Name == "Mystic Shard" && i.Quantity >= 5) &&
+               chained.FinalState.CompletedQuests.Count == report1.FinalState.CompletedQuests.Count && chained.FinalState.EquippedClass == "ArchPaladin",
+            $"A run from the exported scenario must start with the same character ({chained.Outcome}: {chained.ExceptionText ?? chained.StopReason})");
+        Console.WriteLine($"   OK: Exported scenario reloaded (Lv {chained.FinalState.Level}, {chained.FinalState.Inventory.Count} items)");
 
         Console.WriteLine("2. Testing virtual clock determinism (same seed => identical outcome)...");
         var report2 = runner.Run(new SimulationRunOptions
@@ -1096,6 +1119,89 @@ internal static class CoreTests
                inactive.SynthesizedData.Any(s => s.Key.StartsWith("droprate:gate beast:990102")),
             "An official drop with no measured rate must use a flagged synthesized chance instead of 0 %");
         Console.WriteLine($"   OK: Gated Fang inactive=0 / active={active.DropsByItem["Gated Fang"]}, Official Pelt synthesized={inactive.DropsByItem["Official Pelt"]}");
+    }
+
+    /// <summary>
+    /// Script background work (Task.Run + await Task.Delay with a token, new Random(), Task.WaitAll — the CoreBots
+    /// registered-quest pattern) runs one thread at a time in virtual-time order, so the same seed repeats the run
+    /// exactly, including the interleaving of main and background log lines.
+    /// </summary>
+    private static void TestBackgroundTaskDeterminism(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("16. Testing background tasks (Task.Run / Task.Delay / Task.WaitAll / new Random) run in a fixed order...");
+        var script = Path.Combine(tempDir, "BackgroundBot.cs");
+        File.WriteAllText(script, """
+        using System;
+        using System.Collections.Generic;
+        using System.Threading;
+        using System.Threading.Tasks;
+        using Skua.Core.Interfaces;
+
+        public class BackgroundBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                var cts = new CancellationTokenSource();
+                var tasks = new List<Task>();
+                for (int w = 0; w < 3; w++)
+                {
+                    int id = w;
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        Random rng = new();
+                        try
+                        {
+                            while (!cts.Token.IsCancellationRequested)
+                            {
+                                bot.Log($"bg{id} t={bot.Player.Gold} r={rng.Next(1000)}");
+                                await Task.Delay(300 + 100 * id, cts.Token);
+                            }
+                        }
+                        catch (OperationCanceledException) { }
+                    }, cts.Token));
+                }
+                for (int i = 0; i < 12; i++)
+                {
+                    bot.Kill.Monster("Boss Guard");
+                    bot.Log($"main kill {i} gold={bot.Player.Gold}");
+                }
+                cts.Cancel();
+                bool stopped = Task.WaitAll(tasks.ToArray(), TimeSpan.FromSeconds(5));
+                bot.Log($"stopped={stopped} r={new Random().Next(1000)}");
+            }
+        }
+        """);
+
+        Scenario MakeScenario() => new()
+        {
+            Name = "Background determinism",
+            Seed = 4242,
+            Player = new PlayerSetup { Username = "Bg", Level = 60, Gold = 1000, Class = "Warrior", MaxHealth = 50_000, DamagePerSecond = 3_000 },
+            Location = new LocationSetup { Map = "bgarena", Cell = "r1", Pad = "Left" },
+            Maps = new Dictionary<string, MapSetup>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["bgarena"] = new MapSetup
+                {
+                    Cells = new List<string> { "Enter", "r1" },
+                    Monsters = new List<MonsterSetup> { new() { Name = "Boss Guard", Cell = "r1", MaxHP = 4_000, Level = 40 } }
+                }
+            },
+            Limits = new LimitsSetup { MaxVirtualMinutes = 30, MaxRealSeconds = 60 }
+        };
+
+        string Fingerprint(SimulationReport r) => string.Join("\n", r.ScriptLogs.Select(l => $"{l.VirtualMs} {l.Text}"));
+        var a = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = MakeScenario() });
+        var b = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = MakeScenario() });
+
+        Assert(a.Outcome == SimulationOutcome.Completed, $"Expected Completed, got {a.Outcome} ({a.ExceptionText ?? a.StopReason})");
+        var logs = a.ScriptLogs.Select(l => l.Text).ToList();
+        Assert(logs.Count(l => l.StartsWith("main kill")) == 12 && logs.Any(l => l.StartsWith("bg0")) && logs.Any(l => l.StartsWith("bg2")),
+            $"Main and background logs expected:\n{string.Join("\n", logs.Take(20))}");
+        Assert(logs.Any(l => l.StartsWith("stopped=True")), "Task.WaitAll must see the cancelled background tasks finish (virtual timeout)");
+        Assert(!a.Warnings.Any(w => w.Text.Contains("outside the simulator")), "No background task may fall back to free-running");
+        Assert(Fingerprint(a) == Fingerprint(b) && a.FinalState.Gold == b.FinalState.Gold && a.VirtualDuration == b.VirtualDuration,
+            $"Same seed must repeat the interleaving exactly:\n--- run 1\n{Fingerprint(a)}\n--- run 2\n{Fingerprint(b)}");
+        Console.WriteLine($"   OK: {logs.Count} log lines identical in 2 runs ({logs.Count(l => l.StartsWith("bg"))} from background tasks), {a.VirtualDuration} virtual");
     }
 
     private static void TestRealDataRewardsRespawnHouseResetsAndCalendar(SimulationRunner runner, string tempDir)

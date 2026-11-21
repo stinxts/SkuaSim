@@ -17,7 +17,9 @@ public sealed class TimeHookRewriter : CSharpSyntaxRewriter
         { "Thread", "System.Threading.Thread", "global::System.Threading.Thread" };
     private static readonly HashSet<string> TaskNames = new(StringComparer.Ordinal)
         { "Task", "System.Threading.Tasks.Task", "global::System.Threading.Tasks.Task" };
-    private static readonly HashSet<string> DateTimeNames = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> RandomNames = new(StringComparer.Ordinal)
+        { "Random", "System.Random", "global::System.Random" };
+    private static readonly HashSet<string> DateTimeNames =new(StringComparer.Ordinal)
         { "DateTime", "System.DateTime", "global::System.DateTime" };
     private static readonly HashSet<string> DateTimeOffsetNames = new(StringComparer.Ordinal)
         { "DateTimeOffset", "System.DateTimeOffset", "global::System.DateTimeOffset" };
@@ -42,7 +44,7 @@ public sealed class TimeHookRewriter : CSharpSyntaxRewriter
         {
             var target = member.Expression.ToString();
             var name = member.Name.Identifier.ValueText;
-            if ((name == "Sleep" && ThreadNames.Contains(target)) || (name == "Delay" && TaskNames.Contains(target)))
+            if ((name == "Sleep" && ThreadNames.Contains(target)) || (name is "Delay" or "Run" or "WaitAll" or "WaitAny" && TaskNames.Contains(target)))
             {
                 RewriteCount++;
                 var newArgs = (ArgumentListSyntax)Visit(node.ArgumentList)!;
@@ -51,6 +53,30 @@ public sealed class TimeHookRewriter : CSharpSyntaxRewriter
             }
         }
         return base.VisitInvocationExpression(node);
+    }
+
+    // "new Random()" → SimHooks.NewRandom() (seeded from the run seed). A seeded "new Random(n)" is left alone.
+    public override SyntaxNode? VisitObjectCreationExpression(ObjectCreationExpressionSyntax node)
+    {
+        if (RandomNames.Contains(node.Type.ToString()) && (node.ArgumentList == null || node.ArgumentList.Arguments.Count == 0) && node.Initializer == null)
+        {
+            RewriteCount++;
+            return SyntaxFactory.ParseExpression($"{Hooks}.NewRandom()").WithTriviaFrom(node);
+        }
+        return base.VisitObjectCreationExpression(node);
+    }
+
+    // "Random rng = new();" (target-typed, as in CoreBots' quest watchdog) and "private Random r = new();".
+    public override SyntaxNode? VisitImplicitObjectCreationExpression(ImplicitObjectCreationExpressionSyntax node)
+    {
+        if (node.ArgumentList.Arguments.Count == 0 && node.Initializer == null &&
+            node.Parent is EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax { Parent: VariableDeclarationSyntax decl } } &&
+            RandomNames.Contains(decl.Type.ToString()))
+        {
+            RewriteCount++;
+            return SyntaxFactory.ParseExpression($"{Hooks}.NewRandom()").WithTriviaFrom(node);
+        }
+        return base.VisitImplicitObjectCreationExpression(node);
     }
 
     public override SyntaxNode? VisitMemberAccessExpression(MemberAccessExpressionSyntax node)

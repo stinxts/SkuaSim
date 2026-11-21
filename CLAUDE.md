@@ -44,14 +44,19 @@ dotnet run --project src\SkuaSim.UI
 
 - **Determinism: same script + scenario + seed ⇒ identical result, also across processes.**
   - All randomness goes through `ctx.Rng` (seeded). Never `new Random()`, `Random.Shared`, `Guid` in sim logic.
+  - The default seed is fixed (`SimulationRunner.DefaultSeed` = 42, user decision): a seed only chooses the luck of the random rolls. Scripts with background threads repeat too (managed flows, see Threading; Core test 16).
   - Never use `string.GetHashCode()` / `HashCode.Combine` for anything that becomes data (IDs, ordering, rolls):
     it is randomized per process. Use `World/StableHash.Of`. Core test 13 checks this in two processes.
   - Never read wall-clock time in sim logic; use `Clock.NowMs`. Limits/watchdogs that affect the outcome must be
     measured in virtual time (wall-clock is only for the real-time limit and the UI).
-- **Threading:** the script's main thread drives virtual time (`SimClock.Advance`). Every `SimWorld` mutation
+- **Threading:** the script's main thread drives virtual time (`SimClock.Advance`). Script background work is
+  rewritten to managed flows (`Task.Run` → `SimHooks.Run`, plus `Task.WaitAll/WaitAny`, `new Random()`;
+  `Runtime/SimClock.Flows.cs`): only one script thread runs at a time, a flow runs when the main thread advances past
+  its wake-up time (order: time, then creation/yield order) and hands the turn back at Sleep/Delay/end. Never let a
+  flow run outside that turn order except through the reported 2 s detach fallback. Every `SimWorld` mutation
   happens under `World.Sync`. The current design assumes one player per run; Phase 4 (multi-client) needs a new
   clock coordinator and per-account RNG — discuss before changing this.
-- **Time & calendar:** the virtual start is `scenario.startDate` (default 2026-01-01 12:00 UTC). AQW server time is US
+- **Time & calendar:** the virtual start is `scenario.startDate` (default 2026-01-01 12:00 UTC), or the PC clock when `startAtCurrentTime` (CLI `--start-date now`) is set — the only wall-clock read allowed to shape a run, done once in `Scenario.ResolveStartUtc` and printed in the report so the run can be reproduced. AQW server time is US
   Eastern (`AeCalendar.ToEastern`): dailies reset at 00:00, weeklies Friday 00:00, monthlies on the 1st. The AE calendar
   (`data\ae_calendar.json`) is only downloaded by `skuasim calendar-update`; simulations read the local file and
   never touch the network.

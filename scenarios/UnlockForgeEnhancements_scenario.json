@@ -1,7 +1,6 @@
 {
   "Name": "Custom Scenario",
   "Description": "",
-  "Seed": 42,
   "Player": {
     "Username": "SimPlayer",
     "Level": 100,

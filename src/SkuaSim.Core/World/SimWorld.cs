@@ -105,7 +105,10 @@ public sealed partial class SimWorld
         MaxHealth = Math.Max(1, p.MaxHealth ?? 370);
         Health = MaxHealth;
         ClassRank = p.ClassRank;
-        LoggedIn = ctx.Scenario.Location.LoggedIn;
+        XP = Math.Max(0, p.Xp ?? 0);
+        if (p.ClassPoints is > 0)
+            ClassPoints = Math.Min(302500, p.ClassPoints.Value);
+        LoggedIn =ctx.Scenario.Location.LoggedIn;
         RecalculateStats();
         Health = MaxHealth;
     }
@@ -2183,7 +2186,10 @@ public sealed partial class SimWorld
                 foreach (var req in item.Requirements ?? new List<ItemBase>())
                     RemoveItem(req.Name, req.ID, Math.Max(1, req.Quantity) * qty, req.Temp, $"merge for {item.Name}");
                 if (item.Coins)
+                {
                     Coins -= (int)totalCost;
+                    _acBoughtAtMs[item.ID] = Now;
+                }
                 else
                     Gold -= totalCost;
                 AddToInventory(_ctx.Catalog.FindItem(item.ID) ?? InfoOf(item), qty, $"bought from shop {shop!.ID}");
@@ -2197,14 +2203,23 @@ public sealed partial class SimWorld
     // Sell-back rule until the server's sellItem response is verified from collector samples.
     private const double SellBackFraction = 0.25;
 
+    // AC items (public AQW rule, confirmed by the user): 90 % of the AC price within 24 h of purchase, 25 % afterwards.
+    private const double AcSellBackFresh = 0.90;
+    private const double AcSellBackOld = 0.25;
+    private const long AcFreshWindowMs = 24L * 60 * 60 * 1000;
+
+    /// <summary>Virtual time of the last AC purchase per item ID (items owned at start count as older than 24 h).</summary>
+    private readonly Dictionary<int, long> _acBoughtAtMs = new();
+
     /// <summary>
-    /// Gold returned when selling: a share of the item's shop price (captured shops / shops loaded this run). Gold
-    /// items only; AC items return nothing until verified. Both are flagged because the rule is not measured yet.
+    /// Currency returned when selling: a share of the item's shop price (captured shops / shops loaded this run). Gold
+    /// items: measured amount, else measured ratio, else 25 %. AC items: 90 % within 24 h of purchase, 25 % afterwards.
     /// </summary>
     private void SellReturn(InventoryItem item, int quantity)
     {
-        // 1. Measured: the server's sellItem amount for this exact item.
-        if (_ctx.Catalog.Captured.SellPrices?.TryGetValue(item.ID, out var measured) == true && measured.Samples > 0)
+        // 1. Measured: the server's sellItem amount for this exact item. Gold items only: an AC amount depends on how long
+        //    ago the item was bought, which the collector does not know, so AC items always use the time rule below.
+        if (_ctx.Catalog.Captured.SellPrices?.TryGetValue(item.ID, out var measured) == true && measured.Samples > 0 && !measured.Coins)
         {
             if (measured.Coins)
                 Coins += measured.Amount;
@@ -2234,7 +2249,13 @@ public sealed partial class SimWorld
 
         if (coins || item.Coins)
         {
-            Trace.Synthesize($"sell:{item.ID}", $"'{item.Name}' is an AC item: the AC sell-back is not modeled, nothing was returned.");
+            var fresh = _acBoughtAtMs.TryGetValue(item.ID, out var boughtAt) && Now - boughtAt < AcFreshWindowMs;
+            var acFraction = fresh ? AcSellBackFresh : AcSellBackOld;
+            var acs = (int)Math.Ceiling(cost * acFraction - 1e-9);
+            Coins += acs;
+            if (Inventory.All(i => i.ID != item.ID))
+                _acBoughtAtMs.Remove(item.ID);
+            Trace.World($"Sold {quantity}x {item.Name} for {acs:N0} ACs ({acFraction:P0} of its {cost:N0} AC price, {(fresh ? "within" : "after")} 24 h of purchase).");
             return;
         }
         // 2. Ratio measured on other gold items (sell amount / shop price; 25 % on 20 items, 2026-11-21), else the 25 % rule.

@@ -68,6 +68,26 @@ public sealed class SimScheduler
         return false;
     }
 
+    /// <summary>Due time of the next non-cancelled event at or before <paramref name="untilMs"/>, without removing it.</summary>
+    public bool TryPeekDue(long untilMs, out long dueMs)
+    {
+        lock (_gate)
+        {
+            while (_queue.TryPeek(out var next, out var priority) && priority.Due <= untilMs)
+            {
+                if (next.Cancelled)
+                {
+                    _queue.Dequeue();
+                    continue;
+                }
+                dueMs = priority.Due;
+                return true;
+            }
+        }
+        dueMs = 0;
+        return false;
+    }
+
     public int Count
     {
         get { lock (_gate) return _queue.Count; }
@@ -77,9 +97,10 @@ public sealed class SimScheduler
 /// <summary>
 /// Virtual clock. The script's main thread drives time: Sleep advances the clock instantly and processes every
 /// world event due in between, so hours of farming run in seconds and the same seed gives the same result.
-/// Background threads created by scripts wait until the main thread's clock reaches their wake-up time.
+/// Background work started by scripts with Task.Run runs as managed flows, one thread at a time, in virtual-time order
+/// (see SimClock.Flows.cs); other background threads wait until the main thread's clock reaches their wake-up time.
 /// </summary>
-public sealed class SimClock : SkuaSim.Runtime.ISimTimeSource
+public sealed partial class SimClock : SkuaSim.Runtime.ISimTimeSource
 {
     private const int PacingSliceMaxMs = 40;
     private const double MinSleepThresholdMs = 12.0;
@@ -243,6 +264,15 @@ public sealed class SimClock : SkuaSim.Runtime.ISimTimeSource
             Sleep(milliseconds);
             return Task.CompletedTask;
         }
+        if (CurrentManagedFlow() is { } flow)
+        {
+            // A managed flow waits in place (handing the turn back), so "await Task.Delay" continues on the same
+            // thread in a fixed order instead of on a random thread-pool thread.
+            if (cancellationToken.IsCancellationRequested)
+                return Task.FromCanceled(cancellationToken);
+            YieldFlow(flow, milliseconds, cancellationToken);
+            return cancellationToken.IsCancellationRequested ? Task.FromCanceled(cancellationToken) : Task.CompletedTask;
+        }
         return Task.Run(() =>
         {
             WaitBackground(milliseconds);
@@ -258,8 +288,30 @@ public sealed class SimClock : SkuaSim.Runtime.ISimTimeSource
         WaitIfPaused();
         var prevNow = NowMs;
         var target = prevNow + Math.Max(0, milliseconds);
-        while (Scheduler.TryDequeueDue(target, out var ev))
+        while (true)
         {
+            // World events and managed background flows run in virtual-time order; at the same instant world events
+            // go first, then flows in creation/yield order. Only one script thread runs at a time.
+            var hasEvent = Scheduler.TryPeekDue(target, out var eventDue);
+            var flow = PeekDueFlow(target);
+            if (flow != null && (!hasEvent || flow.WakeMs < eventDue))
+            {
+                var flowTime = Math.Max(prevNow, flow.WakeMs);
+                if (flowTime > prevNow)
+                {
+                    PauseAwareRealDelay(flowTime - prevNow);
+                    prevNow = flowTime;
+                }
+                WaitIfPaused();
+                Context?.ThrowIfStopping();
+                SetNow(Math.Max(NowMs, flowTime));
+                RunFlowTurn(flow);
+                prevNow = Math.Max(prevNow, NowMs);
+                continue;
+            }
+            if (!hasEvent || !Scheduler.TryDequeueDue(target, out var ev))
+                break;
+
             var eventTime = Math.Max(prevNow, ev!.Due);
             if (eventTime > prevNow)
             {
@@ -309,7 +361,11 @@ public sealed class SimClock : SkuaSim.Runtime.ISimTimeSource
     public void NoteApiCall()
     {
         if (!IsMainThread)
+        {
+            if (CurrentManagedFlow() is { } flow)
+                NoteFlowApiCall(flow);
             return;
+        }
         WaitIfPaused();
         if (++_spinCounter < 500)
             return;
@@ -322,6 +378,17 @@ public sealed class SimClock : SkuaSim.Runtime.ISimTimeSource
     }
 
     public void WaitBackground(long milliseconds)
+    {
+        if (CurrentManagedFlow() is { } flow)
+        {
+            YieldFlow(flow, milliseconds);
+            return;
+        }
+        WaitBackgroundUnmanaged(milliseconds);
+    }
+
+    /// <summary>A thread outside the turn order waits until the main thread's clock reaches its wake-up time.</summary>
+    private void WaitBackgroundUnmanaged(long milliseconds)
     {
         var wake = NowMs + Math.Max(0, milliseconds);
         var realStart = DateTime.UtcNow;

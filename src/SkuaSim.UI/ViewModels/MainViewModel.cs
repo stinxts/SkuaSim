@@ -134,6 +134,11 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial string SeedText { get; set; } = "42";
 
+    /// <summary>Puts a new random seed in the Seed box (UI only, before a run; the run itself stays seeded).</summary>
+    [RelayCommand]
+    private void RandomSeed() =>
+        SeedText = SimulationRunner.NewRandomSeed().ToString(CultureInfo.InvariantCulture);
+
     [ObservableProperty]
     public partial SpeedPreset SelectedSpeed { get; set; }
 
@@ -431,6 +436,7 @@ public partial class MainViewModel : ViewModelBase
         int? seedOverride = int.TryParse(SeedText.Trim(), out var parsedSeed) ? parsedSeed : null;
         var virtualMinutesOverride = GetSelectedVirtualMinutes();
         var scenarioToRun = ScenarioEditor.BuildScenario(seedOverride, virtualMinutesOverride);
+        scenarioToRun.Seed = seedOverride; // the toolbar decides (empty = the default seed 42)
 
         WorkspaceTabIndex = 0;
         ClientState.Reset();
@@ -736,7 +742,7 @@ public partial class MainViewModel : ViewModelBase
         {
             var loaded = _hostService.LoadScenarioFile(path);
             ScenarioEditor.LoadFromScenario(loaded, Path.GetFullPath(path));
-            SeedText = (loaded.Seed ?? 42).ToString();
+            SeedText = (loaded.Seed ?? SimulationRunner.DefaultSeed).ToString(System.Globalization.CultureInfo.InvariantCulture);
             SyncToolbarVirtualDurationFromEditor(loaded.Limits.MaxVirtualMinutes);
         }
         catch (Exception ex)
