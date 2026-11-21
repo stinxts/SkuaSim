@@ -240,7 +240,9 @@ public sealed partial class SimWorld
         return Math.Max(1, (int)Math.Round(isCrit ? variance * critMult : variance));
     }
 
-    private static readonly int[] ClassRankThresholds = { 0, 0, 900, 3600, 9000, 18000, 31500, 50400, 75600, 108000, 302500 };
+    // AQW class rank table = the faction rank table: (5·r·(r+1))² → 900, 3,600, 10,000, 22,500, 44,100, 78,400, 129,600,
+    // 202,500, 302,500 (AQW Wiki; the old table here had 9,000 … 108,000 and made rank 9 → 10 take twice as long).
+    private static readonly int[] ClassRankThresholds = Enumerable.Range(0, 11).Select(r => RepForRank(r)).ToArray();
 
     internal void GainClassPoints(int baseCp)
     {
@@ -320,20 +322,21 @@ public sealed partial class SimWorld
         }
 
         // Apply real AQW boosted items & unlocked Awe/Forge starting loadouts to equipped slots
-        var hasGearBoosts = s.Boosts.EquipmentBoosts.Any(b => !string.IsNullOrEmpty(Scenarios.AqwBoostGearCatalog.ResolveMeta(b)));
         var hasEnhUnlocks = hasAwe || hasForge;
-
-        if (!hasGearBoosts && !hasEnhUnlocks)
-            return;
+        // Complete equipment: empty slots get basic gear enhanced at the character's level (scenario items untouched).
+        var fill = s.Player.CompleteEquipment;
+        var enhanceNew = hasEnhUnlocks || fill;
 
         var className = CurrentClass?.Name ?? s.Player.Class ?? "Warrior";
         var (basePat, weapPat, procId, helmPat, capePat) = StatEngine.PickStartingEnhancementsForClass(className, _ctx.Catalog, s.Enhancements);
         var enhLvl = Math.Clamp(Level, 1, 100);
+        var filled = new List<string>();
 
-        if (CurrentClass != null && hasEnhUnlocks && CurrentClass.EnhancementLevel <= 0)
+        if (CurrentClass != null && enhanceNew && CurrentClass.EnhancementLevel <= 0)
         {
             CurrentClass.EnhancementPatternID = basePat;
             CurrentClass.EnhancementLevel = enhLvl;
+            filled.Add($"class '{CurrentClass.Name}' enhanced");
         }
 
         void EnsureVirtualGearSlot(string slot, string category, int patId, int proc)
@@ -342,9 +345,14 @@ public sealed partial class SimWorld
             var equippedItem = Inventory.FirstOrDefault(i => i.Equipped && EquipGroup(i.CategoryString) == group);
             var slotBoost = s.Boosts.EquipmentBoosts.FirstOrDefault(b => b.Slot.Equals(slot, StringComparison.OrdinalIgnoreCase));
             var boostMeta = slotBoost != null ? Scenarios.AqwBoostGearCatalog.ResolveMeta(slotBoost) : string.Empty;
+            // Pets and cosmetic armors carry no enhancement (the class is the stat "armor" slot), so they are only
+            // created for a boost; a weapon always exists in AQW.
+            var create = !string.IsNullOrEmpty(boostMeta) || ((hasEnhUnlocks || fill) && slot is not ("Pet" or "Armor")) || slot == "Weapon";
 
-            if (equippedItem == null && (hasEnhUnlocks || !string.IsNullOrEmpty(boostMeta)))
+            if (equippedItem == null && create)
             {
+                if (slotBoost == null)
+                    filled.Add(enhanceNew && patId > 0 && slot != "Pet" ? $"{slot} (Lv {enhLvl} enhanced)" : $"{slot} (unenhanced)");
                 var itemName = slotBoost != null
                     ? Scenarios.AqwBoostGearCatalog.ResolveItemName(slotBoost)
                     : $"Simulated {slot}";
@@ -360,13 +368,13 @@ public sealed partial class SimWorld
                     Category = itemCat,
                     ItemGroup = slot == "Weapon" ? "Weapon" : "None",
                     Meta = boostMeta,
-                    EnhancementPatternID = hasEnhUnlocks ? patId : 0,
+                    EnhancementPatternID = enhanceNew ? patId : 0,
                     ProcID = hasEnhUnlocks ? proc : 0,
                     Source = catalogMatch != null ? Data.DataSource.Captured : Data.DataSource.Scenario
                 };
                 equippedItem = NewInventoryItem(info, 1);
-                equippedItem.EnhancementPatternID = hasEnhUnlocks ? patId : 0;
-                equippedItem.EnhancementLevel = hasEnhUnlocks && patId > 0 ? enhLvl : 0;
+                equippedItem.EnhancementPatternID = enhanceNew ? patId : 0;
+                equippedItem.EnhancementLevel = enhanceNew && patId > 0 ? enhLvl : 0;
                 equippedItem.ProcID = hasEnhUnlocks ? proc : 0;
                 equippedItem.Meta = boostMeta;
                 Inventory.Add(equippedItem);
@@ -391,6 +399,10 @@ public sealed partial class SimWorld
         EnsureVirtualGearSlot("Helm", "Helm", helmPat, 0);
         EnsureVirtualGearSlot("Cape", "Cape", capePat, 0);
         EnsureVirtualGearSlot("Pet", "Pet", 0, 0);
+
+        if (filled.Count > 0)
+            Trace.Synthesize("gear:complete", $"Equipment completed for an ordinary equipped player: {string.Join(", ", filled)} " +
+                                              $"(class pattern {basePat}; set player.completeEquipment=false to keep only the scenario's items).");
     }
 
     private void ApplyCombatSustain(int damageDealt)

@@ -199,7 +199,31 @@ public sealed class CapturedKillRewards
     [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
     public double AverageBaseCp => CpSamples > 0 ? Math.Round((double)TotalBaseCp / CpSamples, 1) : 0.0;
 
-    public void AddClassPoints(int totalCp, int bonusCp)
+    /// <summary>
+    /// Base class points per kill split by the killer's character level (a number only, no identity), to test whether
+    /// CP depends on the character level rather than the monster level (observed: same 104-455 range on monsters of
+    /// level 15-255 while an account leveled 11 -> 40).
+    /// </summary>
+    public Dictionary<int, CapturedCpStat> CpByPlayerLevel { get; set; } = new();
+
+    /// <summary>
+    /// Base CP per kill keyed by "class rank|level gap" (gap = character level - monster level), e.g. "4|0" or "9|25".
+    /// AQW: CP = 230 + 25 x class rank, reduced when the monster is far below the character (the exact penalty curve
+    /// is measured here: sources disagree between -5 %/level and -10 %/level from 11 levels).
+    /// </summary>
+    public Dictionary<string, CapturedCpStat> CpByRankAndLevelGap { get; set; } = new(StringComparer.Ordinal);
+
+    public void AddClassPointsContext(int baseCp, int classRank, int levelGap)
+    {
+        if (baseCp <= 0 || classRank <= 0)
+            return;
+        var key = $"{classRank}|{levelGap}";
+        if (!CpByRankAndLevelGap.TryGetValue(key, out var stat))
+            CpByRankAndLevelGap[key] = stat = new CapturedCpStat();
+        stat.Add(baseCp);
+    }
+
+    public void AddClassPoints(int totalCp, int bonusCp, int playerLevel = 0)
     {
         if (totalCp <= 0)
             return;
@@ -208,6 +232,12 @@ public sealed class CapturedKillRewards
         TotalBaseCp += cp;
         MinBaseCp = MinBaseCp.HasValue ? Math.Min(MinBaseCp.Value, cp) : cp;
         MaxBaseCp = MaxBaseCp.HasValue ? Math.Max(MaxBaseCp.Value, cp) : cp;
+        if (playerLevel > 0)
+        {
+            if (!CpByPlayerLevel.TryGetValue(playerLevel, out var stat))
+                CpByPlayerLevel[playerLevel] = stat = new CapturedCpStat();
+            stat.Add(cp);
+        }
     }
 
     [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
@@ -275,6 +305,49 @@ public sealed class CapturedKillRewards
         TotalBaseCp += other.TotalBaseCp;
         if (other.MinBaseCp.HasValue) MinBaseCp = MinBaseCp.HasValue ? Math.Min(MinBaseCp.Value, other.MinBaseCp.Value) : other.MinBaseCp;
         if (other.MaxBaseCp.HasValue) MaxBaseCp = MaxBaseCp.HasValue ? Math.Max(MaxBaseCp.Value, other.MaxBaseCp.Value) : other.MaxBaseCp;
+        CpByPlayerLevel ??= new();
+        foreach (var (level, stat) in other.CpByPlayerLevel ?? new())
+        {
+            if (!CpByPlayerLevel.TryGetValue(level, out var dst))
+                CpByPlayerLevel[level] = dst = new CapturedCpStat();
+            dst.Merge(stat);
+        }
+        CpByRankAndLevelGap ??= new(StringComparer.Ordinal);
+        foreach (var (key, stat) in other.CpByRankAndLevelGap ?? new())
+        {
+            if (!CpByRankAndLevelGap.TryGetValue(key, out var dst))
+                CpByRankAndLevelGap[key] = dst = new CapturedCpStat();
+            dst.Merge(stat);
+        }
+    }
+}
+
+public sealed class CapturedCpStat
+{
+    public long Samples { get; set; }
+    public long Total { get; set; }
+    public int? Min { get; set; }
+    public int? Max { get; set; }
+
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double Average => Samples > 0 ? Math.Round((double)Total / Samples, 1) : 0.0;
+
+    public void Add(int cp)
+    {
+        Samples++;
+        Total += cp;
+        Min = Min.HasValue ? Math.Min(Min.Value, cp) : cp;
+        Max = Max.HasValue ? Math.Max(Max.Value, cp) : cp;
+    }
+
+    public void Merge(CapturedCpStat? other)
+    {
+        if (other == null || other.Samples <= 0)
+            return;
+        Samples += other.Samples;
+        Total += other.Total;
+        if (other.Min.HasValue) Min = Min.HasValue ? Math.Min(Min.Value, other.Min.Value) : other.Min;
+        if (other.Max.HasValue) Max = Max.HasValue ? Math.Max(Max.Value, other.Max.Value) : other.Max;
     }
 }
 

@@ -1,0 +1,84 @@
+{
+  "Name": "Custom Scenario",
+  "Description": "",
+  "Seed": 42,
+  "StartDate": "2026-11-21T12:00:00Z",
+  "Player": {
+    "Username": "SimPlayer",
+    "Level": 50,
+    "Gold": 1000000,
+    "Coins": 10000,
+    "IsMember": false,
+    "AccessLevel": 0,
+    "Guild": "",
+    "Class": "Legion Revenant",
+    "ClassRank": 10,
+    "Invulnerable": false,
+    "CompleteEquipment": true,
+    "InventorySlots": 200,
+    "BankSlots": 600,
+    "HouseSlots": 100
+  },
+  "Location": {
+    "Map": "battleon",
+    "Cell": "Enter",
+    "Pad": "Spawn",
+    "LoggedIn": true
+  },
+  "Inventory": [],
+  "Bank": [],
+  "TempInventory": [],
+  "House": [],
+  "Quests": {
+    "Completed": [],
+    "Active": [],
+    "DailiesCompleted": [],
+    "SlotProgress": {}
+  },
+  "Factions": [],
+  "Boosts": {
+    "XpBoost": false,
+    "ClassPointsBoost": false,
+    "GoldBoost": false,
+    "RepBoost": false,
+    "ServerBoost": false,
+    "AeCalendarServerBoosts": true,
+    "EquipmentBoosts": [
+      {
+        "Slot": "Pet",
+        "ItemName": "Polly Roger",
+        "Meta": "Undead:1.30,Chaos:1.30,Dragonkin:1.30,Human:1.30,Elemental:1.30",
+        "BoostType": "None",
+        "Percent": 0
+      }
+    ]
+  },
+  "Enhancements": {
+    "UnlockedAwe": [
+      "Spiral Carve",
+      "Awe Blast",
+      "Health Vamp",
+      "Mana Vamp",
+      "Powerword Die"
+    ],
+    "UnlockedForge": []
+  },
+  "Options": {},
+  "BotOptions": {},
+  "Maps": {},
+  "World": {
+    "GenericDropChance": 0.5,
+    "SynthesizeDrops": true,
+    "PlayerRespawnSeconds": 11,
+    "JoinDelayMs": 1500,
+    "LenientShops": true,
+    "MessageBoxAnswer": "no",
+    "GenericMonsterHpPerLevel": 400
+  },
+  "Limits": {
+    "MaxVirtualMinutes": 0,
+    "MaxRealSeconds": 0,
+    "StallRealSeconds": 20,
+    "MaxNoProgressMinutes": 60
+  }
+}

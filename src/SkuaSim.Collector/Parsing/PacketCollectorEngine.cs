@@ -67,6 +67,7 @@ public sealed partial class PacketCollectorEngine
         public string Cell { get; set; } = string.Empty;
         public int CurrentHP { get; set; }
         public int MaxHP { get; set; }
+        public int Level { get; set; }
         public DateTime LastAttackUtc { get; set; } = DateTime.MinValue;
         public DateTime LastDeathCountedUtc { get; set; } = DateTime.MinValue;
 
@@ -1325,6 +1326,8 @@ public sealed partial class PacketCollectorEngine
     {
         var level = ParseInt(dataObj["intLevel"]);
         var toNext = ParseInt(dataObj["intExpToLevel"]);
+        if (level is > 0 and <= 100)
+            _currentLevel = level; // keep the per-level CP split exact right after a level-up
         if (level > 0 && toNext > 0)
             _delta.XpToNextLevel[level] = toNext;
     }
@@ -1393,6 +1396,7 @@ public sealed partial class PacketCollectorEngine
             if (!string.IsNullOrWhiteSpace(name)) active.Name = name;
             if (!string.IsNullOrWhiteSpace(cell)) active.Cell = cell;
             if (maxHp > 0) active.MaxHP = maxHp;
+            if (level > 0) active.Level = level;
             active.CurrentHP = currentHp > 0 ? currentHp : maxHp;
         }
 
@@ -1570,7 +1574,18 @@ public sealed partial class PacketCollectorEngine
             ParseInt(dataObj["iRep"]), ParseInt(dataObj["bonusRep"]),
             ParseInt(dataObj["FactionID"]));
         // Verified 2026-11-21: { ..., "iCP": 305, "bonusCP": 0 } on kills while the class is below rank 10.
-        mon.KillRewards.AddClassPoints(ParseInt(dataObj["iCP"]), ParseInt(dataObj["bonusCP"]));
+        var totalCp = ParseInt(dataObj["iCP"]);
+        var bonusCp = ParseInt(dataObj["bonusCP"]);
+        mon.KillRewards.AddClassPoints(totalCp, bonusCp, _currentLevel);
+        if (totalCp > 0)
+        {
+            var rank = CurrentClassRank();
+            var monsterLevel = active.Level > 0 ? active.Level : mon.Level;
+            if (rank > 0 && _currentLevel > 0 && monsterLevel > 0)
+                mon.KillRewards.AddClassPointsContext(Math.Max(0, totalCp - Math.Max(0, bonusCp)), rank, _currentLevel - monsterLevel);
+            if (_currentClassCp >= 0)
+                _currentClassCp += totalCp; // the class keeps earning: rank may go up mid-session
+        }
         SessionKillRewardSamples++;
     }
 

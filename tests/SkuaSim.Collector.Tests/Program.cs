@@ -1047,6 +1047,8 @@ try
     // (real sellItem response; the client request carries the item ID, CharItemID/iQtyNow are never stored).
     var cpEng = new PacketCollectorEngine();
     cpEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","strMapName":"icestormarena","mondef":[{"sRace":"None","strMonName":"Arctic Wolf","intLevel":15,"MonID":3986}],"monmap":[{"MonID":3986,"strFrame":"r6","MonMapID":9}],"monBranch":[{"intHP":1130,"intHPMax":1130,"iLvl":15,"wDPS":17,"MonMapID":9,"MonID":3986}]} } }""");
+    cpEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"levelUp","intLevel":30,"intExpToLevel":131150,"xp":12} } }""");
+    cpEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"updateClass","iCP":10000,"sClassCat":"M2","sClassName":"Rogue","uid":1} } }""");
     cpEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"bonusCP":0,"intGold":90,"bonusGold":45,"cmd":"addGoldExp","id":9,"typ":"m","intExp":150,"iCP":305} } }""");
     cpEng.ProcessClientPacket("%xt%zm%sellItem%1%12345%1%987654%");
     cpEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"bCoins":false,"cmd":"sellItem","intAmount":188,"iQty":1,"iQtyNow":0,"CharItemID":987654} } }""");
@@ -1055,6 +1057,17 @@ try
     var wolfKr = cpDelta.Monsters["id:3986"].KillRewards;
     Assert(wolfKr.CpSamples == 1 && wolfKr.TotalBaseCp == 305 && wolfKr.TotalBaseExp == 150 && wolfKr.TotalBaseGold == 45,
         $"Kill CP must be recorded from iCP - bonusCP (cp={wolfKr.TotalBaseCp}, xp={wolfKr.TotalBaseExp}, gold={wolfKr.TotalBaseGold})");
+    Assert(wolfKr.CpByPlayerLevel.Count == 1 && wolfKr.CpByPlayerLevel[30].Samples == 1 && wolfKr.CpByPlayerLevel[30].Average == 305,
+        "Kill CP must also be split by the character level (from the last levelUp / live player state)");
+    Assert(wolfKr.CpByRankAndLevelGap.Count == 1 && wolfKr.CpByRankAndLevelGap["4|15"].Samples == 1,
+        $"Kill CP must be keyed by class rank (10,000 CP = rank 4) and level gap (30 - 15): {string.Join(",", wolfKr.CpByRankAndLevelGap.Keys)}");
+    Assert(PacketCollectorEngine.ClassRankForCp(899) == 1 && PacketCollectorEngine.ClassRankForCp(900) == 2 &&
+           PacketCollectorEngine.ClassRankForCp(302_499) == 9 && PacketCollectorEngine.ClassRankForCp(302_500) == 10,
+        "Class rank thresholds must follow AQW's table (900 … 302,500)");
+    var cpMerged = new CapturedKillRewards();
+    cpMerged.Merge(wolfKr);
+    cpMerged.Merge(wolfKr);
+    Assert(cpMerged.CpByPlayerLevel[30].Samples == 2 && cpMerged.CpByPlayerLevel[30].Max == 305, "Per-level CP must merge");
     Assert(cpDelta.SellPrices.Count == 1 && cpDelta.SellPrices[12345].Amount == 188 && !cpDelta.SellPrices[12345].Coins &&
            !Newtonsoft.Json.JsonConvert.SerializeObject(cpDelta.SellPrices).Contains("987654"),
         "A sale must be paired with its request's item ID, without storing CharItemID");

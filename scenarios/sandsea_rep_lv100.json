@@ -1,0 +1,18 @@
+{
+  "Name": "Sandsea reputation rank 1 -> 10 (level 100)",
+  "Description": "Validation scenario for Farm/REP/SandseaREP.cs: one map (sandsea, cell Enter), Bupers Camel + Cactus Creeper, quests 916/917/919/921/922 (1,000 Sandsea rep each). No reputation boost. Compare kills, turn-ins and time with a real run.",
+  "Seed": 42,
+  "Player": {
+    "Username": "SimSandsea",
+    "Level": 100,
+    "Gold": 1000000,
+    "IsMember": true,
+    "Class": "Void Highlord",
+    "ClassRank": 10
+  },
+  "Location": { "Map": "battleon", "Cell": "Enter", "Pad": "Spawn" },
+  "Inventory": [
+    { "Name": "Void Highlord", "Category": "Class", "Equipped": true, "EnhancementPatternID": 9, "EnhancementLevel": 100 }
+  ],
+  "Limits": { "MaxVirtualMinutes": 720, "MaxNoProgressMinutes": 60 }
+}

@@ -105,6 +105,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
     [ObservableProperty] public partial string GoldText { get; set; } = "1000000";
     [ObservableProperty] public partial string CoinsText { get; set; } = "0";
     [ObservableProperty] public partial bool IsMember { get; set; } = true;
+    [ObservableProperty] public partial bool CompleteEquipment { get; set; } = true;
     [ObservableProperty] public partial string InventorySlotsText { get; set; } = "200";
     [ObservableProperty] public partial string BankSlotsText { get; set; } = "600";
 
@@ -262,6 +263,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
             GoldText = p.Gold.ToString(CultureInfo.InvariantCulture);
             CoinsText = p.Coins.ToString(CultureInfo.InvariantCulture);
             IsMember = p.IsMember;
+            CompleteEquipment = p.CompleteEquipment;
             InventorySlotsText = p.InventorySlots.ToString(CultureInfo.InvariantCulture);
             BankSlotsText = p.BankSlots.ToString(CultureInfo.InvariantCulture);
 
@@ -337,6 +339,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
         clone.Player.Gold = Math.Max(0, ParseLongOr(GoldText, 1_000_000));
         clone.Player.Coins = Math.Max(0, ParseIntOr(CoinsText, 0));
         clone.Player.IsMember = IsMember;
+        clone.Player.CompleteEquipment = CompleteEquipment;
         clone.Player.Invulnerable = false;
         clone.Player.InventorySlots = Math.Max(10, ParseIntOr(InventorySlotsText, 200));
         clone.Player.BankSlots = Math.Max(10, ParseIntOr(BankSlotsText, 600));
@@ -776,6 +779,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
     partial void OnRepBoostChanged(bool value) { MarkDirty(); RefreshStatsPreview(); }
     partial void OnServerBoostChanged(bool value) { MarkDirty(); RefreshStatsPreview(); }
     partial void OnAeCalendarServerBoostsChanged(bool value) => MarkDirty();
+    partial void OnCompleteEquipmentChanged(bool value) { MarkDirty(); RefreshStatsPreview(); }
     partial void OnStartDateTextChanged(string value) => MarkDirty();
 
     partial void OnVirtualDurationUnitChanged(string value)

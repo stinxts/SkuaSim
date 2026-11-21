@@ -95,6 +95,13 @@ public sealed class PlayerSetup
     /// <summary>Optional fixed HP%/s regen override. Null uses class heal skills, weapon lifesteal, and out-of-combat regen.</summary>
     public double? RegenPercentPerSecond { get; set; }
     public bool Invulnerable { get; set; }
+
+    /// <summary>
+    /// Fill empty Weapon / Helm / Cape slots (and an unenhanced class) with basic items enhanced at the character's
+    /// level using the class-appropriate pattern, like an ordinary equipped player (default true). Items listed in
+    /// the scenario are never changed. A weapon is always equipped, even when false (AQW has no weaponless state).
+    /// </summary>
+    public bool CompleteEquipment { get; set; } = true;
     public int InventorySlots { get; set; } = 200;
     public int BankSlots { get; set; } = 600;
     public int HouseSlots { get; set; } = 100;

@@ -1,0 +1,18 @@
+{
+  "Name": "Shaman rank 1 -> 10 (level 100)",
+  "Description": "Validation scenario: a level 100 account ranks up a fresh Shaman with Tools/RankUpEquippedClass.cs (icestormarena). Compare with the real manual rank-up collected on 2026-11-22.",
+  "Seed": 42,
+  "Player": {
+    "Username": "SimShaman",
+    "Level": 100,
+    "Gold": 1000000,
+    "IsMember": true,
+    "Class": "Shaman",
+    "ClassRank": 1
+  },
+  "Location": { "Map": "battleon", "Cell": "Enter", "Pad": "Spawn" },
+  "Inventory": [
+    { "Name": "Shaman", "Category": "Class", "Equipped": true, "EnhancementPatternID": 7, "EnhancementLevel": 100 }
+  ],
+  "Limits": { "MaxVirtualMinutes": 720, "MaxNoProgressMinutes": 60 }
+}

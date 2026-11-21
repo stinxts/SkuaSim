@@ -205,12 +205,45 @@ public sealed partial class PacketCollectorEngine
             {
                 _currentClassName = trimmed;
                 _lastSelfHp = -1;
+                _currentClassCp = -1; // another class: its CP total comes with this packet
             }
             _classSyncPending = false;
         }
 
+        // "iCP" is the class's total class points (verified samples: Rogue 195,441; Void Highlord 302,500 = rank 10).
+        var classCp = ParseInt(dataObj["iCP"], -1);
+        if (classCp >= 0)
+            _currentClassCp = classCp;
+
         SchemaSampler.TryCapture("updateClass_sample", "updateClass", dataObj, _selfPlayerEntityId, _selfUsername, _currentMapName);
     }
+
+    // Total CP of the equipped class (RAM only; -1 = unknown) and a rank hint from the client (Skua CurrentClassRank).
+    private int _currentClassCp = -1;
+    private int _classRankHint;
+
+    /// <summary>Class rank from the client (used only until a class CP total is known from "updateClass").</summary>
+    public void SetClassRankHint(int rank)
+    {
+        lock (_sync)
+            _classRankHint = rank is >= 1 and <= 10 ? rank : 0;
+    }
+
+    /// <summary>AQW class rank for a CP total: rank r needs (5·r·(r+1))² CP (900, 3,600 … 302,500 at rank 10).</summary>
+    public static int ClassRankForCp(int classCp)
+    {
+        var rank = 1;
+        while (rank < 10)
+        {
+            var root = 5 * (rank + 1) * (rank + 2);
+            if (classCp < root * root)
+                break;
+            rank++;
+        }
+        return rank;
+    }
+
+    private int CurrentClassRank() => _currentClassCp >= 0 ? ClassRankForCp(_currentClassCp) : _classRankHint;
 
     internal void HandleEquipItemPacket(JObject dataObj)
     {

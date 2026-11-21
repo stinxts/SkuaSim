@@ -246,12 +246,16 @@ public sealed class ReputationApi : ApiBase
         get { lock (World.Sync) return World.Factions.ToList(); }
     }
 
+    // A faction the character has no reputation with yet is rank 1, as in AQW (the simulator now grants reputation from
+    // quests, so the old "unknown = rank 10" shortcut would make reputation farms exit immediately).
     public int GetRank(string name)
     {
         lock (World.Sync)
         {
             var f = World.Factions.FirstOrDefault(x => SimWorld.Eq(x.Name, name));
-            return f?.Rank ?? 10;
+            if (f == null)
+                NoteUnknownFaction(name);
+            return f?.Rank ?? 1;
         }
     }
 
@@ -260,9 +264,15 @@ public sealed class ReputationApi : ApiBase
         lock (World.Sync)
         {
             var f = World.Factions.FirstOrDefault(x => x.ID == id);
-            return f?.Rank ?? 10;
+            if (f == null)
+                NoteUnknownFaction($"#{id}");
+            return f?.Rank ?? 1;
         }
     }
+
+    private void NoteUnknownFaction(string name) =>
+        Ctx.Trace.Synthesize($"factionrank:{name.ToLowerInvariant()}",
+            $"Faction '{name}' is not in the scenario: treated as rank 1 (no reputation yet). Add it to the scenario's \"factions\" if the character already has rank there.");
 
     public bool HasRank(string name, int rank) => GetRank(name) >= rank;
     public bool HasRank(int id, int rank) => GetRank(id) >= rank;

@@ -727,6 +727,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
             var className = currentClass?.Name;
             var username = bot.Player.Username;
             var level = bot.Player.Level;
+            try { _engine.SetClassRankHint(bot.Player.CurrentClassRank); } catch { /* not available during transitions */ }
             var maxHp = bot.Player.MaxHealth;
             var stats = bot.Player.Stats;
             var skills = bot.Player.Skills;

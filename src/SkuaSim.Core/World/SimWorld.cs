@@ -1349,15 +1349,16 @@ public sealed partial class SimWorld
     }
 
     /// <summary>
-    /// XP needed to reach the next level: AQW's real table captured from "levelUp" (intExpToLevel) when known, else the
-    /// legacy estimate (flagged once).
+    /// XP needed to reach the next level: the value captured from "levelUp" (intExpToLevel), else AQW's table
+    /// (<see cref="AqwXpTable"/>, AQW Wiki, identical to every captured level).
     /// </summary>
     public int XpToNextLevel(int level)
     {
         var lvl = Math.Clamp(level, 1, MaxLevel);
         if (_ctx.Catalog.Captured.XpToNextLevel is { } table && table.TryGetValue(lvl, out var real) && real > 0)
             return real;
-        Trace.Synthesize("xptable", "The XP needed per level is not fully captured yet (collector \"levelUp\"): missing levels use an estimate.");
+        if (AqwXpTable.XpToNext(lvl) is > 0 and var wiki)
+            return wiki;
         return RequiredXpForLevel(lvl);
     }
 
@@ -1425,19 +1426,29 @@ public sealed partial class SimWorld
     }
 
     /// <summary>
-    /// Base class points per kill: the collector's measured average ("addGoldExp" iCP - bonusCP, verified 2026-11-21:
-    /// Arctic Wolf lv 15 = 305 CP), else the legacy estimate, flagged.
+    /// Base class points per kill: 230 + 25 x class rank (0 at rank 10), times the level-gap ratio
+    /// (<see cref="ClassPointsGapRatio"/>), rounded up. Both parts verified against collected kills.
     /// </summary>
     private int KillClassPointsBase(SimMonster monster)
     {
-        var sameMonster = !(monster.Setup?.Level is { } setupLevel && monster.Data != null && monster.Data.Level > 0 && setupLevel != monster.Data.Level);
-        if (sameMonster && monster.Data?.KillRewards is { CpSamples: > 0 } kr)
-            return (int)Math.Round(kr.AverageBaseCp);
-
-        var level = monster.Level > 0 ? monster.Level : Math.Max(1, Level);
-        Trace.Synthesize($"classpoints:{monster.Name.ToLowerInvariant()}", $"Monster '{monster.Name}' has no measured class points per kill: using the estimate max(10, (25 x level + 25) / 2).");
-        return Math.Max(10, (level * 25 + 25) / 2);
+        // AQW rule (AQW Wiki "Experience, Class Points & Reputation"; matches the collected 255-455 values of ranks 1-9):
+        // CP per kill = 230 + 25 x class rank, reduced when the monster is below the character's level.
+        if (ClassRank >= 10)
+            return 0;
+        var fullCp = 230 + 25 * Math.Max(1, ClassRank);
+        var monsterLevel = monster.Level > 0 ? monster.Level : Level;
+        var gap = Level - monsterLevel;
+        return (int)Math.Ceiling(fullCp * ClassPointsGapRatio(gap) - 1e-9);
     }
+
+    /// <summary>
+    /// Share of the full class points for a monster <paramref name="gap"/> levels below the character: 100 % up to 10
+    /// levels, -10 % per level from 11, at least 5 % (-95 % cap). Verified 2026-11-22 on a Shaman rank 1 -> 10 run in
+    /// icestormarena: gap 5/10 = 100 %, 15 = 50 %, 20-95 = 5 %; results are rounded up (305 x 50 % = 153, 305 x 5 % = 16).
+    /// This is the AQW Wiki rule; the 2018 design note's -5 %/level (zero at 20) does not match the data.
+    /// </summary>
+    public static double ClassPointsGapRatio(int gap) =>
+        gap <= 10 ? 1.0 : Math.Max(0.05, 1.0 - 0.1 * (gap - 10));
 
     /// <summary>
     /// Respawn delay: scenario "world.monsterRespawnSeconds" (when set) > this spawn's measured average > the
@@ -1951,7 +1962,7 @@ public sealed partial class SimWorld
                     GainClassPoints(observed.ClassPoints);
             }
             else if (_ctx.Catalog.FindQuest(id) != null)
-                Trace.Synthesize($"questrep:{id}", $"Quest {id} ({q.Name}) was never turned in while collecting: its reputation/class-point reward is unknown and none is given.");
+                Trace.Synthesize($"questrep:{id}", $"Quest {id} ({q.Name}) works normally (requirements, XP, gold and items from QuestData), but it was never turned in while collecting, so a possible faction reputation reward is unknown and none is given. Only matters for reputation farms: turn it in once with the collector running.");
             if (q.Slot >= 0)
                 SlotProgress[q.Slot] = Math.Max(SlotProgress.GetValueOrDefault(q.Slot), q.Value);
             if (q.Once || q.Slot >= 0)
@@ -1980,28 +1991,27 @@ public sealed partial class SimWorld
 
     private bool RegisteredQuestTick()
     {
-        List<(int Id, int Reward, bool Reaccept)> candidates;
+        // Like Skua's quest registration: only quests registered with Bot.Quests.RegisterQuests are completed (and
+        // re-accepted) automatically. Quests that are merely active wait for the script's own EnsureComplete; completing
+        // them here consumed the items the script was about to check (map items, single quest drops) and caused loops.
+        List<(int Id, int Reward)> candidates;
         lock (Sync)
         {
-            if (RegisteredQuests.Count == 0 && ActiveQuests.Count == 0)
+            if (RegisteredQuests.Count == 0)
             {
                 _questTickerActive = false;
                 return false;
             }
-            candidates = ActiveQuests
-                .Union(RegisteredQuests.Keys)
-                .Select(id => (id, RegisteredQuests.GetValueOrDefault(id, -1), RegisteredQuests.ContainsKey(id)))
-                .ToList();
+            candidates = RegisteredQuests.Select(kv => (kv.Key, kv.Value)).ToList();
         }
-        foreach (var (id, reward, reaccept) in candidates)
+        foreach (var (id, reward) in candidates)
         {
-            if (reaccept && !ActiveQuests.Contains(id))
+            if (!ActiveQuests.Contains(id))
                 AcceptQuest(id, log: false);
             if (CanComplete(id))
             {
                 CompleteQuest(id, reward);
-                if (reaccept)
-                    AcceptQuest(id, log: false);
+                AcceptQuest(id, log: false);
             }
         }
         return true;

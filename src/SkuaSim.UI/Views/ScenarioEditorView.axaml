@@ -165,7 +165,11 @@
                             </Border>
 
                             <Grid ColumnDefinitions="Auto,*" ColumnSpacing="16">
-                                <CheckBox Grid.Column="0" Content="Member (Upgrade)" IsChecked="{Binding IsMember}" VerticalAlignment="Bottom" />
+                                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="16" VerticalAlignment="Bottom">
+                                    <CheckBox Content="Member (Upgrade)" IsChecked="{Binding IsMember}" />
+                                    <CheckBox Content="Complete Equipment" IsChecked="{Binding CompleteEquipment}"
+                                              ToolTip.Tip="Fill empty Weapon / Helm / Cape slots (and an unenhanced class) with basic gear enhanced at the character's level, like an ordinary equipped player. Items in the scenario are never changed. A weapon is always equipped." />
+                                </StackPanel>
                                 <StackPanel Grid.Column="1" Spacing="3">
                                     <TextBlock Text="Virtual Start (UTC, blank = 2026-01-01 12:00)" Classes="MetricLabel" />
                                     <TextBox Text="{Binding StartDateText}"

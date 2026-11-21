@@ -1218,7 +1218,27 @@ internal static class CoreTests
                baseline.ServerResets == 1, $"The daily must reset at 00:00 server time ({baseline.ServerResets} reset(s)): {Logs(baseline)}");
         Assert(Has(questOn, "WOLF gold+=180") && questOn.CalendarBoosts.Any(b => b.Contains("Gold")) && baseline.CalendarBoosts.Count == 0,
             $"The calendar's Double Gold must double kill gold only when enabled: {Logs(questOn)}");
-        Console.WriteLine($"   OK: gold 90/60 (measured/rule), respawn 2.5 s, rep 1050, quest map item gated, house item accepted, daily reset at 00:00 ET, calendar 2x gold");
+        // Class points per kill = ceil((230 + 25 x rank) x gap ratio): real values from a Shaman rank 1 -> 10 run in
+        // icestormarena (gap = character level - monster level).
+        int Cp(int rank, int gap) => (int)Math.Ceiling((230 + 25 * rank) * SimWorld.ClassPointsGapRatio(gap) - 1e-9);
+        Assert(Cp(4, 10) == 330 && Cp(5, 5) == 355 && Cp(6, -155) == 380 &&     // full value up to 10 levels below
+               Cp(3, 15) == 153 && Cp(6, 15) == 190 && Cp(5, 15) == 178 &&     // -10 %/level from 11 levels: 50 % at 15
+               Cp(3, 25) == 16 && Cp(2, 50) == 14 && Cp(1, 95) == 13 && Cp(6, 35) == 19, // floor of 5 % (-95 % cap)
+            "Class points must follow 230 + 25 x rank with the AQW level-gap penalty, rounded up");
+        Assert(!baseline.SynthesizedData.Any(s => s.Key.StartsWith("classpoints:")), "Class points are a verified rule, never synthesized");
+
+        // Complete equipment (default): empty Weapon/Helm/Cape slots get basic gear enhanced at the character's level;
+        // when disabled only a weapon is ensured (AQW has no weaponless state).
+        bool HasGear(SimulationReport r, string name) => r.FinalState.Inventory.Any(i => i.Name == name && i.Equipped);
+        Assert(HasGear(baseline, "Simulated Weapon") && HasGear(baseline, "Simulated Helm") && HasGear(baseline, "Simulated Cape") &&
+               !HasGear(baseline, "Simulated Pet") && baseline.SynthesizedData.Any(s => s.Key == "gear:complete"),
+            $"Empty slots must be completed and flagged: {string.Join(", ", baseline.FinalState.Inventory.Where(i => i.Equipped).Select(i => i.Name))}");
+        var bareScenario = MakeScenario(true, false, false);
+        bareScenario.Player.CompleteEquipment = false;
+        var bare = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = bareScenario, GameDataPath = gameDataPath, SeedOverride = 5 });
+        Assert(HasGear(bare, "Simulated Weapon") && !HasGear(bare, "Simulated Helm") && !HasGear(bare, "Simulated Cape"),
+            "With completeEquipment=false only a weapon is ensured");
+        Console.WriteLine($"   OK: gold 90/60 (measured/rule), respawn 2.5 s, rep 1050, quest map item gated, house item accepted, daily reset at 00:00 ET, calendar 2x gold, CP rule");
     }
 
     internal const string FingerprintArg = "--determinism-fingerprint";
