@@ -40,6 +40,18 @@ public sealed class GameDatabase
     public Dictionary<int, CapturedEnhancementProfile> Enhancements { get; set; } = new();
     public Dictionary<int, CapturedProcStat> Procs { get; set; } = new();
 
+    /// <summary>
+    /// AQW XP table: level -> XP needed to reach the next level, from "levelUp" { intLevel, intExpToLevel } (game data;
+    /// the player's own XP is not stored). Additive in v3.
+    /// </summary>
+    public Dictionary<int, int> XpToNextLevel { get; set; } = new();
+
+    /// <summary>
+    /// Gold/ACs returned when selling an item: server "sellItem" { intAmount, bCoins, iQty } paired with the client's
+    /// preceding "sellItem" request (item ID). Item ID -> last observed amount. Additive in v3.
+    /// </summary>
+    public Dictionary<int, CapturedSellPrice> SellPrices { get; set; } = new();
+
     /// <summary>Faction ID -> name (additive in v3; no player reputation is stored).</summary>
     public Dictionary<int, CapturedFaction> Factions { get; set; } = new();
 
@@ -178,6 +190,26 @@ public sealed class CapturedKillRewards
     public long TotalBaseRep { get; set; }
     public HashSet<int> FactionIds { get; set; } = new();
 
+    /// <summary>Class points per kill ("iCP" minus "bonusCP"; only sent while the class is below rank 10).</summary>
+    public long CpSamples { get; set; }
+    public long TotalBaseCp { get; set; }
+    public int? MinBaseCp { get; set; }
+    public int? MaxBaseCp { get; set; }
+
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double AverageBaseCp => CpSamples > 0 ? Math.Round((double)TotalBaseCp / CpSamples, 1) : 0.0;
+
+    public void AddClassPoints(int totalCp, int bonusCp)
+    {
+        if (totalCp <= 0)
+            return;
+        var cp = Math.Max(0, totalCp - Math.Max(0, bonusCp));
+        CpSamples++;
+        TotalBaseCp += cp;
+        MinBaseCp = MinBaseCp.HasValue ? Math.Min(MinBaseCp.Value, cp) : cp;
+        MaxBaseCp = MaxBaseCp.HasValue ? Math.Max(MaxBaseCp.Value, cp) : cp;
+    }
+
     [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
     public double AverageBaseExp => ExpSamples > 0 ? Math.Round((double)TotalBaseExp / ExpSamples, 1) : 0.0;
 
@@ -239,6 +271,10 @@ public sealed class CapturedKillRewards
         RepSamples += other.RepSamples;
         TotalBaseRep += other.TotalBaseRep;
         FactionIds.UnionWith(other.FactionIds);
+        CpSamples += other.CpSamples;
+        TotalBaseCp += other.TotalBaseCp;
+        if (other.MinBaseCp.HasValue) MinBaseCp = MinBaseCp.HasValue ? Math.Min(MinBaseCp.Value, other.MinBaseCp.Value) : other.MinBaseCp;
+        if (other.MaxBaseCp.HasValue) MaxBaseCp = MaxBaseCp.HasValue ? Math.Max(MaxBaseCp.Value, other.MaxBaseCp.Value) : other.MaxBaseCp;
     }
 }
 
@@ -567,6 +603,17 @@ public sealed class CapturedQuestReward
     public int FactionID { get; set; }
     public int ClassPoints { get; set; }
     public int Coins { get; set; }
+    public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
+}
+
+public sealed class CapturedSellPrice
+{
+    public int ItemID { get; set; }
+    /// <summary>Amount returned per sale ("intAmount"), gold unless <see cref="Coins"/>.</summary>
+    public int Amount { get; set; }
+    public bool Coins { get; set; }
+    public int Quantity { get; set; }
+    public long Samples { get; set; }
     public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
 }
 

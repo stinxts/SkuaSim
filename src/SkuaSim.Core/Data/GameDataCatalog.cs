@@ -174,6 +174,29 @@ public sealed class GameDataCatalog
         return (Math.Max(1, ratio * weaponDps), interval > 0 ? interval : 2000, near.Count);
     }
 
+    /// <summary>
+    /// Median of (measured sell amount / gold shop price) over sold gold items found in captured shops; (0, 0) when
+    /// nothing comparable was measured.
+    /// </summary>
+    public (double Fraction, int BasedOn) GoldSellBackFraction()
+    {
+        if (_sellFraction is { } cached)
+            return cached;
+        var costs = new Dictionary<int, int>();
+        foreach (var si in Captured.Shops.Values.SelectMany(s => s.Items))
+            if (!si.Coins && si.Cost > 0 && !costs.ContainsKey(si.ID))
+                costs[si.ID] = si.Cost;
+        var ratios = (Captured.SellPrices ?? new())
+            .Values.Where(p => !p.Coins && p.Samples > 0 && costs.ContainsKey(p.ItemID))
+            .OrderBy(p => p.ItemID)
+            .Select(p => (double)p.Amount / costs[p.ItemID])
+            .ToList();
+        _sellFraction = ratios.Count == 0 ? (0, 0) : (Median(ratios), ratios.Count);
+        return _sellFraction.Value;
+    }
+
+    private (double, int)? _sellFraction;
+
     /// <summary>Faction name by ID from the collected faction catalog (null when unknown).</summary>
     public string? FactionName(int factionId) =>
         factionId > 0 && Captured.Factions != null && Captured.Factions.TryGetValue(factionId, out var f) && !string.IsNullOrWhiteSpace(f.Name)

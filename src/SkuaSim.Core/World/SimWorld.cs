@@ -120,7 +120,7 @@ public sealed partial class SimWorld
     public string Guild { get; set; }
     public int MaxHealth { get; private set; }
     public int Health { get; set; }
-    public int RequiredXP => RequiredXpForLevel(Level);
+    public int RequiredXP => XpToNextLevel(Level);
     public int ClassRank { get; set; }
     public bool LoggedIn { get; set; }
     public bool Kicked { get; set; }
@@ -1348,6 +1348,19 @@ public sealed partial class SimWorld
         });
     }
 
+    /// <summary>
+    /// XP needed to reach the next level: AQW's real table captured from "levelUp" (intExpToLevel) when known, else the
+    /// legacy estimate (flagged once).
+    /// </summary>
+    public int XpToNextLevel(int level)
+    {
+        var lvl = Math.Clamp(level, 1, MaxLevel);
+        if (_ctx.Catalog.Captured.XpToNextLevel is { } table && table.TryGetValue(lvl, out var real) && real > 0)
+            return real;
+        Trace.Synthesize("xptable", "The XP needed per level is not fully captured yet (collector \"levelUp\"): missing levels use an estimate.");
+        return RequiredXpForLevel(lvl);
+    }
+
     public static int RequiredXpForLevel(int level)
     {
         var lvl = Math.Clamp(level, 1, MaxLevel);
@@ -1411,11 +1424,18 @@ public sealed partial class SimWorld
         return (xp, gold);
     }
 
-    /// <summary>Class points per kill are not in any packet the collector sees: kept as the legacy estimate, flagged.</summary>
+    /// <summary>
+    /// Base class points per kill: the collector's measured average ("addGoldExp" iCP - bonusCP, verified 2026-11-21:
+    /// Arctic Wolf lv 15 = 305 CP), else the legacy estimate, flagged.
+    /// </summary>
     private int KillClassPointsBase(SimMonster monster)
     {
+        var sameMonster = !(monster.Setup?.Level is { } setupLevel && monster.Data != null && monster.Data.Level > 0 && setupLevel != monster.Data.Level);
+        if (sameMonster && monster.Data?.KillRewards is { CpSamples: > 0 } kr)
+            return (int)Math.Round(kr.AverageBaseCp);
+
         var level = monster.Level > 0 ? monster.Level : Math.Max(1, Level);
-        Trace.Synthesize("classpoints:kill", "Class points per kill are not captured: using the estimate max(10, (25 x level + 25) / 2).");
+        Trace.Synthesize($"classpoints:{monster.Name.ToLowerInvariant()}", $"Monster '{monster.Name}' has no measured class points per kill: using the estimate max(10, (25 x level + 25) / 2).");
         return Math.Max(10, (level * 25 + 25) / 2);
     }
 
@@ -1457,7 +1477,7 @@ public sealed partial class SimWorld
         long pool = (long)XP + amount;
         while (Level < MaxLevel)
         {
-            var needed = RequiredXpForLevel(Level);
+            var needed = XpToNextLevel(Level);
             if (pool < needed)
                 break;
             pool -= needed;
@@ -2132,6 +2152,17 @@ public sealed partial class SimWorld
     /// </summary>
     private void SellReturn(InventoryItem item, int quantity)
     {
+        // 1. Measured: the server's sellItem amount for this exact item.
+        if (_ctx.Catalog.Captured.SellPrices?.TryGetValue(item.ID, out var measured) == true && measured.Samples > 0)
+        {
+            if (measured.Coins)
+                Coins += measured.Amount;
+            else
+                AddGold(measured.Amount);
+            Trace.World($"Sold {quantity}x {item.Name} for {measured.Amount:N0} {(measured.Coins ? "ACs" : "gold")} (measured).");
+            return;
+        }
+
         var shopItem = ShopCache.SelectMany(s => s.Items).FirstOrDefault(i => i.ID == item.ID);
         int cost; bool coins;
         if (shopItem != null)
@@ -2155,11 +2186,17 @@ public sealed partial class SimWorld
             Trace.Synthesize($"sell:{item.ID}", $"'{item.Name}' is an AC item: the AC sell-back is not modeled, nothing was returned.");
             return;
         }
-        // One sale removes the item (or the requested part of its stack) for the item's sell price.
-        var gold = (long)Math.Floor(cost * SellBackFraction);
+        // 2. Ratio measured on other gold items (sell amount / shop price; 25 % on 20 items, 2026-11-21), else the 25 % rule.
+        var (fraction, basedOn) = _ctx.Catalog.GoldSellBackFraction();
+        if (basedOn == 0)
+            fraction = SellBackFraction;
+        // One sale removes the item (or the requested part of its stack). Rounded up: Peasant Rags (2 gold) sells for 1.
+        var gold = (long)Math.Ceiling(cost * fraction - 1e-9);
         AddGold(gold);
-        Trace.Synthesize($"sell:{item.ID}", $"Selling '{item.Name}' returned {SellBackFraction:P0} of its {cost:N0} gold shop price (rule; not yet verified).");
-        Trace.World($"Sold {quantity}x {item.Name} for {gold:N0} gold.");
+        if (basedOn > 0)
+            Trace.World($"Sold {quantity}x {item.Name} for {gold:N0} gold ({fraction:P0} of its {cost:N0} shop price, measured on {basedOn} item(s)).");
+        else
+            Trace.Synthesize($"sell:{item.ID}", $"Selling '{item.Name}' returned {fraction:P0} of its {cost:N0} gold shop price (the 25 % rule; no sale measured yet).");
     }
 
     public bool Sell(string? name, int? id, int quantity)

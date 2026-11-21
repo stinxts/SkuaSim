@@ -101,7 +101,9 @@ public sealed partial class PacketCollectorEngine
                 || _delta.Classes.Count > 0
                 || _delta.Enhancements.Count > 0
                 || _delta.Procs.Count > 0
-                || _delta.Factions.Count > 0;
+                || _delta.Factions.Count > 0
+                || _delta.XpToNextLevel.Count > 0
+                || _delta.SellPrices.Count > 0;
         }
     }
 
@@ -130,8 +132,32 @@ public sealed partial class PacketCollectorEngine
     private static readonly HashSet<string> HandledServerCommands = new(StringComparer.Ordinal)
     {
         "moveToArea", "ct", "event", "updateClass", "equipItem", "sAct", "stu",
-        "dropItem", "addItems", "loadShop", "getQuests", "ccqr", "monsterDrops", "addGoldExp", "addFaction"
+        "dropItem", "addItems", "loadShop", "getQuests", "ccqr", "monsterDrops", "addGoldExp", "addFaction", "levelUp", "sellItem"
     };
+
+    private int _lastSellRequestItemId;
+    private DateTime _lastSellRequestUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// Server "sellItem" (verified keys): { intAmount, bCoins, iQty, CharItemID, iQtyNow }. Paired with the client's
+    /// sell request of the last 5 s to know the item; CharItemID / iQtyNow (personal inventory state) are never stored.
+    /// </summary>
+    private void HandleSellItemResponse(JObject dataObj)
+    {
+        var itemId = _lastSellRequestItemId;
+        var recent = (DateTime.UtcNow - _lastSellRequestUtc).TotalSeconds <= 5.0;
+        _lastSellRequestItemId = 0;
+        var amount = ParseInt(dataObj["intAmount"], -1);
+        if (!recent || itemId <= 0 || amount < 0)
+            return;
+        if (!_delta.SellPrices.TryGetValue(itemId, out var price))
+            _delta.SellPrices[itemId] = price = new CapturedSellPrice { ItemID = itemId };
+        price.Amount = amount;
+        price.Coins = ParseBool(dataObj["bCoins"], false);
+        price.Quantity = ParseInt(dataObj["iQty"], 1);
+        price.Samples++;
+        price.LastSeenUtc = DateTime.UtcNow;
+    }
 
     public void ProcessExtensionPacketJObject(JObject root)
     {
@@ -222,6 +248,12 @@ public sealed partial class PacketCollectorEngine
                 case "addFaction":
                     HandleAddFactionPacket(dataObj);
                     break;
+                case "levelUp":
+                    HandleLevelUpPacket(dataObj);
+                    break;
+                case "sellItem":
+                    HandleSellItemResponse(dataObj);
+                    break;
             }
         }
     }
@@ -267,6 +299,15 @@ public sealed partial class PacketCollectorEngine
                     if (parts.Length >= 5 && int.TryParse(parts[4], out var questId) && questId > 0)
                     {
                         RecordQuestAccepted(questId, _currentMapName);
+                    }
+                    break;
+
+                case "sellItem":
+                    // %xt%zm%sellItem%<room>%<ItemID>%<qty>%<CharItemID>% — only the item ID is kept (CharItemID is personal).
+                    if (parts.Length >= 5 && int.TryParse(parts[4], out var sellItemId) && sellItemId > 0)
+                    {
+                        _lastSellRequestItemId = sellItemId;
+                        _lastSellRequestUtc = DateTime.UtcNow;
                     }
                     break;
 
@@ -1276,6 +1317,18 @@ public sealed partial class PacketCollectorEngine
             RecordFactionInternal(ParseInt(faction["FactionID"]), faction["sName"]?.ToString());
     }
 
+    /// <summary>
+    /// "levelUp" (keys verified from the live skeleton): { intLevel, intExpToLevel, xp }. intExpToLevel is the XP needed
+    /// for the next level (sent as a string at the cap); only level -> intExpToLevel is kept, never the player's xp.
+    /// </summary>
+    private void HandleLevelUpPacket(JObject dataObj)
+    {
+        var level = ParseInt(dataObj["intLevel"]);
+        var toNext = ParseInt(dataObj["intExpToLevel"]);
+        if (level > 0 && toNext > 0)
+            _delta.XpToNextLevel[level] = toNext;
+    }
+
     /// <summary>Records faction ID → name pairs from the client's faction list (no reputation values).</summary>
     public void RecordFactionNames(IEnumerable<(int Id, string? Name)> factions)
     {
@@ -1516,6 +1569,8 @@ public sealed partial class PacketCollectorEngine
             ParseInt(dataObj["intGold"]), ParseInt(dataObj["bonusGold"]),
             ParseInt(dataObj["iRep"]), ParseInt(dataObj["bonusRep"]),
             ParseInt(dataObj["FactionID"]));
+        // Verified 2026-11-21: { ..., "iCP": 305, "bonusCP": 0 } on kills while the class is below rank 10.
+        mon.KillRewards.AddClassPoints(ParseInt(dataObj["iCP"]), ParseInt(dataObj["bonusCP"]));
         SessionKillRewardSamples++;
     }
 

@@ -52,7 +52,9 @@ public sealed class PacketSchemaSampler
         // Monster respawn/update candidates (exact name to be confirmed by the command census)
         "mtls", "respawnMon",
         // Sell-back gold (CharItemID / iQtyNow are redacted)
-        "sellItem"
+        "sellItem",
+        // XP table (intLevel, intExpToLevel)
+        "levelUp"
     };
 
     /// <summary>

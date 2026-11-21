@@ -1027,10 +1027,14 @@ try
     rewardEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"QuestID":7277,"msg":"","rewardObj":{"FactionID":60,"typ":"q","intCoins":0,"intExp":0,"iCP":0,"iRep":150,"intGold":0},"sName":"Star of the Sandsea","cmd":"ccqr","bSuccess":1} } }""");
     rewardEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"addFaction","faction":{"FactionID":"60","CharFactionID":"123456","iRank":"4","iRepToRank":"12500","sName":"Sandsea","iSpillRep":"1500","iRep":"11500","bitSuccess":"1"}} } }""");
     rewardEng.RecordFactionNames(new[] { (13, (string?)"Oasis") });
+    // levelUp (keys from the live skeleton): level -> XP to next level; the player's own "xp" is not stored.
+    rewardEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"levelUp","intLevel":12,"intExpToLevel":7740,"xp":31} } }""");
+    rewardEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"levelUp","intLevel":100,"intExpToLevel":""} } }""");
     var rewardDelta = rewardEng.TakeDeltaSnapshot();
     var obs = rewardDelta.Quests[7277].ObservedReward;
     Assert(obs != null && obs.Rep == 150 && obs.FactionID == 60 && obs.Gold == 0 && obs.Samples == 1, "ccqr rewardObj must be stored as the quest's base reward");
     Assert(rewardDelta.Factions[60].Name == "Sandsea" && rewardDelta.Factions[13].Name == "Oasis", "Faction names must be cataloged");
+    Assert(rewardDelta.XpToNextLevel.Count == 1 && rewardDelta.XpToNextLevel[12] == 7740, "levelUp must record level -> XP to next level (cap level skipped)");
     var factionJson = Newtonsoft.Json.JsonConvert.SerializeObject(rewardDelta.Factions);
     Assert(!factionJson.Contains("11500") && !factionJson.Contains("123456") && !factionJson.Contains("iRank"), "The player's faction rank/rep/CharFactionID must never be stored");
     var rewardMerged = new GameDatabase();
@@ -1038,6 +1042,22 @@ try
     GameDatabaseStore.MergeInto(rewardMerged, rewardDelta);
     Assert(rewardMerged.Quests[7277].ObservedReward!.Samples == 2 && rewardMerged.Quests[7277].ObservedReward!.Rep == 150 && rewardMerged.Factions.Count == 2,
         "Merge must keep the latest base reward, count samples and keep faction names");
+
+    // (e2) Class points per kill (real addGoldExp sample, Arctic Wolf lv 15) and a sale paired with its request
+    // (real sellItem response; the client request carries the item ID, CharItemID/iQtyNow are never stored).
+    var cpEng = new PacketCollectorEngine();
+    cpEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","strMapName":"icestormarena","mondef":[{"sRace":"None","strMonName":"Arctic Wolf","intLevel":15,"MonID":3986}],"monmap":[{"MonID":3986,"strFrame":"r6","MonMapID":9}],"monBranch":[{"intHP":1130,"intHPMax":1130,"iLvl":15,"wDPS":17,"MonMapID":9,"MonID":3986}]} } }""");
+    cpEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"bonusCP":0,"intGold":90,"bonusGold":45,"cmd":"addGoldExp","id":9,"typ":"m","intExp":150,"iCP":305} } }""");
+    cpEng.ProcessClientPacket("%xt%zm%sellItem%1%12345%1%987654%");
+    cpEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"bCoins":false,"cmd":"sellItem","intAmount":188,"iQty":1,"iQtyNow":0,"CharItemID":987654} } }""");
+    cpEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"bCoins":false,"cmd":"sellItem","intAmount":50,"iQty":1,"iQtyNow":0,"CharItemID":987655} } }"""); // no request: ignored
+    var cpDelta = cpEng.TakeDeltaSnapshot();
+    var wolfKr = cpDelta.Monsters["id:3986"].KillRewards;
+    Assert(wolfKr.CpSamples == 1 && wolfKr.TotalBaseCp == 305 && wolfKr.TotalBaseExp == 150 && wolfKr.TotalBaseGold == 45,
+        $"Kill CP must be recorded from iCP - bonusCP (cp={wolfKr.TotalBaseCp}, xp={wolfKr.TotalBaseExp}, gold={wolfKr.TotalBaseGold})");
+    Assert(cpDelta.SellPrices.Count == 1 && cpDelta.SellPrices[12345].Amount == 188 && !cpDelta.SellPrices[12345].Coins &&
+           !Newtonsoft.Json.JsonConvert.SerializeObject(cpDelta.SellPrices).Contains("987654"),
+        "A sale must be paired with its request's item ID, without storing CharItemID");
 
     // (f) A full sample category still accepts a never-seen key set (e.g. a class-points key in addGoldExp), and the
     // key census records key names per command even when samples are full.

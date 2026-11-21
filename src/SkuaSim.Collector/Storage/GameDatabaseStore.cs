@@ -517,7 +517,31 @@ public sealed partial class GameDatabaseStore
         // 6. Merge Classes & Enhancements
         MergeClassesAndEnhancements(target, source);
 
-        // 7. Merge faction names (ID -> name only)
+        // 7. AQW XP table (level -> XP to next level; fixed game data)
+        target.XpToNextLevel ??= new();
+        foreach (var (level, toNext) in source.XpToNextLevel ?? new())
+            if (level > 0 && toNext > 0)
+                target.XpToNextLevel[level] = toNext;
+
+        // 8. Sell prices (latest amount per item, samples summed)
+        target.SellPrices ??= new();
+        foreach (var (itemId, src) in source.SellPrices ?? new())
+        {
+            if (itemId <= 0)
+                continue;
+            if (!target.SellPrices.TryGetValue(itemId, out var dst))
+                target.SellPrices[itemId] = dst = new CapturedSellPrice { ItemID = itemId, LastSeenUtc = DateTime.MinValue };
+            dst.Samples += src.Samples;
+            if (src.LastSeenUtc >= dst.LastSeenUtc)
+            {
+                dst.Amount = src.Amount;
+                dst.Coins = src.Coins;
+                dst.Quantity = src.Quantity;
+                dst.LastSeenUtc = src.LastSeenUtc;
+            }
+        }
+
+        // 9. Merge faction names (ID -> name only)
         target.Factions ??= new();
         foreach (var (id, srcFaction) in source.Factions ?? new())
         {
