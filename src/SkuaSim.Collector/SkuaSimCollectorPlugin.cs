@@ -299,6 +299,23 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
     /// not expose the room cap ("world.areaData.intMaxPlayers" was missing in all 58 probes), so the peak count per
     /// map is kept as a lower bound.
     /// </summary>
+    /// <summary>Copies faction ID → name pairs from the client's faction list (game data; rank/reputation are not read).</summary>
+    private void SyncFactionNames(IScriptInterface bot)
+    {
+        try
+        {
+            var list = bot.Reputation?.FactionList;
+            if (list == null || list.Count == 0)
+                return;
+            var pairs = list.Where(f => f != null).Select(f => (f.ID, (string?)f.Name)).ToList();
+            EnqueueWork(() => _engine.RecordFactionNames(pairs));
+        }
+        catch
+        {
+            // Faction list unavailable during transitions.
+        }
+    }
+
     private void SamplePlayerCount(IScriptInterface bot)
     {
         try
@@ -379,6 +396,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                 CaptureLivePlayerSnapshot(bot);
                 SyncActiveQuests(bot);
                 SamplePlayerCount(bot);
+                SyncFactionNames(bot);
             }
             catch
             {

@@ -47,6 +47,7 @@ internal static class CoreTests
             TestKillQuestHintsOnDemandMonstersAndStallDetector(runner, tempDir);
             TestCrossProcessDeterminism(tempDir);
             TestSchemaV2QuestGatedAndUnknownRateDrops(runner, tempDir);
+            TestRealDataRewardsRespawnHouseResetsAndCalendar(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -767,7 +768,8 @@ internal static class CoreTests
                     Cells = new List<string> { "Enter", "r1" },
                     Monsters = new List<MonsterSetup>
                     {
-                        new() { Name = "Frogzard", Cell = "r1", MaxHP = 60, Level = 6 }
+                        // Level set by the scenario (overrides the captured Frogzard): base XP = 10 x 15 per kill.
+                        new() { Name = "Frogzard", Cell = "r1", MaxHP = 60, Level = 15 }
                     }
                 }
             },
@@ -1066,7 +1068,7 @@ internal static class CoreTests
                 for (var i = 0; i < 6; i++)
                 {
                     bot.Hunt.Monster("Gate Beast");
-                    bot.Sleep(13_000); // single spawn: wait for the 12 s respawn
+                    bot.Sleep(13_000); // single spawn: wait for its respawn (no measured respawn here: official ~4 s)
                 }
             }
         }
@@ -1094,6 +1096,129 @@ internal static class CoreTests
                inactive.SynthesizedData.Any(s => s.Key.StartsWith("droprate:gate beast:990102")),
             "An official drop with no measured rate must use a flagged synthesized chance instead of 0 %");
         Console.WriteLine($"   OK: Gated Fang inactive=0 / active={active.DropsByItem["Gated Fang"]}, Official Pelt synthesized={inactive.DropsByItem["Official Pelt"]}");
+    }
+
+    private static void TestRealDataRewardsRespawnHouseResetsAndCalendar(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("15. Testing real-data consumption (kill rewards, respawn, rep, quest-gated map items, house items, daily reset, AE calendar)...");
+        // AQW boosts add up: 1000 rep + server boost = 2000; 1000 XP + XP boost + 50 % gear = 2500; live 210 gold -> 525.
+        Assert(Math.Abs(1000 * RewardBoosts.Combine(1.0, false, true) - 2000) < 0.01 &&
+               Math.Abs(1000 * RewardBoosts.Combine(1.5, true, false) - 2500) < 0.01 &&
+               Math.Abs(210 * RewardBoosts.Combine(1.5, false, true) - 525) < 0.01,
+            "Reward boosts must be additive (highest gear bonus + consumable +100 % + server +100 %)");
+        var gameDataPath = Path.Combine(tempDir, "gamedata_v3_test.json");
+        File.WriteAllText(gameDataPath, """
+        {
+          "SchemaVersion": 3,
+          "Factions": { "990060": { "ID": 990060, "Name": "Test Faction" } },
+          "Items": {
+            "52566": { "ID": 52566, "Name": "Star of the Sandsea", "Category": "Quest Item", "MaxStack": 1, "Temp": true },
+            "990401": { "ID": 990401, "Name": "Choice Gem", "Category": "Item", "MaxStack": 10 }
+          },
+          "Maps": { "zzrewardmap": { "Name": "zzrewardmap", "Cells": { "Enter": ["Spawn"], "r1": ["Left"], "r2": ["Left"] },
+            "Monsters": {
+              "1": { "MapID": 1, "MonsterID": 990201, "Name": "Reward Wolf", "Cell": "r1", "Level": 30, "MaxHP": 300,
+                     "Respawn": { "Samples": 5, "TotalMs": 12500, "MinMs": 2400, "MaxMs": 2600 } },
+              "2": { "MapID": 2, "MonsterID": 990202, "Name": "Plain Imp", "Cell": "r2", "Level": 20, "MaxHP": 300 } },
+            "MapItems": { "5044": { "MapItemID": 5044, "GrantedItemIDs": [52566], "RequiredQuestIds": [7277] } } } },
+          "Monsters": {
+            "id:990201": { "Key": "id:990201", "ID": 990201, "Name": "Reward Wolf", "Level": 30, "MaxHP": 300, "KillCount": 10,
+              "KillRewards": { "Samples": 10, "ExpSamples": 10, "TotalBaseExp": 3000, "GoldSamples": 10, "TotalBaseGold": 900,
+                               "RepSamples": 10, "TotalBaseRep": 500, "FactionIds": [990060] } },
+            "id:990202": { "Key": "id:990202", "ID": 990202, "Name": "Plain Imp", "Level": 20, "MaxHP": 300 } },
+          "Quests": { "990301": { "ID": 990301, "Name": "Captured Daily", "Field": "id0", "Slot": -1,
+            "Rewards": [ { "ItemID": 990401, "ItemName": "Choice Gem", "Quantity": 1, "RatePercent": 100.0, "RewardType": 0 } ],
+            "ObservedReward": { "Samples": 3, "Exp": 0, "Gold": 50, "Rep": 1000, "FactionID": 990060 } } }
+        }
+        """);
+
+        var script = Path.Combine(tempDir, "RealDataBot.cs");
+        File.WriteAllText(script, """
+        using Skua.Core.Interfaces;
+
+        public class RealDataBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Map.Join("zzrewardmap");
+                var gold0 = bot.Player.Gold;
+                bot.Hunt.Monster("Reward Wolf");
+                bot.Log($"WOLF gold+={bot.Player.Gold - gold0}");
+                bot.Sleep(1_500);
+                bot.Log($"AFTER1500 alive={bot.Monsters.MapMonsters.Exists(m => m.Name == "Reward Wolf" && m.HP > 0)}");
+                bot.Sleep(1_500);
+                bot.Log($"AFTER3000 alive={bot.Monsters.MapMonsters.Exists(m => m.Name == "Reward Wolf" && m.HP > 0)}");
+                var gold1 = bot.Player.Gold;
+                bot.Hunt.Monster("Plain Imp");
+                bot.Log($"IMP gold+={bot.Player.Gold - gold1}");
+
+                bot.Map.GetMapItem(5044);
+                bot.Log($"STAR={bot.Inventory.GetQuantity("Star of the Sandsea") + bot.TempInv.GetQuantity("Star of the Sandsea")}");
+
+                bot.Log($"HOUSEQUEST accept={bot.Quests.EnsureAccept(9555)}");
+
+                bot.Log($"DAILY1 accept={bot.Quests.EnsureAccept(990301)} complete={bot.Quests.EnsureComplete(990301)}");
+                bot.Log($"DAILY2 accept={bot.Quests.EnsureAccept(990301)}");
+                bot.Sleep(5 * 60_000); // crosses 00:00 server time
+                bot.Log($"DAILY3 accept={bot.Quests.EnsureAccept(990301)}");
+            }
+        }
+        """);
+
+        // 2026-11-21 04:57 UTC = 2026-11-20 23:57 US Eastern (EST): the daily reset happens 3 virtual minutes in.
+        Scenario MakeScenario(bool withHouseItem, bool questActive, bool calendar) => new()
+        {
+            Name = "Real data",
+            StartDate = new DateTime(2026, 11, 21, 4, 57, 0, DateTimeKind.Utc),
+            Player = new PlayerSetup { Username = "Tester", Level = 60, MaxHealth = 10_000, DamagePerSecond = 8_000 },
+            House = withHouseItem ? new List<ItemSetup> { new() { Name = "Prime Fiend Shard" } } : new List<ItemSetup>(),
+            Quests = new QuestSetup { Active = questActive ? new List<int> { 7277 } : new List<int>() },
+            Boosts = new BoostsSetup { AeCalendarServerBoosts = calendar },
+            Limits = new LimitsSetup { MaxVirtualMinutes = 30 }
+        };
+
+        // Real calendar excerpt (artix.com/calendar list entry + event page text).
+        var calendarPath = Path.Combine(tempDir, "ae_calendar_test.json");
+        var cal = AeCalendar.ParseListPage(
+            "{title: 'Double Gold Boost 11.20.26',url: 'http://www.artix.com/calendar/double-gold-boost-112026/' + '?d=11%2f20%2f2026+2%3a07%3a00+PM',start: '2026-11-20'}," +
+            "{title: 'Members: Free Keys Available',url: 'http://www.artix.com/calendar/members-free-keys/' + '?d=10%2f1%2f2026+9%3a00%3a00+AM',start: '2026-10-01'}," +
+            "{title: 'Members: Free Keys Available',url: 'http://www.artix.com/calendar/members-free-keys/' + '?d=11%2f1%2f2026+9%3a00%3a00+AM',start: '2026-11-01'}",
+            DateTime.UtcNow);
+        Assert(AeCalendar.ApplyDetailPage(cal.Events.Single(e => e.Title.StartsWith("Double Gold")),
+                "<title>Double Gold Boost 11.20.26 on Artix Entertainment</title><h1>Double Gold Boost 11.20.26</h1> 72 hour DOUBLE Gold boost on all servers in AQWorlds!"),
+            "The boost duration must be read from the event page text after the title");
+        Assert(cal.Events.Count(e => e.Title.StartsWith("Members")) == 2, "A URL reused on non-consecutive days must be separate occurrences");
+        var goldBoost = cal.Events.Single(e => e.Title.StartsWith("Double Gold"));
+        Assert(goldBoost.Kind == AeCalendarKinds.ServerBoost && goldBoost.Gold && !goldBoost.Xp && goldBoost.DurationHours == 72 &&
+               goldBoost.StartEastern == new DateTime(2026, 11, 20, 14, 7, 0), $"Double Gold must start 2:07 PM ET and last 72 h ({goldBoost.StartEastern}, {goldBoost.DurationHours} h)");
+        Assert(cal.ServerBoostsAt(new DateTime(2026, 11, 21, 4, 57, 0, DateTimeKind.Utc)).Gold &&
+               !cal.ServerBoostsAt(new DateTime(2026, 11, 20, 18, 0, 0, DateTimeKind.Utc)).Gold, "Server boosts must follow the Eastern-time window");
+        cal.Save(calendarPath);
+
+        var baseline = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = MakeScenario(true, false, false), GameDataPath = gameDataPath, SeedOverride = 5 });
+        var questOn = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = MakeScenario(false, true, true), GameDataPath = gameDataPath, CalendarPath = calendarPath, SeedOverride = 5 });
+        string Logs(SimulationReport r) => string.Join(" | ", r.ScriptLogs.Select(l => l.Text));
+        bool Has(SimulationReport r, string text) => r.ScriptLogs.Any(l => l.Text.Contains(text));
+
+        Assert(baseline.Outcome == SimulationOutcome.Completed && questOn.Outcome == SimulationOutcome.Completed,
+            $"Both runs must complete ({baseline.Outcome}: {baseline.StopReason}; {questOn.Outcome}: {questOn.StopReason})");
+        Assert(Has(baseline, "WOLF gold+=90") && Has(baseline, "IMP gold+=60"),
+            $"Kill gold must use the measured average (90) and the 3 x level rule (60): {Logs(baseline)}");
+        Assert(baseline.SynthesizedData.Any(s => s.Key == "killgold:plain imp") && !baseline.SynthesizedData.Any(s => s.Key == "killgold:reward wolf"),
+            "Only the rule-based reward may be flagged as synthesized");
+        Assert(Has(baseline, "AFTER1500 alive=False") && Has(baseline, "AFTER3000 alive=True"),
+            $"The spawn's measured 2.5 s respawn must be used: {Logs(baseline)}");
+        Assert(baseline.FinalState.Factions.Any(f => f.Name == "Test Faction" && f.TotalRep == 50 + 1000),
+            $"Kill rep (50) and the observed quest rep (1000) must go to the named faction: {string.Join(", ", baseline.FinalState.Factions.Select(f => $"{f.Name}={f.TotalRep}"))}");
+        Assert(Has(baseline, "STAR=0") && Has(questOn, "STAR=1"), $"A quest map item needs its quest active: {Logs(baseline)} || {Logs(questOn)}");
+        Assert(Has(baseline, "HOUSEQUEST accept=True") && Has(questOn, "HOUSEQUEST accept=False"),
+            $"A house-item accept requirement must be satisfied by the house inventory: {Logs(baseline)} || {Logs(questOn)}");
+        Assert(baseline.FinalState.Inventory.Any(i => i.Name == "Choice Gem"), "A captured quest's reward (RatePercent 100) must be given");
+        Assert(Has(baseline, "DAILY1 accept=True complete=True") && Has(baseline, "DAILY2 accept=False") && Has(baseline, "DAILY3 accept=True") &&
+               baseline.ServerResets == 1, $"The daily must reset at 00:00 server time ({baseline.ServerResets} reset(s)): {Logs(baseline)}");
+        Assert(Has(questOn, "WOLF gold+=180") && questOn.CalendarBoosts.Any(b => b.Contains("Gold")) && baseline.CalendarBoosts.Count == 0,
+            $"The calendar's Double Gold must double kill gold only when enabled: {Logs(questOn)}");
+        Console.WriteLine($"   OK: gold 90/60 (measured/rule), respawn 2.5 s, rep 1050, quest map item gated, house item accepted, daily reset at 00:00 ET, calendar 2x gold");
     }
 
     internal const string FingerprintArg = "--determinism-fingerprint";

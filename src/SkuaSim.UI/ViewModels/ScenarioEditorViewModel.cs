@@ -131,6 +131,10 @@ public partial class ScenarioEditorViewModel : ViewModelBase
     [ObservableProperty] public partial bool GoldBoost { get; set; }
     [ObservableProperty] public partial bool RepBoost { get; set; }
     [ObservableProperty] public partial bool ServerBoost { get; set; }
+    [ObservableProperty] public partial bool AeCalendarServerBoosts { get; set; }
+
+    /// <summary>Virtual start time in UTC ("" = scenario default 2026-01-01 12:00 UTC).</summary>
+    [ObservableProperty] public partial string StartDateText { get; set; } = "";
 
     // Master & Per-Category checkboxes for Awe & Forge
     [ObservableProperty] public partial bool AllAweSelected { get; set; }
@@ -276,6 +280,10 @@ public partial class ScenarioEditorViewModel : ViewModelBase
             GoldBoost = scenario.Boosts.GoldBoost;
             RepBoost = scenario.Boosts.RepBoost;
             ServerBoost = scenario.Boosts.ServerBoost;
+            AeCalendarServerBoosts = scenario.Boosts.AeCalendarServerBoosts;
+            StartDateText = scenario.StartDate is { } start
+                ? scenario.EffectiveStartUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
+                : "";
 
             foreach (var row in EquipmentBoosts)
             {
@@ -337,6 +345,13 @@ public partial class ScenarioEditorViewModel : ViewModelBase
         clone.Player.DamagePerSecond = null;
         clone.Player.RegenPercentPerSecond = null;
 
+        clone.StartDate = string.IsNullOrWhiteSpace(StartDateText)
+            ? null
+            : DateTime.TryParse(StartDateText.Trim(), CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var startUtc)
+                ? DateTime.SpecifyKind(startUtc, DateTimeKind.Utc)
+                : clone.StartDate; // keep the previous value when the text is not a valid date
+
         clone.Location.Map = string.IsNullOrWhiteSpace(StartMap) ? "battleon" : StartMap.Trim();
         clone.Location.Cell = string.IsNullOrWhiteSpace(StartCell) ? "Enter" : StartCell.Trim();
         clone.Location.Pad = string.IsNullOrWhiteSpace(StartPad) ? "Spawn" : StartPad.Trim();
@@ -354,6 +369,7 @@ public partial class ScenarioEditorViewModel : ViewModelBase
             GoldBoost = GoldBoost,
             RepBoost = RepBoost,
             ServerBoost = ServerBoost,
+            AeCalendarServerBoosts = AeCalendarServerBoosts,
             EquipmentBoosts = EquipmentBoosts
                 .Where(r => r.SelectedItem != null && !string.IsNullOrWhiteSpace(r.SelectedItem.Meta))
                 .Select(r => new GearSlotBoostSetup
@@ -759,6 +775,8 @@ public partial class ScenarioEditorViewModel : ViewModelBase
     partial void OnGoldBoostChanged(bool value) { MarkDirty(); RefreshStatsPreview(); }
     partial void OnRepBoostChanged(bool value) { MarkDirty(); RefreshStatsPreview(); }
     partial void OnServerBoostChanged(bool value) { MarkDirty(); RefreshStatsPreview(); }
+    partial void OnAeCalendarServerBoostsChanged(bool value) => MarkDirty();
+    partial void OnStartDateTextChanged(string value) => MarkDirty();
 
     partial void OnVirtualDurationUnitChanged(string value)
     {
@@ -987,11 +1005,11 @@ public partial class ScenarioEditorViewModel : ViewModelBase
                 $"Starting Stats: HP {hp:N0} | DPS ~{dps:N0}/s | Crit {profile.CriticalChance:P0} (x{profile.CriticalMultiplier:F2}) | Haste {profile.Haste:P0} | Dodge {profile.EvasionChance:P0}";
 
             var gb = profile.GearBoosts;
-            var srv = ServerBoost ? 2.0 : 1.0;
-            var xpM = gb.XpMultiplier * (XpBoost ? 2.0 : 1.0) * srv;
-            var cpM = gb.ClassPointsMultiplier * (ClassPointsBoost ? 2.0 : 1.0) * srv;
-            var gM = gb.GoldMultiplier * (GoldBoost ? 2.0 : 1.0) * srv;
-            var repM = gb.RepMultiplier * (RepBoost ? 2.0 : 1.0) * srv;
+            // AQW boosts add up (gear bonus + consumable +100 % + server +100 %), see RewardBoosts.
+            var xpM = SkuaSim.Core.World.RewardBoosts.Combine(gb.XpMultiplier, XpBoost, ServerBoost);
+            var cpM = SkuaSim.Core.World.RewardBoosts.Combine(gb.ClassPointsMultiplier, ClassPointsBoost, ServerBoost);
+            var gM = SkuaSim.Core.World.RewardBoosts.Combine(gb.GoldMultiplier, GoldBoost, ServerBoost);
+            var repM = SkuaSim.Core.World.RewardBoosts.Combine(gb.RepMultiplier, RepBoost, ServerBoost);
 
             var raceParts = gb.RaceDamageMultipliers.Count > 0
                 ? " | Race: " + string.Join(", ", gb.RaceDamageMultipliers.Take(3).Select(kv => $"{kv.Key} +{(kv.Value - 1) * 100:0}%"))

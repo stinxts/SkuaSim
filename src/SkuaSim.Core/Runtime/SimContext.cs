@@ -39,6 +39,10 @@ public sealed class SimContext
     public ProxyHub Proxies { get; }
     public SimWorld World { get; }
 
+    /// <summary>Local AE calendar snapshot (only loaded when the scenario enables calendar server boosts).</summary>
+    public AeCalendar? Calendar { get; set; }
+    public string? CalendarPath { get; set; }
+
     /// <summary>The root IScriptInterface proxy handed to the script.</summary>
     public object? Bot { get; set; }
     public ProxyState? EventsState { get; set; }

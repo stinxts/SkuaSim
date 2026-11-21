@@ -19,6 +19,8 @@ public sealed class SimulationRunOptions
     public int? SeedOverride { get; init; }
     public string? GameDataPath { get; init; }
     public string? QuestDataPath { get; init; }
+    /// <summary>Local AE calendar snapshot (default: next to gamedata.json). Only read when the scenario opts in.</summary>
+    public string? CalendarPath { get; init; }
     public string? TraceOutputPath { get; init; }
     public IReadOnlyList<string> IncludeRoots { get; init; } = Array.Empty<string>();
 }
@@ -201,7 +203,7 @@ public sealed class SimulationRunner
         var questDataPath = options.QuestDataPath ?? _installation.QuestDataFile;
         var catalog = GameDataCatalog.Load(gameDataPath, questDataPath);
 
-        var clock = new SimClock(new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc))
+        var clock = new SimClock(scenario.EffectiveStartUtc)
         {
             MaxVirtualMs = scenario.Limits.MaxVirtualMinutes <= 0
                 ? 0
@@ -215,6 +217,14 @@ public sealed class SimulationRunner
         {
             LoadedScriptPath = scriptFullPath
         };
+        if (scenario.Boosts.AeCalendarServerBoosts)
+        {
+            var calendarPath = options.CalendarPath ?? FindDefaultCalendarPath();
+            ctx.Calendar = AeCalendar.TryLoad(calendarPath);
+            ctx.CalendarPath = calendarPath;
+            if (ctx.Calendar == null)
+                trace.Warn($"AE calendar server boosts are enabled but no calendar was found at '{calendarPath}'. Run 'skuasim calendar-update' first; no calendar boosts are applied.");
+        }
 
         foreach (var hint in compileResult.Units.SelectMany(u => u.MonsterHints))
         {
@@ -391,7 +401,15 @@ public sealed class SimulationRunner
             ScriptLogs = trace.ScriptLog.ToList(),
             Warnings = trace.Warnings.ToList(),
             RecentTimeline = trace.RecentTimeline.ToList(),
-            TraceFilePath = options.TraceOutputPath
+            TraceFilePath = options.TraceOutputPath,
+            StartUtc = clock.Epoch,
+            ServerResets = ctx.World.ServerResetsApplied,
+            CalendarInfo = scenario.Boosts.AeCalendarServerBoosts
+                ? ctx.Calendar is { } cal
+                    ? $"{ctx.CalendarPath} (fetched {cal.FetchedUtc:yyyy-MM-dd}, fingerprint {cal.Fingerprint()})"
+                    : $"enabled but not found ({ctx.CalendarPath})"
+                : null,
+            CalendarBoosts = ctx.World.CalendarBoostLog.ToList()
         };
     }
 
@@ -701,6 +719,17 @@ public sealed class SimulationRunner
 
         candidates.Add(Path.Combine(_installation.UserDataDirectory, "SkuaSim", "gamedata.json"));
         return candidates.FirstOrDefault(File.Exists);
+    }
+
+    /// <summary>
+    /// Where the local AE calendar snapshot lives: next to the default gamedata.json (normally the workspace
+    /// "data\" folder), else "data\ae_calendar.json" under the current directory.
+    /// </summary>
+    public string FindDefaultCalendarPath()
+    {
+        var gameData = FindDefaultGameDataPath();
+        var dir = gameData != null ? Path.GetDirectoryName(gameData)! : Path.Combine(Directory.GetCurrentDirectory(), "data");
+        return Path.Combine(dir, AeCalendar.DefaultFileName);
     }
 
     private sealed class SimScriptLoadContext : AssemblyLoadContext

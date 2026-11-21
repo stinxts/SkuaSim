@@ -500,10 +500,35 @@ public sealed partial class GameDatabaseStore
 
             if (srcQuest.LastSeenUtc > dstQuest.LastSeenUtc)
                 dstQuest.LastSeenUtc = srcQuest.LastSeenUtc;
+
+            if (srcQuest.ObservedReward is { } srcReward)
+            {
+                var samples = srcReward.Samples + (dstQuest.ObservedReward?.Samples ?? 0);
+                if (dstQuest.ObservedReward == null || srcReward.LastSeenUtc >= dstQuest.ObservedReward.LastSeenUtc)
+                    dstQuest.ObservedReward = new CapturedQuestReward
+                    {
+                        Exp = srcReward.Exp, Gold = srcReward.Gold, Rep = srcReward.Rep, FactionID = srcReward.FactionID,
+                        ClassPoints = srcReward.ClassPoints, Coins = srcReward.Coins, LastSeenUtc = srcReward.LastSeenUtc
+                    };
+                dstQuest.ObservedReward.Samples = samples;
+            }
         }
 
         // 6. Merge Classes & Enhancements
         MergeClassesAndEnhancements(target, source);
+
+        // 7. Merge faction names (ID -> name only)
+        target.Factions ??= new();
+        foreach (var (id, srcFaction) in source.Factions ?? new())
+        {
+            if (id <= 0 || string.IsNullOrWhiteSpace(srcFaction.Name))
+                continue;
+            if (!target.Factions.TryGetValue(id, out var dstFaction))
+                target.Factions[id] = dstFaction = new CapturedFaction { ID = id };
+            dstFaction.Name = srcFaction.Name;
+            if (srcFaction.LastSeenUtc > dstFaction.LastSeenUtc)
+                dstFaction.LastSeenUtc = srcFaction.LastSeenUtc;
+        }
     }
 
     private static GameDatabase LoadFromDiskInternal(string filePath)

@@ -27,14 +27,59 @@ public sealed partial class SimWorld
     public bool ServerBoostActive { get; set; }
     public int ClassPoints { get; private set; }
 
+    // Boosts add up (see RewardBoosts): highest gear bonus of the type + consumable +100 % + server +100 %.
     public double EffectiveXpMultiplier =>
-        (CombatProfile?.GearBoosts.XpMultiplier ?? 1.0) * (XpBoostActive ? 2.0 : 1.0) * (ServerBoostActive ? 2.0 : 1.0);
+        RewardBoosts.Combine(CombatProfile?.GearBoosts.XpMultiplier ?? 1.0, XpBoostActive, ServerBoostActive || CalendarBoosts.Xp);
     public double EffectiveClassPointsMultiplier =>
-        (CombatProfile?.GearBoosts.ClassPointsMultiplier ?? 1.0) * (ClassBoostActive ? 2.0 : 1.0) * (ServerBoostActive ? 2.0 : 1.0);
+        RewardBoosts.Combine(CombatProfile?.GearBoosts.ClassPointsMultiplier ?? 1.0, ClassBoostActive, ServerBoostActive || CalendarBoosts.ClassPoints);
     public double EffectiveGoldMultiplier =>
-        (CombatProfile?.GearBoosts.GoldMultiplier ?? 1.0) * (GoldBoostActive ? 2.0 : 1.0) * (ServerBoostActive ? 2.0 : 1.0);
+        RewardBoosts.Combine(CombatProfile?.GearBoosts.GoldMultiplier ?? 1.0, GoldBoostActive, ServerBoostActive || CalendarBoosts.Gold);
     public double EffectiveRepMultiplier =>
-        (CombatProfile?.GearBoosts.RepMultiplier ?? 1.0) * (RepBoostActive ? 2.0 : 1.0) * (ServerBoostActive ? 2.0 : 1.0);
+        RewardBoosts.Combine(CombatProfile?.GearBoosts.RepMultiplier ?? 1.0, RepBoostActive, ServerBoostActive || CalendarBoosts.Rep);
+
+    // ---------------------------------------------------------------- AE calendar server boosts
+
+    private Data.ServerBoostState _calendarBoosts;
+    private long _calendarValidUntilMs = long.MinValue;
+    private bool _calendarCoverageWarned;
+
+    /// <summary>Server-wide boosts the AE calendar lists for the current virtual time (none when not enabled).</summary>
+    public Data.ServerBoostState CalendarBoosts
+    {
+        get
+        {
+            var cal = _ctx.Calendar;
+            if (cal == null)
+                return default;
+            if (Now < _calendarValidUntilMs)
+                return _calendarBoosts;
+
+            var nowUtc = _ctx.Clock.Now;
+            var previous = _calendarBoosts;
+            _calendarBoosts = cal.ServerBoostsAt(nowUtc);
+            var next = cal.NextChangeAfter(nowUtc);
+            _calendarValidUntilMs = next is { } n ? (long)Math.Ceiling((n - _ctx.Clock.Epoch).TotalMilliseconds) : long.MaxValue;
+
+            if (!cal.Covers(nowUtc) && !_calendarCoverageWarned)
+            {
+                _calendarCoverageWarned = true;
+                Trace.Warn($"AE calendar has no data for {Data.AeCalendar.ToEastern(nowUtc):yyyy-MM-dd} (server time): no calendar boosts are applied outside its coverage. Update it with 'skuasim calendar-update'.");
+            }
+            if (_calendarBoosts != previous || !_calendarLogged)
+            {
+                _calendarLogged = true;
+                var titles = string.Join(", ", cal.ActiveAt(nowUtc).Where(e => e.Kind == Data.AeCalendarKinds.ServerBoost).Select(e => e.Title));
+                Trace.World($"AE calendar server boosts at {Data.AeCalendar.ToEastern(nowUtc):yyyy-MM-dd HH:mm} server time: {_calendarBoosts}{(titles.Length > 0 ? $" ({titles})" : "")}.");
+                CalendarBoostLog.Add($"{Data.AeCalendar.ToEastern(nowUtc):yyyy-MM-dd HH:mm} ET: {_calendarBoosts}{(titles.Length > 0 ? $" ({titles})" : "")}");
+            }
+            return _calendarBoosts;
+        }
+    }
+
+    private bool _calendarLogged;
+
+    /// <summary>Calendar boost changes seen during the run (for the report).</summary>
+    public List<string> CalendarBoostLog { get; } = new();
 
     internal static string InferDefaultItemGroup(string? category) =>
         EquipGroup(category) == "weapon" ? "Weapon" : "None";
@@ -259,20 +304,17 @@ public sealed partial class SimWorld
                 var fac = Factions.FirstOrDefault(f => Eq(f.Name, info.RequiredFaction));
                 if (fac == null)
                 {
-                    Factions.Add(new Skua.Core.Models.Factions.Faction
+                    fac = new Skua.Core.Models.Factions.Faction
                     {
                         ID = StableHash.Of(info.RequiredFaction) % 1000 + 100,
-                        Name = info.RequiredFaction,
-                        Rank = info.RequiredFactionRank,
-                        TotalRep = RepForRank(info.RequiredFactionRank),
-                        Rep = 0,
-                        RequiredRep = RepForRank(info.RequiredFactionRank + 1) - RepForRank(info.RequiredFactionRank)
-                    });
+                        Name = info.RequiredFaction
+                    };
+                    SetFactionRep(fac, RepForRank(info.RequiredFactionRank));
+                    Factions.Add(fac);
                 }
                 else if (fac.Rank < info.RequiredFactionRank)
                 {
-                    fac.Rank = info.RequiredFactionRank;
-                    fac.TotalRep = Math.Max(fac.TotalRep, RepForRank(info.RequiredFactionRank));
+                    SetFactionRep(fac, Math.Max(fac.TotalRep, RepForRank(info.RequiredFactionRank)));
                 }
             }
         }

@@ -24,12 +24,13 @@ An **offline, reproducible test environment** for **any Skua/VibeSkua script**, 
 2. **Data-Driven World**: import `QuestData.json` + Collector database (`gamedata.json`) + JSON scenario format + AQW `StatEngine` (**✅ Done**)
 3. **Visual Interface (`SkuaSim.UI`)**: standalone Avalonia 12 dashboard ("Skua without Flash") with multi-resolution scaling, live client/AQW stats state, real AQW gear & enhancement scenario editor, Skua-faithful `Script Options` + `.cfg` import, color-coded Logs/Errors/Trace, and `.md`/`.json` report export (**✅ Done**)
 3.4. **Simulator Robustness**: `KillQuest` AST hints + on-demand monsters on synthesized maps, no-progress (`Stalled`) detector, process-stable hashing + cross-process determinism test, `CLAUDE.md` (**✅ Done 2026-11-20**)
-3.5. **Collector Corrections & Schema v2/v3**: protocol verification sampling, monster level/race/wDPS fix, drop attribution fix, schema v2 (migration + backup, quest-gated rates, passive official drops, map-item quests, reward types), schema v3 (real XP/gold/rep per kill, respawn times, quest-set kill counting, room occupancy) (**🔄 Steps 1–4 done; next: deploy v3, simulator consumption, Step 5**)
+3.5. **Collector Corrections & Schema v2/v3**: protocol verification sampling, monster level/race/wDPS fix, drop attribution fix, schema v2 (migration + backup, quest-gated rates, passive official drops, map-item quests, reward types), schema v3 (real XP/gold/rep per kill, respawn times, quest-set kill counting, room occupancy, quest base rewards, faction names) (**🔄 Steps 1–4 done; Step 5 next**)
+3.6. **Simulator Consumes Real Data + AE Calendar**: measured respawn/XP/gold/rep, reputation ranks, house-item accept requirements, quest-gated map items, wDPS damage estimate, scenario `startDate`, daily/weekly/monthly resets (00:00 US Eastern), AE calendar server boosts (`calendar-update`) (**✅ Done 2026-11-21**)
 4. **Multi-Client (Army), Live Loadouts, Potions & Aura/Boss Combat**: up to 20 concurrent clients sharing rooms/monsters/party, Army sync coordination, `Solo`/`Farm`/`Dodge`/`Boss` role classes + live class/enhancement swaps, Potions/Elixirs/Tonics/Scrolls (`UltrasLW`), and active aura/buff & Ultra boss simulation (**🔜 After 3.5; architecture to be discussed first**)
 5. **Fault Injection, Assertions & Templates**: lag/disconnect/drop failure injection, stall/infinite-loop detector, scenario assertions, diagnostic generator & bug report template (**🔜 Planned**)
 6. **Replay & Public Release**: real session log replay + external developer distribution packaging (CLI flags, official Skua parity, starter DB, license, release archive) (**🔜 Planned**)
 
-Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** ✅ → **Visual UI (`SkuaSim.UI`) & Polish** ✅ → **Simulator Robustness (3.4)** ✅ → **Collector Corrections & Schema v2/v3 (3.5)** 🔄 → **Multi-Client (Army) & Aura/Boss Combat** 🔜 → **Fault Injection & Assertions** → **Replay & Release Packaging**.
+Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** ✅ → **Visual UI (`SkuaSim.UI`) & Polish** ✅ → **Simulator Robustness (3.4)** ✅ → **Collector Corrections & Schema v2/v3 (3.5)** 🔄 → **Simulator Real Data & AE Calendar (3.6)** ✅ → **Multi-Client (Army) & Aura/Boss Combat** 🔜 → **Fault Injection & Assertions** → **Replay & Release Packaging**.
 
 ## Environment Discovered
 - **.NET SDK 10.0.400** installed.
@@ -59,7 +60,8 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
 - **Collected Data Locations:**
   - Primary: `%APPDATA%\VibeSkua\SkuaSim\gamedata.json` (+ `packet_schemas.json`)
   - Automatic mirror in workspace: `data\gamedata.json` (+ `data\packet_schemas.json`)
-  - Schema v2 since 2026-11-20 (migrated from v1: 52 impossible drop records removed, 369 temporary quest-required drops marked quest-gated). Backups: `SkuaSim\gamedata.v1-backup-20261120-203127.json` and `SkuaSim\backups\gamedata.pre-v2-manual-20261120-173107.json`. The v3 Collector migrates v2 → v3 on its first flush (dated `gamedata.v2-backup-<UTC>.json`, nothing deleted).
+  - Schema v2 since 2026-11-20 (migrated from v1: 52 impossible drop records removed, 369 temporary quest-required drops marked quest-gated). Backups: `SkuaSim\gamedata.v1-backup-20261120-203127.json` and `SkuaSim\backups\gamedata.pre-v2-manual-20261120-173107.json`. Schema v3 since 2026-11-21 (v2 backup `gamedata.v2-backup-20261121-010501.json`, nothing deleted).
+  - AE calendar snapshot: `data\ae_calendar.json` (from `skuasim calendar-update`; public artix.com data, read offline by the simulator).
 
 ### Stage 2 — Simulator Core & CLI (`SkuaSim.Core` + `SkuaSim.Cli`) ✅ Completed & Verified
 - **Source Code:**
@@ -71,7 +73,7 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
   - `src/SkuaSim.Core/World/`: `SimWorld.cs`, `SimWorld.StatsAndCombat.cs`, `StatEngine.cs`
   - `src/SkuaSim.Core/Api/`: `BotApi.cs`, `PlayerMapApis.cs`, `CombatKillHuntApis.cs`, `InventoryBankDropsApis.cs`, `QuestsShopsWaitApis.cs`, `SystemSupportApis.cs` (including `BoostsApi` and `ConfigApi`)
   - `src/SkuaSim.Cli/`: `Program.cs` (`skuasim db-stats`, `skuasim compile`, `skuasim run`)
-- **Automated Tests:** `tests/SkuaSim.Core.Tests/` (**14/14 passing**; includes the cross-process determinism test, the Stalled detector and schema v2 drop rules)
+- **Automated Tests:** `tests/SkuaSim.Core.Tests/` (**15/15 passing**; includes the cross-process determinism test, the Stalled detector, schema v2 drop rules and real-data/calendar consumption)
 - **Sample Scenarios:** `scenarios/farmerjoe_lv1_mage.json`, `scenarios/leveling_lv10.json`, `scenarios/eldersblood_done.json`, `scenarios/swagtokena_example.json`, `scenarios/VHL_farm_max lvl.json`, `scenarios/UnlockForgeEnhancements_scenario.json` (all defaulted to `maxRealSeconds: 0` = infinite).
 
 ### Stage 3 — Visual Desktop Dashboard (`SkuaSim.UI`) & Documentation ✅ Completed & Verified
@@ -94,4 +96,11 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
 - **Step 2:** `moveToArea` parsed with the real keys (`monBranch.iLvl`, `sRace`, `wDPS`); drops credited only to the monster killed in the last 5 s; quest turn-in rewards excluded; `getQuests` rewards with type/rate.
 - **Step 3:** schema v2 — dated backup + migration, quest-gated rates measured with the quest active (`Bot.Quests.Active`, RAM only), passive `monsterDrops`, quest-gated map items, nullable `EstimatedDropChance`; the simulator never rolls an unknown rate as 0 % and respects quest gating.
 - **Step 4 (schema v3, 2026-11-21):** from a live session — `addGoldExp` totals include the bonus (`bonusExp`/`bonusGold`/`bonusRep`), so base XP/gold/rep per kill are stored per monster (zeros from capped characters counted apart); respawn = kill → `["respawnMon", "-1", MonMapID]`, per spawn and per monster; the client has no room cap (`world.areaData.intMaxPlayers` missing in 58/58 probes), replaced by peak `Bot.Map.PlayerCount`; quest-gated denominators no longer double-count kills made with several required quests active (`KillsByActiveQuestSet`). Migration v2 → v3 dry-run on live data: 24 monsters recomputed, nothing deleted.
-- **Next:** deploy the v3 Collector and collect a session, then simulator consumption and Step 5 — see PLAN.md "Next Implementations & Open Decisions".
+- **Live v3 session (2026-11-21):** base gold = 3 × monster level and XP = 10 × level on every measured monster (lv 1–90); respawn ~2.4 s (269 samples); `ccqr.rewardObj` is the quest's base reward; the +100 % gold seen on 2026-11-20 was the AE calendar's Double Gold boost.
+- **Next:** Step 5 — see PLAN.md "Next Implementations & Open Decisions".
+
+### Stage 3.6 — Simulator Consumes Real Data + AE Calendar ✅ Completed (2026-11-21)
+- Respawn, kill XP/gold/rep and quest rep/CP from collected data (rules by level and official ~4 s respawn as flagged fallbacks); reputation gain with AQW's rank table (rank 10 = 302,500; the old table was wrong); accept requirements count house items (45 quests, e.g. Prime Fiend Shard → 9555); quest-gated `GetMapItem`; damage estimate from `wDPS` calibrated by level; captured quests used when missing from QuestData.
+- Scenario `startDate`, daily reset 00:00 US Eastern / weekly Friday / monthly 1st (times from VibeSkua.Manager), AE calendar server boosts (`skuasim calendar-update` / `calendar-show`, scenario `boosts.aeCalendarServerBoosts`, CLI `--ae-calendar`, UI checkbox). Core test 15.
+- Collector (additive v3 fields): quest `ObservedReward` from `ccqr`, faction ID → name catalog (no player reputation).
+- Reward rules from the user (2026-11-21): XP = quests + kills, CP = kills, gold = quests + kills + selling, rep = quests; boosts add up (highest same-type gear bonus + consumable +100 % + server +100 %). Selling returns 25 % of the shop price (flagged rule). Collector key census + new-key-set sampling to find the CP field; collector 91EC41620403 installed, the key-census build is pending deploy.

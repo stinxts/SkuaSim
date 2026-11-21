@@ -18,7 +18,8 @@ public sealed class GameDatabase
     /// respawn times (<see cref="CapturedRespawnStats"/>, kill → "respawnMon"), kills keyed by the exact active quest
     /// set (<see cref="CapturedMonster.KillsByActiveQuestSet"/>, fixes double counting when several required quests
     /// are active), and room occupancy (<see cref="CapturedMap.PeakPlayersObserved"/>) replacing the unreachable
-    /// client-side room cap.
+    /// client-side room cap. Additive v3 fields (no migration needed, older files load them empty): quest
+    /// <see cref="CapturedQuest.ObservedReward"/> and the faction ID → name catalog (<see cref="Factions"/>).
     /// </para>
     /// </summary>
     public const int CurrentSchemaVersion = 3;
@@ -38,6 +39,9 @@ public sealed class GameDatabase
     public Dictionary<string, CapturedClassProfile> Classes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<int, CapturedEnhancementProfile> Enhancements { get; set; } = new();
     public Dictionary<int, CapturedProcStat> Procs { get; set; } = new();
+
+    /// <summary>Faction ID -> name (additive in v3; no player reputation is stored).</summary>
+    public Dictionary<int, CapturedFaction> Factions { get; set; } = new();
 
     public static string NormalizeMapName(string? mapName)
     {
@@ -553,6 +557,30 @@ public sealed class CapturedItemRequirement
     public double? RatePercent { get; set; }
 }
 
+/// <summary>Base quest turn-in reward from "ccqr" "rewardObj" (last observed values; they are fixed per quest).</summary>
+public sealed class CapturedQuestReward
+{
+    public long Samples { get; set; }
+    public int Exp { get; set; }
+    public int Gold { get; set; }
+    public int Rep { get; set; }
+    public int FactionID { get; set; }
+    public int ClassPoints { get; set; }
+    public int Coins { get; set; }
+    public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>
+/// Faction catalog entry (game data only): ID and name from "addFaction" or the client's faction list. The player's
+/// own rank/reputation is never stored.
+/// </summary>
+public sealed class CapturedFaction
+{
+    public int ID { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
+}
+
 public sealed class CapturedQuest
 {
     public int ID { get; set; }
@@ -576,6 +604,14 @@ public sealed class CapturedQuest
     public List<CapturedItemRequirement> AcceptRequirements { get; set; } = new();
     public List<CapturedItemRequirement> Requirements { get; set; } = new();
     public List<CapturedItemRequirement> Rewards { get; set; } = new();
+
+    /// <summary>
+    /// Base turn-in reward observed from the server ("ccqr" "rewardObj": intExp, intGold, iRep, FactionID, iCP,
+    /// intCoins). These are base values without boosts (verified: ccqr intGold 1000 vs addGoldExp intGold 2500 with
+    /// bonusGold 1500) and are not reduced at level cap. Null until a turn-in is observed. QuestData.json has no
+    /// reputation or class points, so this is the only source for them.
+    /// </summary>
+    public CapturedQuestReward? ObservedReward { get; set; }
 
     public long AcceptedCount { get; set; }
     public long TurnInCount { get; set; }

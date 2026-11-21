@@ -51,6 +51,10 @@ dotnet run --project src\SkuaSim.UI
 - **Threading:** the script's main thread drives virtual time (`SimClock.Advance`). Every `SimWorld` mutation
   happens under `World.Sync`. The current design assumes one player per run; Phase 4 (multi-client) needs a new
   clock coordinator and per-account RNG — discuss before changing this.
+- **Time & calendar:** the virtual start is `scenario.startDate` (default 2026-01-01 12:00 UTC). AQW server time is US
+  Eastern (`AeCalendar.ToEastern`): dailies reset at 00:00, weeklies Friday 00:00, monthlies on the 1st. The AE calendar
+  (`data\ae_calendar.json`) is only downloaded by `skuasim calendar-update`; simulations read the local file and
+  never touch the network.
 - **Data tiers:** scenario > collected data (`gamedata.json` + `QuestData.json`) > synthesized fallback.
   Anything invented must be reported with `Trace.Synthesize(key, description)` (shown in Violet in the UI).
   Never invent data for captured or scenario-defined maps.

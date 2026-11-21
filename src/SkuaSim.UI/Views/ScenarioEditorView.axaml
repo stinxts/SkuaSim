@@ -164,7 +164,15 @@
                                 </StackPanel>
                             </Border>
 
-                            <CheckBox Content="Member (Upgrade)" IsChecked="{Binding IsMember}" />
+                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="16">
+                                <CheckBox Grid.Column="0" Content="Member (Upgrade)" IsChecked="{Binding IsMember}" VerticalAlignment="Bottom" />
+                                <StackPanel Grid.Column="1" Spacing="3">
+                                    <TextBlock Text="Virtual Start (UTC, blank = 2026-01-01 12:00)" Classes="MetricLabel" />
+                                    <TextBox Text="{Binding StartDateText}"
+                                             PlaceholderText="e.g. 2026-11-20T19:00:00Z"
+                                             ToolTip.Tip="Virtual start time in UTC. Drives the day of week, AQW's daily reset (00:00 US Eastern; weekly on Friday, monthly on the 1st) and the AE calendar boosts." />
+                                </StackPanel>
+                            </Grid>
 
                             <!-- Location & Simulation Duration / Limits -->
                             <Grid ColumnDefinitions="*,*,*,1.5*,*,*,*" ColumnSpacing="8">
@@ -225,6 +233,8 @@
                                         <CheckBox Content="2x Gold Boost" IsChecked="{Binding GoldBoost}" />
                                         <CheckBox Content="2x Reputation (Rep)" IsChecked="{Binding RepBoost}" />
                                         <CheckBox Content="2x Server Boost (All)" IsChecked="{Binding ServerBoost}" />
+                                        <CheckBox Content="AE Calendar Server Boosts" IsChecked="{Binding AeCalendarServerBoosts}"
+                                                  ToolTip.Tip="Apply the server-wide double XP/Gold/Rep/CP that the Artix calendar lists for the virtual date. Needs data\ae_calendar.json (run 'skuasim calendar-update')." />
                                     </WrapPanel>
                                 </StackPanel>
                             </Border>

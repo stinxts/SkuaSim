@@ -100,7 +100,8 @@ public sealed partial class PacketCollectorEngine
                 || _delta.Quests.Count > 0
                 || _delta.Classes.Count > 0
                 || _delta.Enhancements.Count > 0
-                || _delta.Procs.Count > 0;
+                || _delta.Procs.Count > 0
+                || _delta.Factions.Count > 0;
         }
     }
 
@@ -129,7 +130,7 @@ public sealed partial class PacketCollectorEngine
     private static readonly HashSet<string> HandledServerCommands = new(StringComparer.Ordinal)
     {
         "moveToArea", "ct", "event", "updateClass", "equipItem", "sAct", "stu",
-        "dropItem", "addItems", "loadShop", "getQuests", "ccqr", "monsterDrops", "addGoldExp"
+        "dropItem", "addItems", "loadShop", "getQuests", "ccqr", "monsterDrops", "addGoldExp", "addFaction"
     };
 
     public void ProcessExtensionPacketJObject(JObject root)
@@ -165,6 +166,7 @@ public sealed partial class PacketCollectorEngine
         {
             SessionPacketsProcessed++;
             SchemaSampler.CountCommand(cmd);
+            SchemaSampler.CountKeySet(cmd, dataObj);
             var sampleMap = cmd == "moveToArea"
                 ? GameDatabase.NormalizeMapName(dataObj["strMapName"]?.ToString())
                 : _currentMapName;
@@ -216,6 +218,9 @@ public sealed partial class PacketCollectorEngine
                     break;
                 case "addGoldExp":
                     HandleAddGoldExpPacket(dataObj);
+                    break;
+                case "addFaction":
+                    HandleAddFactionPacket(dataObj);
                     break;
             }
         }
@@ -1244,7 +1249,51 @@ public sealed partial class PacketCollectorEngine
             if (!string.IsNullOrWhiteSpace(_currentMapName))
                 cq.MapsTurnedInOn.Add(_currentMapName);
             cq.LastSeenUtc = DateTime.UtcNow;
+
+            // Verified "rewardObj" keys: { typ "q", intExp, intGold, iRep, FactionID, iCP, intCoins } (base values).
+            if (dataObj["rewardObj"] is JObject reward)
+            {
+                var r = cq.ObservedReward ??= new CapturedQuestReward();
+                r.Samples++;
+                r.Exp = ParseInt(reward["intExp"]);
+                r.Gold = ParseInt(reward["intGold"]);
+                r.Rep = ParseInt(reward["iRep"]);
+                r.FactionID = ParseInt(reward["FactionID"]);
+                r.ClassPoints = ParseInt(reward["iCP"]);
+                r.Coins = ParseInt(reward["intCoins"]);
+                r.LastSeenUtc = DateTime.UtcNow;
+            }
         }
+    }
+
+    /// <summary>
+    /// "addFaction" (verified keys): { faction: { FactionID, sName, iRank, iRep, iSpillRep, iRepToRank, CharFactionID } }.
+    /// Only the ID → name pair is kept; the player's rank and reputation are never stored.
+    /// </summary>
+    private void HandleAddFactionPacket(JObject dataObj)
+    {
+        if (dataObj["faction"] is JObject faction)
+            RecordFactionInternal(ParseInt(faction["FactionID"]), faction["sName"]?.ToString());
+    }
+
+    /// <summary>Records faction ID → name pairs from the client's faction list (no reputation values).</summary>
+    public void RecordFactionNames(IEnumerable<(int Id, string? Name)> factions)
+    {
+        lock (_sync)
+        {
+            foreach (var (id, name) in factions)
+                RecordFactionInternal(id, name);
+        }
+    }
+
+    private void RecordFactionInternal(int id, string? name)
+    {
+        if (id <= 0 || string.IsNullOrWhiteSpace(name))
+            return;
+        if (!_delta.Factions.TryGetValue(id, out var f))
+            _delta.Factions[id] = f = new CapturedFaction { ID = id };
+        f.Name = name.Trim();
+        f.LastSeenUtc = DateTime.UtcNow;
     }
 
     private void RegisterMonsterSpawn(

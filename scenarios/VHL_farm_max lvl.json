@@ -83,7 +83,6 @@
   "World": {
     "GenericDropChance": 0.5,
     "SynthesizeDrops": true,
-    "MonsterRespawnSeconds": 12,
     "PlayerRespawnSeconds": 11,
     "JoinDelayMs": 1500,
     "LenientShops": true,

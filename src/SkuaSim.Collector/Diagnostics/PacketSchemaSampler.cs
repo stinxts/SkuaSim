@@ -50,7 +50,9 @@ public sealed class PacketSchemaSampler
     {
         "moveToArea", "addGoldExp", "dropItem", "addItems", "ccqr", "getQuests", "monsterDrops",
         // Monster respawn/update candidates (exact name to be confirmed by the command census)
-        "mtls", "respawnMon"
+        "mtls", "respawnMon",
+        // Sell-back gold (CharItemID / iQtyNow are redacted)
+        "sellItem"
     };
 
     /// <summary>
@@ -67,6 +69,40 @@ public sealed class PacketSchemaSampler
     private readonly object _sync = new();
     private readonly Dictionary<string, List<PacketSchemaSample>> _pendingBuckets = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HashSet<string>> _seenShapesByCategory = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, HashSet<string>> _seenKeySetsByCategory = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Map-independent key signature of a payload: sorted top-level keys, plus the keys of nested objects whose keys are
+    /// names (not IDs), e.g. "cmd,id,intExp,intGold,typ" or "QuestID,rewardObj{FactionID,iCP,iRep},...". Key names only.
+    /// </summary>
+    public static string KeySignature(JObject payload)
+    {
+        var parts = new List<string>();
+        foreach (var prop in payload.Properties().OrderBy(p => p.Name, StringComparer.Ordinal))
+        {
+            if (prop.Value is JObject nested && nested.Properties().Any() && nested.Properties().All(p => !char.IsDigit(p.Name[0])))
+                parts.Add($"{prop.Name}{{{string.Join(",", nested.Properties().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal))}}}");
+            else
+                parts.Add(prop.Name);
+        }
+        return string.Join(",", parts);
+    }
+
+    /// <summary>
+    /// Counts the key signature of a protocol packet in the command census ("keys:addGoldExp:bonusGold,cmd,..."): key
+    /// names and counts only, never values. Reveals new fields (e.g. class points) even when samples are full.
+    /// </summary>
+    public void CountKeySet(string cmd, JObject dataObj)
+    {
+        if (Enabled && dataObj != null && cmd != "moveToArea" && (ProtocolCommands.Contains(cmd) || KeyCensusExtraCommands.Contains(cmd)))
+            CountCommand($"keys:{cmd}:{KeySignature(dataObj)}");
+    }
+
+    /// <summary>Non-sampled commands whose key names are counted too (class points / selling / factions).</summary>
+    private static readonly HashSet<string> KeyCensusExtraCommands = new(StringComparer.Ordinal)
+    {
+        "updateClass", "addFaction", "stu"
+    };
     private readonly Dictionary<string, long> _pendingCommandCounts = new(StringComparer.Ordinal);
     private readonly HashSet<string> _commandsSeenThisSession = new(StringComparer.Ordinal);
     private long _countsSinceFlush;
@@ -203,7 +239,16 @@ public sealed class PacketSchemaSampler
                 _seenShapesByCategory[category] = seenShapes;
             }
 
-            if (seenShapes.Count >= maxSamples)
+            if (!_seenKeySetsByCategory.TryGetValue(category, out var seenKeySets))
+            {
+                seenKeySets = new HashSet<string>(StringComparer.Ordinal);
+                _seenKeySetsByCategory[category] = seenKeySets;
+            }
+
+            // Full categories still accept a sample with a never-seen key set (e.g. a new reward key), up to 2x the cap,
+            // so a new protocol field is never hidden behind per-map samples.
+            var newKeySet = !seenKeySets.Contains(KeySignature(dataObj));
+            if (seenShapes.Count >= maxSamples && (!newKeySet || seenShapes.Count >= maxSamples * 2))
                 return;
 
             var playerAliasMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -215,6 +260,7 @@ public sealed class PacketSchemaSampler
 
             if (!seenShapes.Add(shapeKey))
                 return;
+            seenKeySets.Add(KeySignature(dataObj));
 
             if (!_pendingBuckets.TryGetValue(category, out var list))
             {
@@ -281,6 +327,7 @@ public sealed class PacketSchemaSampler
             // Retroactively re-sanitize any legacy samples already on disk (e.g. redacting legacy casterId/uid)
             // and index their structural shapes so merging across sessions never duplicates them.
             var existingShapes = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            var existingKeySets = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (var (cat, list) in existing)
             {
                 var shapeSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -299,8 +346,14 @@ public sealed class PacketSchemaSampler
                     if (string.IsNullOrWhiteSpace(sample.ShapeKey))
                         sample.ShapeKey = ComputeShapeKey(sample.Command, sample.MapContext, sample.Payload);
 
-                    if (shapeSet.Add(sample.ShapeKey) && cleanedList.Count < MaxSamplesFor(cat))
+                    var keySet = KeySignature(sample.Payload);
+                    var keySets = existingKeySets.TryGetValue(cat, out var ks) ? ks : existingKeySets[cat] = new HashSet<string>(StringComparer.Ordinal);
+                    if (shapeSet.Add(sample.ShapeKey) &&
+                        (cleanedList.Count < MaxSamplesFor(cat) || (!keySets.Contains(keySet) && cleanedList.Count < MaxSamplesFor(cat) * 2)))
+                    {
                         cleanedList.Add(sample);
+                        keySets.Add(keySet);
+                    }
                 }
                 existing[cat] = cleanedList;
                 existingShapes[cat] = shapeSet;
@@ -320,10 +373,13 @@ public sealed class PacketSchemaSampler
                     existingShapes[cat] = shapeSet;
                 }
 
+                var keySets = existingKeySets.TryGetValue(cat, out var ks) ? ks : existingKeySets[cat] = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var s in samples)
                 {
-                    if (dst.Count >= MaxSamplesFor(cat))
-                        break;
+                    var keySet = KeySignature(s.Payload);
+                    var fits = dst.Count < MaxSamplesFor(cat) || (!keySets.Contains(keySet) && dst.Count < MaxSamplesFor(cat) * 2);
+                    if (!fits)
+                        continue;
                     var key = string.IsNullOrWhiteSpace(s.ShapeKey)
                         ? ComputeShapeKey(s.Command, s.MapContext, s.Payload)
                         : s.ShapeKey;
@@ -331,6 +387,7 @@ public sealed class PacketSchemaSampler
                     {
                         s.ShapeKey = key;
                         dst.Add(s);
+                        keySets.Add(keySet);
                     }
                 }
             }

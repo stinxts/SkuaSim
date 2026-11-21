@@ -108,7 +108,28 @@ Revised after a data-quality audit of the live `gamedata.json` (13.7k flushes, 8
 18. Remove the hardcoded OneDrive mirror path default (needed before a public release).
 19. Resolve `monsterDrops` quest **names** (`questGated`) to quest IDs when `sReqQuests` is empty, so those drops can leave `unverified`.
 
-**Then, in the simulator:** consume monster `WeaponDps`, `KillRewards` (base XP/gold/rep per kill, with the scenario's boosts applied on top), per-spawn `Respawn` (fallback: monster average, then the fixed 12 s with a Violet warning), quest-gated `GetMapItem` (require one of `RequiredQuestIds` to be active), quest reward types/rates, and `PeakPlayersObserved` as a lower bound for Phase 4 room routing.
+**Phase 3.6 — The simulator consumes the real data, AE calendar & server resets:** ✅ Done (2026-11-21)
+
+*Findings from the v3 live session that shaped it:* base gold per kill = **3 × monster level** and base XP = **10 × level** on every measured monster of level 1–90 (level-255 event monsters do not follow it); respawn is **~2.4 s** (1.6–3.0 s, 269 samples) vs. the fixed 12 s the simulator used (Artix's [combat update](https://www.artix.com/posts/aqw-combat-improvements/) says "about 3 to 5 seconds"); `wDPS` is **not** a direct damage value (observed hit / wDPS ranges 0.55–3.7, level-dependent); the simulator never granted reputation at all and its rank table was wrong (rank 10 = 100,900 instead of AQW's 302,500); quest reputation/class points are not in `QuestData.json`, only in `ccqr.rewardObj` (base values); accept requirements ignored the house inventory (45 quests need a house item, e.g. Prime Fiend Shard → 9555); dailies never reset; the +100 % gold bonus seen on 2026-11-20 was the AE calendar's "Double Gold Boost 11.20.26", not membership.
+
+*Collector (additive v3 fields, no migration):* `CapturedQuest.ObservedReward` from `ccqr.rewardObj` (`intExp`, `intGold`, `iRep`, `FactionID`, `iCP`, `intCoins` — base values, verified against `addGoldExp`), and `GameDatabase.Factions` (ID → name from `addFaction` and `Bot.Reputation.FactionList`; the player's rank/rep and `CharFactionID` are never stored). Collector test 10 extended.
+
+*Simulator:*
+1. ✅ **Respawn:** scenario `world.monsterRespawnSeconds` (now optional; removed from the sample scenarios) > spawn average > monster average > median of measured monsters (Violet) > official ~4 s (Violet).
+2. ✅ **Kill rewards:** measured base XP/gold > rule 10×/3× level (Violet), boosts applied on top, gold capped at 100,000,000; reputation per kill when measured for a single faction; class points per kill stay an estimate (Violet, no packet carries them).
+3. ✅ **Reputation:** new `GainReputation` (scenario faction > collected name > `Faction #id` Violet), correct rank table `(5·r·(r+1))²` (900 … 302,500), quest rep/CP from `ObservedReward` (Violet note for quests never turned in while collecting).
+4. ✅ **House items:** accept requirements count inventory + bank + **house**; the failure message names house items.
+5. ✅ **`GetMapItem`:** a captured map item with `RequiredQuestIds` gives nothing unless one of those quests is active (logged).
+6. ✅ **Monster damage without combat data:** `wDPS` × the median hit/wDPS ratio of measured monsters within ±10 levels (Violet), then the old level formula.
+7. ✅ **Captured quests missing from QuestData:** built from the collector's requirements/rewards (`RatePercent`) and observed base reward instead of an empty quest.
+8. ✅ **Start date & server resets:** scenario `startDate` (UTC; default 2026-01-01 12:00 UTC), daily reset 00:00 US Eastern, weekly on Friday, monthly on the 1st (from VibeSkua.Manager: "Daily Reset (00:00 EST)", "Weekly Reset (Fri 00:00 EST)"); quest `Field` `id*`/`iw*`/`im*` decides the period. Report shows the start (UTC + server time) and resets crossed.
+9. ✅ **AE calendar:** `skuasim calendar-update` downloads the public https://www.artix.com/calendar/ (the same source as VibeSkua's Calendar tool) into `data\ae_calendar.json`: events with start (`?d=` value, Eastern) and duration read from each boost's page ("72 hour DOUBLE Gold…"; cached on later updates); `calendar-show [--date]`. Scenario `boosts.aeCalendarServerBoosts` (UI checkbox, CLI `--ae-calendar`) applies the double XP/gold/rep/CP active at the virtual time; outside the file's coverage nothing is applied and a warning is shown. The simulator only reads the local file (offline, deterministic; the report shows the file's fingerprint). Resource boosts (Legion Token, Void Aura, Blood Gems…) are recorded but not simulated yet.
+10. ✅ UI: "Virtual Start (UTC)" field and "AE Calendar Server Boosts" checkbox. CLI: `--start-date`, `--ae-calendar`, `--calendar`. Core test 15 (fixture data + a real calendar excerpt).
+
+11. ✅ **Reward sources & boost stacking (user rules, 2026-11-21):** XP from quests and kills; class points from kills; gold from quests, kills and **selling** items; reputation from quests. Boosts **add up**: highest gear bonus of the type (same-type gear never stacks) + consumable +100 % + server +100 % — e.g. 1000 rep + server boost = 2000; 1000 XP + XP boost + Awe-scended armor (+50 %) = 2500 (`RewardBoosts.Combine`, also in the editor preview). Matches the live sample 210 gold → 525 (server +100 %, gear +50 %). Selling a gold item now returns 25 % of its shop price (flagged rule until the `sellItem` response is verified; AC items return nothing yet). Kill reputation and quest class points are applied only if the collector ever measures them (never seen so far).
+12. ✅ Collector: key-name census per command (`keys:<cmd>:<keys>` in `CommandCounts`, names only) and a full sample category still accepts a never-seen key set, so a new field (e.g. a class-points key) cannot be hidden by per-map samples; `sellItem` sampled for the sell-back value.
+
+*Not done / limits:* house items are edited in the scenario JSON (`"house": [...]`), like inventory and bank (the editor has no item lists yet); class points per kill remain an estimate until the CP packet is identified (user is generating CP to find it); the sell-back share is a rule until verified.
 
 **Known data limitations after v2:** v1-era quest-reward contamination that is not provably impossible is kept (not separable); permanent quest items (e.g. Mystic Quills 0.04 %) keep a diluted all-kills rate because the server does not flag them in `sReqQuests`.
 
@@ -116,15 +137,16 @@ Revised after a data-quality audit of the live `gamedata.json` (13.7k flushes, 8
 
 ## Next Implementations (in order) & Open Decisions
 **Next, in order:**
-1. **Play a session with the v3 Collector** (deployed) to fill `KillRewards`/`Respawn`/`PeakPlayersObserved`.
-2. **Simulator consumption** of the new data (WeaponDps, XP/gold, respawn, quest-gated map items, reward types/rates).
-3. **Phase 3.5 Step 5** — class combat stats by level/gear, enhancement profile, mirror path, quest-name → ID resolution.
+1. **Deploy the Collector with quest rewards + faction names** and keep collecting (turn-ins fill `ObservedReward`, needed for quest rep/CP).
+2. **Phase 3.5 Step 5** — class combat stats by level/gear, enhancement profile, mirror path, quest-name → ID resolution.
+3. **AE resource boosts** (Legion Token, Void Aura, Blood Gems, Spirit Orbs…): map each boost to the items/quests it doubles, then simulate them with the calendar.
 4. **Phase 4** — after the design discussion below.
 
 **Open decisions (to discuss before implementing):**
 - **Phase 4 architecture:** a clock coordinator for up to 20 clients (today one script thread drives `SimClock`) and per-account / per-system RNG streams (today a single `ctx.Rng`), so multi-client runs stay deterministic. Start with 2 clients.
 - **Background-thread determinism:** `SimClock.WaitBackground` gives up after 2 s of wall-clock time, so results with script background threads can depend on machine speed.
-- **Start date:** every run starts on 2026-01-01 12:00 UTC (a Thursday); add a scenario `startDate` for day-of-week/time-dependent scripts.
+- ~~**Start date**~~ — done in Phase 3.6 (scenario `startDate`, server resets, AE calendar).
+- ~~**Boost stacking**~~ — additive (user rule, consistent with the live data); implemented.
 - **Active `getMonsterDrops` mode:** not implemented; only if explicitly wanted (opt-in, off by default, throttled) because it sends packets from the user's account.
 - **Tests outside this machine:** tests need a local Skua install and read the live `gamedata.json`; a frozen test data snapshot would make them reproducible elsewhere.
 

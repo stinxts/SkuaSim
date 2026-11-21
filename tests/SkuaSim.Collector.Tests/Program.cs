@@ -1021,6 +1021,41 @@ try
     var mergedWolf = mergedV3.Monsters["id:900"];
     Assert(mergedWolf.KillRewards.TotalBaseExp == 520 && mergedWolf.Respawn.Samples == 1 && mergedV3.Maps["chaoscrypt"].Monsters[2].Respawn.Samples == 1 &&
            mergedWolf.KillsByActiveQuestSet.GetValueOrDefault("10,11") == 2, "Merge must keep kill rewards, respawn samples and quest-set kills");
+    // (e) Base quest reward from the real ccqr rewardObj (quest 7277) and the faction ID -> name catalog from addFaction
+    // (keys verified from the live skeleton; the player's rank/rep must not be stored).
+    var rewardEng = new PacketCollectorEngine();
+    rewardEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"QuestID":7277,"msg":"","rewardObj":{"FactionID":60,"typ":"q","intCoins":0,"intExp":0,"iCP":0,"iRep":150,"intGold":0},"sName":"Star of the Sandsea","cmd":"ccqr","bSuccess":1} } }""");
+    rewardEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"addFaction","faction":{"FactionID":"60","CharFactionID":"123456","iRank":"4","iRepToRank":"12500","sName":"Sandsea","iSpillRep":"1500","iRep":"11500","bitSuccess":"1"}} } }""");
+    rewardEng.RecordFactionNames(new[] { (13, (string?)"Oasis") });
+    var rewardDelta = rewardEng.TakeDeltaSnapshot();
+    var obs = rewardDelta.Quests[7277].ObservedReward;
+    Assert(obs != null && obs.Rep == 150 && obs.FactionID == 60 && obs.Gold == 0 && obs.Samples == 1, "ccqr rewardObj must be stored as the quest's base reward");
+    Assert(rewardDelta.Factions[60].Name == "Sandsea" && rewardDelta.Factions[13].Name == "Oasis", "Faction names must be cataloged");
+    var factionJson = Newtonsoft.Json.JsonConvert.SerializeObject(rewardDelta.Factions);
+    Assert(!factionJson.Contains("11500") && !factionJson.Contains("123456") && !factionJson.Contains("iRank"), "The player's faction rank/rep/CharFactionID must never be stored");
+    var rewardMerged = new GameDatabase();
+    GameDatabaseStore.MergeInto(rewardMerged, rewardDelta);
+    GameDatabaseStore.MergeInto(rewardMerged, rewardDelta);
+    Assert(rewardMerged.Quests[7277].ObservedReward!.Samples == 2 && rewardMerged.Quests[7277].ObservedReward!.Rep == 150 && rewardMerged.Factions.Count == 2,
+        "Merge must keep the latest base reward, count samples and keep faction names");
+
+    // (f) A full sample category still accepts a never-seen key set (e.g. a class-points key in addGoldExp), and the
+    // key census records key names per command even when samples are full.
+    var keySampler = new SkuaSim.Collector.Diagnostics.PacketSchemaSampler { Enabled = true };
+    for (var i = 0; i < SkuaSim.Collector.Diagnostics.PacketSchemaSampler.MaxSamplesPerCategory + 3; i++)
+        keySampler.TryCaptureProtocol("addGoldExp", Newtonsoft.Json.Linq.JObject.Parse("""{"cmd":"addGoldExp","typ":"m","intExp":50,"intGold":30,"id":2}"""), true, 0, null, $"map{i}");
+    var withCp = Newtonsoft.Json.Linq.JObject.Parse("""{"cmd":"addGoldExp","typ":"m","intExp":50,"intGold":30,"id":2,"iCP":12}""");
+    keySampler.TryCaptureProtocol("addGoldExp", withCp, true, 0, null, "map99");
+    keySampler.CountKeySet("addGoldExp", withCp);
+    var keyPath = Path.Combine(v3Dir, "key_schemas.json");
+    keySampler.FlushToFiles(keyPath);
+    var keyDoc = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(keyPath));
+    var gExpSamples = (Newtonsoft.Json.Linq.JArray)keyDoc["Categories"]!["proto_addGoldExp"]!;
+    Assert(gExpSamples.Count == SkuaSim.Collector.Diagnostics.PacketSchemaSampler.MaxSamplesPerCategory + 1 && gExpSamples.Any(s => s["Payload"]?["iCP"] != null),
+        $"A new key set must be sampled even when the category is full (got {gExpSamples.Count})");
+    Assert(keyDoc["CommandCounts"]!.Children<Newtonsoft.Json.Linq.JProperty>().Any(p => p.Name == "keys:addGoldExp:cmd,iCP,id,intExp,intGold,typ"),
+        "The key census must record the key names of each command");
+
     var mergedTwice = v3Store.FlushDelta(new GameDatabase());
     Assert(mergedTwice.Monsters["id:900"].KillRewards.Samples == 3 && Directory.GetFiles(v3Dir, "gamedata.v2-backup-*.json").Length == 1,
         "A v3 file must not be migrated again and empty flushes must not change counters");

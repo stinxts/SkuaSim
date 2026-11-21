@@ -49,6 +49,18 @@ public sealed class SimulationReport
     public List<CompileDiagnostic> CompileErrors { get; init; } = new();
     public string? TraceFilePath { get; init; }
 
+    /// <summary>Virtual start time (scenario "startDate" or the default 2026-01-01 12:00 UTC).</summary>
+    public DateTime StartUtc { get; init; }
+
+    /// <summary>Daily (and weekly/monthly) server resets crossed during the run (00:00 US Eastern).</summary>
+    public int ServerResets { get; init; }
+
+    /// <summary>AE calendar file used for server boosts (null when the scenario does not use it).</summary>
+    public string? CalendarInfo { get; init; }
+
+    /// <summary>Calendar server-boost states observed during the run.</summary>
+    public List<string> CalendarBoosts { get; init; } = new();
+
     public string ToJson() => JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
 
     public string ToMarkdown()
@@ -64,6 +76,17 @@ public sealed class SimulationReport
         sb.AppendLine($"- **Compile Time:** `{CompileDuration.TotalMilliseconds:F0} ms`");
         sb.AppendLine($"- **Real Time:** `{RealDuration.TotalSeconds:F2} s`");
         sb.AppendLine($"- **Simulated (Virtual) Time:** `{FormatVirtual(VirtualDuration)}`");
+        if (StartUtc != default)
+        {
+            var startEt = Data.AeCalendar.ToEastern(StartUtc);
+            sb.AppendLine($"- **Virtual Start:** `{StartUtc:yyyy-MM-dd HH:mm} UTC` ({startEt:ddd yyyy-MM-dd HH:mm} server time){(ServerResets > 0 ? $", {ServerResets} daily reset(s) crossed" : "")}");
+        }
+        if (!string.IsNullOrEmpty(CalendarInfo))
+        {
+            sb.AppendLine($"- **AE Calendar:** `{CalendarInfo}`");
+            foreach (var b in CalendarBoosts)
+                sb.AppendLine($"  - Server boosts {b}");
+        }
         sb.AppendLine($"- **Total API Calls:** `{TotalApiCalls:N0}`");
         if (!string.IsNullOrEmpty(TraceFilePath))
             sb.AppendLine($"- **Full Trace File:** `{TraceFilePath}`");

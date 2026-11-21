@@ -38,6 +38,18 @@ public sealed record ClassArchetype(
     double PassiveDodgeBonus,
     double DamageReduction);
 
+/// <summary>
+/// How AQW reward boosts stack: bonuses are added to the base, not multiplied. The gear bonus is the highest one of
+/// that type (gear of the same type never stacks), the consumable boost adds +100 % and the server boost +100 %.
+/// Example: 1000 rep + server rep boost = 2000; 1000 XP with an XP boost and +50 % XP gear = 1000 + 1500 = 2500.
+/// Matches the live data: base gold 210 with +100 % server Double Gold and +50 % gear arrived as 525 (210 × 2.5).
+/// </summary>
+public static class RewardBoosts
+{
+    public static double Combine(double gearMultiplier, bool consumableBoost, bool serverBoost) =>
+        1.0 + Math.Max(0.0, gearMultiplier - 1.0) + (consumableBoost ? 1.0 : 0.0) + (serverBoost ? 1.0 : 0.0);
+}
+
 public sealed class GearBoostProfile
 {
     public double DamageAllMultiplier { get; init; } = 1.0;

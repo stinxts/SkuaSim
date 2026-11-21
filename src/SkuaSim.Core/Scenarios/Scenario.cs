@@ -12,6 +12,21 @@ public sealed class Scenario
     public string? Name { get; set; }
     public string? Description { get; set; }
     public int? Seed { get; set; }
+
+    /// <summary>Default virtual start time (a Thursday) used when <see cref="StartDate"/> is not set.</summary>
+    public static readonly DateTime DefaultStartUtc = new(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>
+    /// Virtual start time of the run (UTC, e.g. "2026-11-20T19:00:00Z"). Drives the day of week, AQW's daily/weekly
+    /// resets (00:00 US Eastern; weekly on Friday) and, with <see cref="BoostsSetup.AeCalendarServerBoosts"/>, the AE
+    /// calendar's server boosts. Null = 2026-01-01 12:00 UTC.
+    /// </summary>
+    public DateTime? StartDate { get; set; }
+
+    [JsonIgnore]
+    public DateTime EffectiveStartUtc => StartDate is { } d
+        ? (d.Kind == DateTimeKind.Utc ? d : d.Kind == DateTimeKind.Local ? d.ToUniversalTime() : DateTime.SpecifyKind(d, DateTimeKind.Utc))
+        : DefaultStartUtc;
     public PlayerSetup Player { get; set; } = new();
     public LocationSetup Location { get; set; } = new();
     public List<ItemSetup> Inventory { get; set; } = new();
@@ -155,7 +170,11 @@ public sealed class WorldSetup
     public double GenericDropChance { get; set; } = 0.5;
     /// <summary>Allow inventing drops for items the script farms but the collector never saw.</summary>
     public bool SynthesizeDrops { get; set; } = true;
-    public int MonsterRespawnSeconds { get; set; } = 12;
+    /// <summary>
+    /// Forces one respawn delay for every monster. Null (default) uses the collector's measured respawn per spawn /
+    /// monster, then the median of measured monsters, then AQW's official ~4 s.
+    /// </summary>
+    public int? MonsterRespawnSeconds { get; set; }
     public int PlayerRespawnSeconds { get; set; } = 11;
     public int JoinDelayMs { get; set; } = 1500;
     /// <summary>Buying from shops/items the collector never saw succeeds (flagged) instead of failing.</summary>
@@ -188,7 +207,14 @@ public sealed class BoostsSetup
     public bool ClassPointsBoost { get; set; }
     public bool GoldBoost { get; set; }
     public bool RepBoost { get; set; }
+    /// <summary>Forces a server-wide double XP/gold/rep/CP for the whole run (independent of the calendar).</summary>
     public bool ServerBoost { get; set; }
+
+    /// <summary>
+    /// Apply the server-wide boosts the AE calendar lists for the virtual date (needs a local ae_calendar.json from
+    /// "skuasim calendar-update"; dates outside its coverage get no calendar boost and a warning).
+    /// </summary>
+    public bool AeCalendarServerBoosts { get; set; }
     public List<GearSlotBoostSetup> EquipmentBoosts { get; set; } = new();
 }
 

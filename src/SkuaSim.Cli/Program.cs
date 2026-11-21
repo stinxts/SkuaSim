@@ -28,8 +28,69 @@ internal static class CliEntry
             "db-stats" or "stats" => RunDbStats(rest, installation),
             "compile" => RunCompile(rest, installation),
             "run" => RunSimulation(rest, installation),
+            "calendar-update" => RunCalendarUpdate(rest, installation),
+            "calendar-show" => RunCalendarShow(rest, installation),
             _ => RunUnknown(cmd, installation)
         };
+    }
+
+    private static string CalendarPathFor(string[] args, SkuaInstallation installation) =>
+        GetOption(args, "--calendar") ?? new SimulationRunner(installation).FindDefaultCalendarPath();
+
+    /// <summary>Downloads the public AE calendar (artix.com/calendar) into the local snapshot used by the simulator.</summary>
+    private static int RunCalendarUpdate(string[] args, SkuaInstallation installation)
+    {
+        var path = CalendarPathFor(args, installation);
+        Console.WriteLine($"Downloading {AeCalendar.SourceUrl} ...");
+        try
+        {
+            var previous = AeCalendar.TryLoad(path);
+            var calendar = AeCalendar.DownloadAsync(previous, Console.WriteLine).GetAwaiter().GetResult();
+            if (calendar.Events.Count == 0)
+            {
+                Console.Error.WriteLine("No events found on the calendar page (the page format may have changed). The local file was not changed.");
+                return 1;
+            }
+            calendar.Save(path);
+            PrintCalendarSummary(calendar, path);
+            return 0;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+        {
+            Console.Error.WriteLine($"Calendar update failed: {ex.Message}");
+            return 1;
+        }
+    }
+
+    private static int RunCalendarShow(string[] args, SkuaInstallation installation)
+    {
+        var path = CalendarPathFor(args, installation);
+        var calendar = AeCalendar.TryLoad(path);
+        if (calendar == null)
+        {
+            Console.Error.WriteLine($"No calendar at '{path}'. Run 'skuasim calendar-update' first.");
+            return 1;
+        }
+        PrintCalendarSummary(calendar, path);
+        if (GetOption(args, "--date") is { } dateText && DateTime.TryParse(dateText, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var at))
+        {
+            Console.WriteLine();
+            Console.WriteLine($"At {at:u} ({AeCalendar.ToEastern(at):yyyy-MM-dd HH:mm} server time): server boosts = {calendar.ServerBoostsAt(at)}");
+            foreach (var e in calendar.ActiveAt(at))
+                Console.WriteLine($"  - [{e.Kind}] {e.Title} ({e.StartEastern:yyyy-MM-dd HH:mm} ET, {e.DurationHours:0.#} h, {e.DurationSource})");
+        }
+        return 0;
+    }
+
+    private static void PrintCalendarSummary(AeCalendar calendar, string path)
+    {
+        var coverage = calendar.CoverageEastern;
+        Console.WriteLine($"Calendar file : {path}");
+        Console.WriteLine($"Fetched (UTC) : {calendar.FetchedUtc:u}  fingerprint {calendar.Fingerprint()}");
+        Console.WriteLine($"Coverage (ET) : {coverage?.First:yyyy-MM-dd} .. {coverage?.Last:yyyy-MM-dd}");
+        foreach (var g in calendar.Events.GroupBy(e => e.Kind).OrderBy(g => g.Key, StringComparer.Ordinal))
+            Console.WriteLine($"  {g.Key,-15} {g.Count(),4}");
     }
 
     private static int RunDbStats(string[] args, SkuaInstallation installation)
@@ -102,7 +163,7 @@ internal static class CliEntry
     {
         if (args.Length == 0)
         {
-            Console.Error.WriteLine("Error: missing script path. Usage: skuasim run <script.cs> [--scenario <file.json>] [--seed <int>] [--max-virtual-min <num>] [--max-real-sec <num>] [--max-no-progress-min <num>] [--report <path.md>] [--trace <path.jsonl>]");
+            Console.Error.WriteLine("Error: missing script path. Usage: skuasim run <script.cs> [--scenario <file.json>] [--seed <int>] [--max-virtual-min <num>] [--max-real-sec <num>] [--max-no-progress-min <num>] [--start-date <utc>] [--ae-calendar] [--report <path.md>] [--trace <path.jsonl>]");
             return 1;
         }
 
@@ -126,9 +187,23 @@ internal static class CliEntry
             double.TryParse(npStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var noProgressMin))
             scenario.Limits.MaxNoProgressMinutes = noProgressMin;
 
+        if (GetOption(args, "--start-date") is { } startText)
+        {
+            if (!DateTime.TryParse(startText, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var start))
+            {
+                Console.Error.WriteLine($"Error: invalid --start-date '{startText}' (use e.g. 2026-11-20T19:00:00Z).");
+                return 1;
+            }
+            scenario.StartDate = DateTime.SpecifyKind(start, DateTimeKind.Utc);
+        }
+        if (args.Any(a => string.Equals(a, "--ae-calendar", StringComparison.OrdinalIgnoreCase)))
+            scenario.Boosts.AeCalendarServerBoosts = true;
+
         var reportPath = GetOption(args, "--report") ?? GetOption(args, "-o");
         var tracePath = GetOption(args, "--trace");
         var gameDataPath = GetOption(args, "--gamedata");
+        var calendarPath = GetOption(args, "--calendar");
 
         var runner = new SimulationRunner(installation);
         var report = runner.Run(new SimulationRunOptions
@@ -137,6 +212,7 @@ internal static class CliEntry
             Scenario = scenario,
             SeedOverride = seedOverride,
             GameDataPath = gameDataPath,
+            CalendarPath = calendarPath,
             TraceOutputPath = tracePath
         });
 
@@ -206,6 +282,8 @@ internal static class CliEntry
         Console.WriteLine("  skuasim db-stats [--gamedata <path>]");
         Console.WriteLine("  skuasim compile <script.cs>");
         Console.WriteLine("  skuasim run <script.cs> [options]");
+        Console.WriteLine("  skuasim calendar-update [--calendar <path>]   Download the AE calendar (artix.com/calendar) locally");
+        Console.WriteLine("  skuasim calendar-show [--calendar <path>] [--date <utc>]");
         Console.WriteLine();
         Console.WriteLine("Run Options:");
         Console.WriteLine("  --scenario, -s <file.json>     Scenario JSON file describing player/world state");
@@ -214,6 +292,10 @@ internal static class CliEntry
         Console.WriteLine("  --max-real-sec <seconds>       Maximum wall-clock time in seconds (default: 0 = unlimited)");
         Console.WriteLine("  --max-no-progress-min <min>    Stop as Stalled after this many virtual minutes without player");
         Console.WriteLine("                                 progress (default: 60, 0 = disabled)");
+        Console.WriteLine("  --start-date <utc>             Virtual start time, e.g. 2026-11-20T19:00:00Z (default: 2026-01-01T12:00Z);");
+        Console.WriteLine("                                 drives day of week and daily/weekly resets (00:00 US Eastern, weekly on Friday)");
+        Console.WriteLine("  --ae-calendar                  Apply the AE calendar's server boosts for the virtual date");
+        Console.WriteLine("  --calendar <path>              Calendar file (default: data\\ae_calendar.json next to gamedata.json)");
         Console.WriteLine("  --report, -o <file.md|.json>   Save the execution report to disk");
         Console.WriteLine("  --trace <file.jsonl>           Stream full API trace to JSONL file");
         Console.WriteLine();

@@ -122,8 +122,15 @@ public sealed class GameDataCatalog
             }
         }
 
+        var respawnAverages = new List<double>();
         foreach (var mon in Captured.Monsters.Values)
         {
+            if (mon.Respawn is { Samples: > 0 } respawn)
+                respawnAverages.Add(respawn.AverageMs);
+            var c = mon.Combat;
+            if (mon.WeaponDps > 0 && mon.Level > 0 && c != null && c.Hits + c.Crits >= 10 && c.AverageDamage > 0)
+                _damageCalibration.Add((mon.Level, c.AverageDamage / mon.WeaponDps, c.AverageAttackIntervalMs));
+
             if (!string.IsNullOrWhiteSpace(mon.Name))
             {
                 if (!_monstersByName.TryGetValue(mon.Name.Trim(), out var list))
@@ -139,6 +146,50 @@ public sealed class GameDataCatalog
                 sources.Add(mon);
             }
         }
+        GlobalRespawnMedianMs = Median(respawnAverages);
+    }
+
+    private readonly List<(int Level, double HitPerWeaponDps, double IntervalMs)> _damageCalibration = new();
+
+    /// <summary>Median of the per-monster average respawn delays measured by the collector (0 when none).</summary>
+    public double GlobalRespawnMedianMs { get; private set; }
+
+    /// <summary>Number of monsters with measured combat damage and wDPS (the damage calibration set).</summary>
+    public int DamageCalibrationCount => _damageCalibration.Count;
+
+    /// <summary>
+    /// Estimates average hit damage and attack interval for a monster with no combat data from its wDPS, using
+    /// measured monsters of a similar level (observed hit / wDPS ratio is level-dependent: ~2-3 at low levels,
+    /// ~0.6-0.9 at 65+). Null when there is no calibration data. Results are estimates (report them as synthesized).
+    /// </summary>
+    public (double AverageHit, double IntervalMs, int BasedOn)? EstimateMonsterDamage(int level, int weaponDps)
+    {
+        if (weaponDps <= 0 || level <= 0 || _damageCalibration.Count == 0)
+            return null;
+        var near = _damageCalibration.Where(p => Math.Abs(p.Level - level) <= 10).ToList();
+        if (near.Count < 3)
+            near = _damageCalibration.OrderBy(p => Math.Abs(p.Level - level)).ThenBy(p => p.Level).Take(5).ToList();
+        var ratio = Median(near.Select(p => p.HitPerWeaponDps).ToList());
+        var interval = Median(near.Where(p => p.IntervalMs > 0).Select(p => p.IntervalMs).ToList());
+        return (Math.Max(1, ratio * weaponDps), interval > 0 ? interval : 2000, near.Count);
+    }
+
+    /// <summary>Faction name by ID from the collected faction catalog (null when unknown).</summary>
+    public string? FactionName(int factionId) =>
+        factionId > 0 && Captured.Factions != null && Captured.Factions.TryGetValue(factionId, out var f) && !string.IsNullOrWhiteSpace(f.Name)
+            ? f.Name
+            : null;
+
+    /// <summary>Quest captured by the collector (rewards observed on turn-in, requirements from getQuests).</summary>
+    public CapturedQuest? FindCapturedQuest(int id) => Captured.Quests.GetValueOrDefault(id);
+
+    private static double Median(List<double> values)
+    {
+        if (values.Count == 0)
+            return 0;
+        values.Sort();
+        var mid = values.Count / 2;
+        return values.Count % 2 == 1 ? values[mid] : (values[mid - 1] + values[mid]) / 2.0;
     }
 
     private void AddItemBase(ItemBase it, DataSource source)

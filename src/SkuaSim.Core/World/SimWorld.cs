@@ -25,6 +25,12 @@ public sealed class SimMonster
     public string Race { get; init; } = "None";
     public string FileName { get; init; } = "";
     public CapturedMonster? Data { get; init; }
+
+    /// <summary>The captured spawn this instance comes from (captured maps only): per-spawn respawn and wDPS.</summary>
+    public CapturedMapMonsterSpawn? Spawn { get; init; }
+
+    /// <summary>Server-side weapon DPS ("monBranch.wDPS"), 0 when unknown.</summary>
+    public int WeaponDps { get; init; }
     public MonsterSetup? Setup { get; init; }
     public bool Synthesized { get; init; }
     public long NextAttackMs { get; set; }
@@ -236,15 +242,9 @@ public sealed partial class SimWorld
 
             foreach (var f in s.Factions)
             {
-                Factions.Add(new Faction
-                {
-                    ID = f.Id ?? StableHash.Of(f.Name) % 1000,
-                    Name = f.Name,
-                    Rank = f.Rank,
-                    TotalRep = f.TotalRep ?? RepForRank(f.Rank),
-                    Rep = 0,
-                    RequiredRep = RepForRank(f.Rank + 1) - RepForRank(f.Rank)
-                });
+                var faction = new Faction { ID = f.Id ?? StableHash.Of(f.Name) % 1000, Name = f.Name };
+                SetFactionRep(faction, f.TotalRep ?? RepForRank(f.Rank));
+                Factions.Add(faction);
             }
 
             ApplyScenarioBoostsAndEnhancements();
@@ -252,13 +252,132 @@ public sealed partial class SimWorld
             RecalculateStats();
             if (!s.Player.MaxHealth.HasValue)
                 Health = MaxHealth;
+            ScheduleNextServerReset();
         }
 
         if (LoggedIn)
             Join(s.Location.Map, s.Location.Cell, s.Location.Pad, ignoreCheck: true, raiseEvents: false, delay: false);
     }
 
-    private static int RepForRank(int rank) => rank <= 1 ? 0 : (int)Math.Pow(rank, 3) * 100 + 900;
+    // ================================================================ Server resets
+
+    public int ServerResetsApplied { get; private set; }
+
+    /// <summary>
+    /// AQW resets daily quests at 00:00 US Eastern (server time), weekly quests on Friday 00:00 and monthly quests on
+    /// the 1st (times as shown by VibeSkua.Manager: "Daily Reset (00:00 EST)", "Weekly Reset (Fri 00:00 EST)").
+    /// Quest "Field" decides the period: "id*" daily, "iw*" weekly, "im*" monthly.
+    /// </summary>
+    private void ScheduleNextServerReset()
+    {
+        var nowEastern = AeCalendar.ToEastern(_ctx.Clock.Now);
+        var nextMidnight = nowEastern.Date.AddDays(1);
+        var atMs = (long)Math.Ceiling((AeCalendar.EasternToUtc(nextMidnight) - _ctx.Clock.Epoch).TotalMilliseconds);
+        _ctx.Clock.Scheduler.Schedule(Math.Max(Now + 1, atMs), "server-reset", () =>
+        {
+            lock (Sync)
+            {
+                ApplyServerReset(nextMidnight);
+                ScheduleNextServerReset();
+            }
+        });
+    }
+
+    private void ApplyServerReset(DateTime midnightEastern)
+    {
+        var weekly = midnightEastern.DayOfWeek == DayOfWeek.Friday;
+        var monthly = midnightEastern.Day == 1;
+        var cleared = new List<int>();
+        foreach (var id in DailiesCompleted.ToList())
+        {
+            var field = QuestField(id);
+            var period = field.StartsWith("iw", StringComparison.OrdinalIgnoreCase) ? 'w'
+                : field.StartsWith("im", StringComparison.OrdinalIgnoreCase) ? 'm'
+                : 'd';
+            if (period == 'd' || (period == 'w' && weekly) || (period == 'm' && monthly))
+            {
+                DailiesCompleted.Remove(id);
+                cleared.Add(id);
+            }
+        }
+        ServerResetsApplied++;
+        var kind = monthly && weekly ? "daily + weekly + monthly" : monthly ? "daily + monthly" : weekly ? "daily + weekly" : "daily";
+        Trace.World($"Server {kind} reset at {midnightEastern:yyyy-MM-dd ddd} 00:00 server time (US Eastern): " +
+                    (cleared.Count == 0 ? "no completed quests to reset." : $"quest(s) {string.Join(", ", cleared.OrderBy(i => i))} available again."));
+    }
+
+    private string QuestField(int id) =>
+        LoadedQuests.TryGetValue(id, out var q) && !string.IsNullOrWhiteSpace(q.Field) ? q.Field
+        : _ctx.Catalog.FindQuest(id)?.Field is { Length: > 0 } f ? f
+        : _ctx.Catalog.FindCapturedQuest(id)?.Field ?? "";
+
+    /// <summary>
+    /// Total reputation needed for a faction rank: (5·r·(r+1))² — 900, 3,600, 10,000, 22,500, ... 302,500 at rank 10
+    /// (rank 10 = 302,500 is confirmed by QuestData "RequiredFactionRep" values, e.g. Ravenous).
+    /// </summary>
+    internal static int RepForRank(int rank)
+    {
+        if (rank <= 1)
+            return 0;
+        rank = Math.Min(rank, MaxFactionRank);
+        var root = 5 * rank * (rank + 1);
+        return root * root;
+    }
+
+    internal const int MaxFactionRank = 10;
+    internal const int MaxFactionRep = 302_500;
+
+    internal static int RankForRep(int totalRep)
+    {
+        var rank = 1;
+        while (rank < MaxFactionRank && totalRep >= RepForRank(rank + 1))
+            rank++;
+        return rank;
+    }
+
+    private static void SetFactionRep(Faction faction, int totalRep)
+    {
+        faction.TotalRep = Math.Clamp(totalRep, 0, MaxFactionRep);
+        faction.Rank = RankForRep(faction.TotalRep);
+        faction.Rep = faction.TotalRep - RepForRank(faction.Rank);
+        faction.RequiredRep = faction.Rank >= MaxFactionRank ? 0 : RepForRank(faction.Rank + 1) - RepForRank(faction.Rank);
+    }
+
+    /// <summary>
+    /// Adds base reputation (boosts applied here) to a faction, creating it when the player has none yet. The name
+    /// comes from the scenario, then the collected faction catalog; an unknown name is synthesized.
+    /// </summary>
+    internal void GainReputation(int factionId, int baseRep, string source)
+    {
+        if (baseRep <= 0 || factionId <= 0)
+            return;
+        var faction = Factions.FirstOrDefault(f => f.ID == factionId);
+        if (faction == null)
+        {
+            var name = _ctx.Catalog.FactionName(factionId);
+            if (name != null)
+                faction = Factions.FirstOrDefault(f => Eq(f.Name, name));
+            if (faction == null)
+            {
+                if (name == null)
+                {
+                    name = $"Faction #{factionId}";
+                    Trace.Synthesize($"faction:{factionId}", $"Faction {factionId} has no captured name: reputation is tracked as '{name}'.");
+                }
+                faction = new Faction { ID = factionId, Name = name };
+                SetFactionRep(faction, 0);
+                Factions.Add(faction);
+            }
+        }
+
+        var gained = (int)Math.Round(baseRep * EffectiveRepMultiplier);
+        var oldRank = faction.Rank;
+        SetFactionRep(faction, faction.TotalRep + gained);
+        if (faction.Rank > oldRank)
+            Trace.World($"Reputation rank up! {faction.Name} reached Rank {faction.Rank}.");
+        else
+            Trace.World($"+{gained} {faction.Name} reputation ({source}).");
+    }
 
     private void AddScenarioItem(List<InventoryItem> container, ItemSetup setup)
     {
@@ -371,6 +490,12 @@ public sealed partial class SimWorld
         Upgrade = item.Upgrade,
         Source = DataSource.QuestData
     };
+
+    /// <summary>House furniture/house items (QuestData sType "Floor Item"/"Wall Item"/"House", file under items/house/).</summary>
+    public static bool IsHouseItem(ItemBase item) =>
+        item.House ||
+        (item.CategoryString ?? "") is "Floor Item" or "Wall Item" or "House" ||
+        (item.FileLink ?? "").Contains("items/house/", StringComparison.OrdinalIgnoreCase);
 
     public static bool Eq(string? a, string? b) =>
         string.Equals(a?.Trim(), b?.Trim(), StringComparison.OrdinalIgnoreCase);
@@ -753,7 +878,9 @@ public sealed partial class SimWorld
                     Level = level,
                     Race = string.IsNullOrWhiteSpace(spawn.Race) ? captured?.Race ?? "None" : spawn.Race,
                     FileName = spawn.FileName,
-                    Data = captured
+                    Data = captured,
+                    Spawn = spawn,
+                    WeaponDps = spawn.WeaponDps > 0 ? spawn.WeaponDps : captured?.WeaponDps ?? 0
                 });
             }
         }
@@ -788,6 +915,7 @@ public sealed partial class SimWorld
                         Level = level,
                         Race = captured?.Race ?? "None",
                         Data = captured,
+                        WeaponDps = captured?.WeaponDps ?? 0,
                         Setup = ms
                     });
                 }
@@ -825,6 +953,7 @@ public sealed partial class SimWorld
                             Level = level,
                             Race = captured?.Race ?? "None",
                             Data = captured,
+                            WeaponDps = captured?.WeaponDps ?? 0,
                             Synthesized = true
                         });
                         nextMapId++;
@@ -900,6 +1029,7 @@ public sealed partial class SimWorld
                     Level = level,
                     Race = captured?.Race ?? "None",
                     Data = captured,
+                    WeaponDps = captured?.WeaponDps ?? 0,
                     Synthesized = true
                 });
                 nextMapId++;
@@ -1140,6 +1270,12 @@ public sealed partial class SimWorld
             avgDamage = (int)Math.Max(1, combat.AverageDamage);
             interval = combat.AverageAttackIntervalMs > 0 ? (int)combat.AverageAttackIntervalMs : 2000;
         }
+        else if (_ctx.Catalog.EstimateMonsterDamage(monster.Level, monster.WeaponDps) is { } estimate)
+        {
+            avgDamage = (int)Math.Max(1, Math.Round(estimate.AverageHit));
+            interval = (int)Math.Round(estimate.IntervalMs);
+            Trace.Synthesize($"combat:{monster.Name.ToLowerInvariant()}", $"Monster '{monster.Name}' has no captured combat data: estimated {avgDamage} damage every {interval} ms from its wDPS {monster.WeaponDps} and {estimate.BasedOn} measured monster(s) of similar level.");
+        }
         else
         {
             avgDamage = Math.Max(15, Math.Max(1, monster.Level) * 5);
@@ -1165,13 +1301,17 @@ public sealed partial class SimWorld
         Kills++;
         KillsByMonster[monster.Name] = KillsByMonster.GetValueOrDefault(monster.Name) + 1;
 
-        var baseMonsterXp = CalculateMonsterXp(monster);
-        var boostedXp = Math.Max(1, (int)Math.Round(baseMonsterXp * EffectiveXpMultiplier));
+        var (baseXp, baseGold) = KillRewardBase(monster);
+        var boostedXp = (int)Math.Round(baseXp * EffectiveXpMultiplier);
+        var boostedGold = (int)Math.Round(baseGold * EffectiveGoldMultiplier);
         GainExperience(boostedXp);
-        GainClassPoints(Math.Max(10, baseMonsterXp / 2));
-        Trace.World($"Defeated {monster.Name} (MapID {monster.MapID}) in {monster.Cell} (+{boostedXp} xp).");
+        AddGold(boostedGold);
+        GainClassPoints(KillClassPointsBase(monster));
+        if (monster.Data?.KillRewards is { RepSamples: > 0 } repData && repData.FactionIds.Count == 1)
+            GainReputation(repData.FactionIds.First(), (int)Math.Round(repData.AverageBaseRep), $"kill {monster.Name}");
+        Trace.World($"Defeated {monster.Name} (MapID {monster.MapID}) in {monster.Cell} (+{boostedXp} xp, +{boostedGold} gold).");
 
-        var respawnMs = Math.Max(1, Rules.MonsterRespawnSeconds) * 1000L;
+        var respawnMs = ResolveRespawnMs(monster);
         var map = Map;
         _ctx.Clock.Scheduler.Schedule(Now + respawnMs, "respawn:" + monster.Name, () =>
         {
@@ -1214,10 +1354,93 @@ public sealed partial class SimWorld
         return (int)Math.Min(int.MaxValue, (long)lvl * lvl * 25 + lvl * 100);
     }
 
-    private int CalculateMonsterXp(SimMonster monster)
+    /// <summary>AQW gold cap.</summary>
+    public const long MaxGold = 100_000_000;
+
+    // Per-kill rule observed by the collector on every measured monster of level 1-90 (schema v3 KillRewards):
+    // base XP = 10 x monster level, base gold = 3 x monster level. Used only when the monster has no measurement.
+    private const int XpPerMonsterLevel = 10;
+    private const int GoldPerMonsterLevel = 3;
+
+    // AQW respawn after the 2020 combat update is "about 3 to 5 seconds" (artix.com/posts/aqw-combat-improvements);
+    // only used when the collector has no measurement at all.
+    private const long OfficialRespawnFallbackMs = 4_000;
+
+    internal void AddGold(long amount)
     {
-        var effectiveLevel = monster.Level > 0 ? monster.Level : Math.Max(1, Level);
-        return Math.Max(25, effectiveLevel * 25 + 25);
+        if (amount > 0 && Gold < MaxGold)
+            Gold = Math.Min(MaxGold, Gold + amount);
+    }
+
+    private int EffectiveMonsterLevel(SimMonster monster, string what)
+    {
+        if (monster.Level > 0)
+            return monster.Level;
+        Trace.Synthesize($"monsterlevel:{monster.Name.ToLowerInvariant()}", $"Monster '{monster.Name}' has no captured level: {what} uses the player's level ({Math.Max(1, Level)}).");
+        return Math.Max(1, Level);
+    }
+
+    /// <summary>
+    /// Base (unboosted) XP and gold per kill: the collector's measured averages (addGoldExp) first, then the observed
+    /// rule (10 / 3 per monster level), flagged as synthesized. A monster measured only on max-level characters
+    /// (XP always 0) or gold-capped ones keeps the rule for that part.
+    /// </summary>
+    private (int Xp, int Gold) KillRewardBase(SimMonster monster)
+    {
+        // Scenario > collected data: a scenario that sets a different level describes another monster, so the
+        // measured rewards of the captured one do not apply.
+        var kr = monster.Setup?.Level is { } setupLevel && monster.Data != null && monster.Data.Level > 0 && setupLevel != monster.Data.Level
+            ? null
+            : monster.Data?.KillRewards;
+        var key = monster.Name.ToLowerInvariant();
+        int xp, gold;
+        if (kr is { ExpSamples: > 0 })
+            xp = (int)Math.Round(kr.AverageBaseExp);
+        else
+        {
+            xp = XpPerMonsterLevel * EffectiveMonsterLevel(monster, "XP per kill");
+            Trace.Synthesize($"killxp:{key}", $"Monster '{monster.Name}' has no measured XP per kill: using the observed rule {XpPerMonsterLevel} x level = {xp}.");
+        }
+        if (kr is { GoldSamples: > 0 })
+            gold = (int)Math.Round(kr.AverageBaseGold);
+        else
+        {
+            gold = GoldPerMonsterLevel * EffectiveMonsterLevel(monster, "gold per kill");
+            Trace.Synthesize($"killgold:{key}", $"Monster '{monster.Name}' has no measured gold per kill: using the observed rule {GoldPerMonsterLevel} x level = {gold}.");
+        }
+        return (xp, gold);
+    }
+
+    /// <summary>Class points per kill are not in any packet the collector sees: kept as the legacy estimate, flagged.</summary>
+    private int KillClassPointsBase(SimMonster monster)
+    {
+        var level = monster.Level > 0 ? monster.Level : Math.Max(1, Level);
+        Trace.Synthesize("classpoints:kill", "Class points per kill are not captured: using the estimate max(10, (25 x level + 25) / 2).");
+        return Math.Max(10, (level * 25 + 25) / 2);
+    }
+
+    /// <summary>
+    /// Respawn delay: scenario "world.monsterRespawnSeconds" (when set) > this spawn's measured average > the
+    /// monster's measured average > median of all measured monsters (synthesized) > official 3-5 s (synthesized).
+    /// </summary>
+    private long ResolveRespawnMs(SimMonster monster)
+    {
+        if (Rules.MonsterRespawnSeconds is { } forced)
+            return Math.Max(1, forced) * 1000L;
+        if (monster.Spawn?.Respawn is { Samples: > 0 } spawnRespawn && spawnRespawn.AverageMs > 0)
+            return (long)Math.Round(spawnRespawn.AverageMs);
+        if (monster.Data?.Respawn is { Samples: > 0 } monsterRespawn && monsterRespawn.AverageMs > 0)
+            return (long)Math.Round(monsterRespawn.AverageMs);
+
+        var key = $"respawn:{monster.Name.ToLowerInvariant()}";
+        var median = _ctx.Catalog.GlobalRespawnMedianMs;
+        if (median > 0)
+        {
+            Trace.Synthesize(key, $"Monster '{monster.Name}' has no measured respawn: using the median of measured monsters ({median / 1000.0:0.0} s).");
+            return (long)Math.Round(median);
+        }
+        Trace.Synthesize(key, $"Monster '{monster.Name}' has no measured respawn and no respawn data exists: using AQW's official ~{OfficialRespawnFallbackMs / 1000} s.");
+        return OfficialRespawnFallbackMs;
     }
 
     private void GainExperience(int amount)
@@ -1454,6 +1677,12 @@ public sealed partial class SimWorld
 
             if (Map?.Data?.MapItems.TryGetValue(mapItemId, out var captured) == true && captured.GrantedItemIDs.Count > 0)
             {
+                // The server only grants quest map items while one of the quests that use them is active.
+                if (captured.RequiredQuestIds.Count > 0 && !captured.RequiredQuestIds.Any(ActiveQuests.Contains))
+                {
+                    Trace.World($"GetMapItem({mapItemId}) on '{MapName}' gave nothing: requires one of quest(s) {string.Join(", ", captured.RequiredQuestIds.OrderBy(q => q))} to be active.");
+                    return;
+                }
                 foreach (var itemId in captured.GrantedItemIDs)
                     AddToInventory(ResolveItem(null, itemId), quantity, $"map item {mapItemId}");
                 return;
@@ -1508,6 +1737,43 @@ public sealed partial class SimWorld
                     EndText = ""
                 };
                 SetRequirements(quest, data.Requirements?.ToList() ?? new List<ItemBase>());
+            }
+            else if (_ctx.Catalog.FindCapturedQuest(id) is { } cap && (cap.Requirements.Count > 0 || cap.Rewards.Count > 0 || cap.ObservedReward != null))
+            {
+                static ItemBase ToItem(CapturedItemRequirement r) =>
+                    new() { ID = r.ItemID, Name = r.ItemName, Quantity = Math.Max(1, r.Quantity), Temp = r.Temp };
+                quest = new Quest
+                {
+                    ID = cap.ID,
+                    Name = string.IsNullOrWhiteSpace(cap.Name) ? $"Quest #{id}" : cap.Name,
+                    Slot = cap.Slot,
+                    Value = cap.Value,
+                    Once = cap.Once,
+                    Field = cap.Field,
+                    Index = cap.Index,
+                    Upgrade = cap.Upgrade,
+                    Level = cap.Level,
+                    RequiredClassID = cap.RequiredClassID,
+                    RequiredClassPoints = cap.RequiredClassPoints,
+                    RequiredFactionId = cap.RequiredFactionId,
+                    RequiredFactionRep = cap.RequiredFactionRep,
+                    Gold = cap.ObservedReward?.Gold ?? cap.Gold,
+                    XP = cap.ObservedReward?.Exp ?? cap.XP,
+                    AcceptRequirements = cap.AcceptRequirements.Select(ToItem).ToList(),
+                    Rewards = cap.Rewards.Select(ToItem).ToList(),
+                    SimpleRewards = cap.Rewards.Select(r => new SimpleReward
+                    {
+                        ID = r.ItemID,
+                        Name = r.ItemName,
+                        Quantity = Math.Max(1, r.Quantity),
+                        Rate = r.RatePercent ?? 100.0,
+                        Type = r.RewardType ?? 0
+                    }).ToList(),
+                    Description = "",
+                    EndText = ""
+                };
+                SetRequirements(quest, cap.Requirements.Select(ToItem).ToList());
+                Trace.World($"Quest {id} is not in QuestData.json: using the collector's captured requirements/rewards.");
             }
             else
             {
@@ -1572,9 +1838,14 @@ public sealed partial class SimWorld
                 reason = "daily/weekly quest already completed today";
             else
             {
-                var missing = q.AcceptRequirements?.FirstOrDefault(r => Quantity(Inventory, r.Name, r.ID) + Quantity(Bank, r.Name, r.ID) < Math.Max(1, r.Quantity));
+                // Accept requirements are ownership checks: inventory, bank or the house inventory. House items (e.g.
+                // "Prime Fiend Shard" for quest 9555) open quests without being in the house map.
+                var missing = q.AcceptRequirements?.FirstOrDefault(r =>
+                    Quantity(Inventory, r.Name, r.ID) + Quantity(Bank, r.Name, r.ID) + Quantity(House, r.Name, r.ID) < Math.Max(1, r.Quantity));
                 if (missing != null)
-                    reason = $"missing accept requirement '{missing.Name}'";
+                    reason = IsHouseItem(missing)
+                        ? $"missing accept requirement '{missing.Name}' (a house item: add it to the scenario's \"house\" list)"
+                        : $"missing accept requirement '{missing.Name}'";
             }
 
             if (reason != null)
@@ -1647,8 +1918,20 @@ public sealed partial class SimWorld
 
             var questGold = (int)Math.Round(q.Gold * EffectiveGoldMultiplier);
             var questXp = (int)Math.Round(q.XP * EffectiveXpMultiplier);
-            Gold += questGold;
+            AddGold(questGold);
             GainExperience(questXp);
+
+            // Reputation and class points are not in QuestData.json: they come from the turn-in rewards the collector
+            // observed ("ccqr" rewardObj, base values). Quests never turned in while collecting give none (flagged once).
+            if (_ctx.Catalog.FindCapturedQuest(id)?.ObservedReward is { } observed)
+            {
+                if (observed.Rep > 0)
+                    GainReputation(observed.FactionID, observed.Rep, $"quest {id}");
+                if (observed.ClassPoints > 0)
+                    GainClassPoints(observed.ClassPoints);
+            }
+            else if (_ctx.Catalog.FindQuest(id) != null)
+                Trace.Synthesize($"questrep:{id}", $"Quest {id} ({q.Name}) was never turned in while collecting: its reputation/class-point reward is unknown and none is given.");
             if (q.Slot >= 0)
                 SlotProgress[q.Slot] = Math.Max(SlotProgress.GetValueOrDefault(q.Slot), q.Value);
             if (q.Once || q.Slot >= 0)
@@ -1840,6 +2123,45 @@ public sealed partial class SimWorld
         return true;
     }
 
+    // Sell-back rule until the server's sellItem response is verified from collector samples.
+    private const double SellBackFraction = 0.25;
+
+    /// <summary>
+    /// Gold returned when selling: a share of the item's shop price (captured shops / shops loaded this run). Gold
+    /// items only; AC items return nothing until verified. Both are flagged because the rule is not measured yet.
+    /// </summary>
+    private void SellReturn(InventoryItem item, int quantity)
+    {
+        var shopItem = ShopCache.SelectMany(s => s.Items).FirstOrDefault(i => i.ID == item.ID);
+        int cost; bool coins;
+        if (shopItem != null)
+        {
+            cost = shopItem.Cost;
+            coins = shopItem.Coins;
+        }
+        else if (_ctx.Catalog.Captured.Shops.Values.SelectMany(s => s.Items).FirstOrDefault(i => i.ID == item.ID) is { } captured)
+        {
+            cost = captured.Cost;
+            coins = captured.Coins;
+        }
+        else
+        {
+            Trace.Synthesize($"sell:{item.ID}", $"'{item.Name}' is in no known shop: its sell price is unknown and no gold was given.");
+            return;
+        }
+
+        if (coins || item.Coins)
+        {
+            Trace.Synthesize($"sell:{item.ID}", $"'{item.Name}' is an AC item: the AC sell-back is not modeled, nothing was returned.");
+            return;
+        }
+        // One sale removes the item (or the requested part of its stack) for the item's sell price.
+        var gold = (long)Math.Floor(cost * SellBackFraction);
+        AddGold(gold);
+        Trace.Synthesize($"sell:{item.ID}", $"Selling '{item.Name}' returned {SellBackFraction:P0} of its {cost:N0} gold shop price (rule; not yet verified).");
+        Trace.World($"Sold {quantity}x {item.Name} for {gold:N0} gold.");
+    }
+
     public bool Sell(string? name, int? id, int quantity)
     {
         InventoryItem? item;
@@ -1851,6 +2173,7 @@ public sealed partial class SimWorld
                 return false;
             sold = quantity > 0 ? Math.Min(quantity, item.Quantity) : item.Quantity;
             RemoveItem(item.Name, item.ID, sold, false, "sold");
+            SellReturn(item, sold);
         }
         _ctx.RaiseEvent("ItemSold", item.CharItemID, sold, Math.Max(0, item.Quantity), 0, item.Coins);
         return true;
