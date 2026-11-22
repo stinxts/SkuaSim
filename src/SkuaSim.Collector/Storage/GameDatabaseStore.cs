@@ -409,6 +409,8 @@ public sealed partial class GameDatabaseStore
                 dstDrop.Temp |= srcDrop.Temp;
                 dstDrop.DropEvents += srcDrop.DropEvents;
                 dstDrop.TotalQuantity += srcDrop.TotalQuantity;
+                dstDrop.MeasuredQuantity += srcDrop.MeasuredQuantity;
+                dstDrop.QuantitySamples += srcDrop.QuantitySamples;
                 dstDrop.TrackedDropEvents += srcDrop.TrackedDropEvents;
                 dstDrop.IsOfficialDrop |= srcDrop.IsOfficialDrop;
                 dstDrop.QuestGated |= srcDrop.QuestGated;

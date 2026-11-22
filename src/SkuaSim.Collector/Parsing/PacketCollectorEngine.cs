@@ -967,8 +967,11 @@ public sealed partial class PacketCollectorEngine
                 continue;
 
             var qty = Math.Max(1, ParseInt(itemToken["iQty"], 1));
+            // "dQty" is the amount that dropped (verified in real samples next to "iQty"); "iQty" can be the stack the
+            // character already owns, so it is never used as the drop size.
+            int? dropped = itemToken["dQty"] != null ? ParseInt(itemToken["dQty"], 0) : null;
             _recentDropItemTimes[item.ID] = now;
-            AttributeDropToMonster(item.ID, item.Name, item.Temp, qty);
+            AttributeDropToMonster(item.ID, item.Name, item.Temp, qty, dropped);
         }
     }
 
@@ -1072,8 +1075,10 @@ public sealed partial class PacketCollectorEngine
                 if (item.Temp || (now - _lastKillTimeUtc).TotalSeconds <= 3.0)
                 {
                     var qty = Math.Max(1, ParseInt(itemToken["iQty"], 1));
+                    // In an addItems entry that carries "iQtyNow" (the new total), "iQty" is the amount added.
+                    int? added = itemToken["iQtyNow"] != null ? qty : null;
                     _recentDropItemTimes[item.ID] = now;
-                    AttributeDropToMonster(item.ID, item.Name, item.Temp, qty);
+                    AttributeDropToMonster(item.ID, item.Name, item.Temp, qty, added);
                 }
             }
         }
@@ -1647,7 +1652,7 @@ public sealed partial class PacketCollectorEngine
         return !_sessionQuestRewardItems.TryGetValue(_lastTurnInQuestId, out var rewards) || rewards.Contains(itemId);
     }
 
-    private void AttributeDropToMonster(int itemId, string itemName, bool isTemp, int quantity)
+    private void AttributeDropToMonster(int itemId, string itemName, bool isTemp, int quantity, int? measuredQuantity = null)
     {
         CapturedMonster? targetMonster = null;
         var now = DateTime.UtcNow;
@@ -1693,6 +1698,11 @@ public sealed partial class PacketCollectorEngine
         if (_activeQuestsKnown)
             dropStat.TrackedDropEvents++;
         dropStat.TotalQuantity += Math.Max(1, quantity);
+        if (measuredQuantity is > 0)
+        {
+            dropStat.MeasuredQuantity += measuredQuantity.Value;
+            dropStat.QuantitySamples++;
+        }
         if (_delta.Items.TryGetValue(itemId, out var itemInfo) && itemInfo.RequiredByQuestIds.Count > 0)
         {
             dropStat.QuestGated = true;

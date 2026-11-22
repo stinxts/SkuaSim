@@ -499,7 +499,22 @@ public sealed class CapturedDropStat
     public string ItemName { get; set; } = string.Empty;
     public bool Temp { get; set; }
     public long DropEvents { get; set; }
+
+    /// <summary>
+    /// Legacy, unreliable: sums the packet's "iQty", which for a stackable item the character already owns is the stack
+    /// total, not the amount dropped (Undead Energy averaged ~1,400 per drop). Kept for history; never use it as a
+    /// drop size — use <see cref="MeasuredQuantity"/> / <see cref="QuantitySamples"/>.
+    /// </summary>
     public long TotalQuantity { get; set; }
+
+    /// <summary>Sum of the amounts actually dropped ("dQty" in dropItem; "iQty" of an addItems entry that has "iQtyNow").</summary>
+    public long MeasuredQuantity { get; set; }
+
+    /// <summary>Drops whose amount was measured (denominator of the average drop size).</summary>
+    public long QuantitySamples { get; set; }
+
+    /// <summary>Average amount per drop when measured, else null (unknown: the simulator uses 1).</summary>
+    public double? AverageQuantity => QuantitySamples > 0 ? (double)MeasuredQuantity / QuantitySamples : null;
 
     /// <summary>
     /// Kills that could have produced this drop (denominator of the rate), recomputed by <see cref="DropRates"/>:

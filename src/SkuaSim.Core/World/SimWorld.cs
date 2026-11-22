@@ -1612,7 +1612,9 @@ public sealed partial class SimWorld
                 if (_ctx.Rng.NextDouble() >= chance)
                     continue;
                 var info = _ctx.Catalog.FindItem(drop.ItemID) ?? new ItemInfo { ID = drop.ItemID, Name = drop.ItemName, Temp = drop.Temp, MaxStack = 1000, Source = DataSource.Captured };
-                var qty = drop.DropEvents > 0 ? Math.Max(1, (int)Math.Round((double)drop.TotalQuantity / drop.DropEvents)) : 1;
+                // Measured drop size ("dQty") when known, else 1. The legacy TotalQuantity summed the owned stack for
+                // stackable items (e.g. ~1,400 Undead Energy "per drop") and is never used.
+                var qty = drop.AverageQuantity is { } avg ? Math.Max(1, (int)Math.Round(avg)) : 1;
                 GiveDrop(info, qty, "captured drop");
                 dropped.Add(drop.ItemID);
             }

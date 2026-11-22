@@ -1138,6 +1138,17 @@ try
     Assert(pvpText.Contains("proto_str_mtcid") && pvpText.Contains("proto_PVPE") && pvpText.Contains("proto_PVPS") && !pvpText.Contains("SomePlayer"),
         "mtcid, PVPE and PVPS must be sampled, with the player name redacted");
 
+    // (h) Drop size: in dropItem, "dQty" is the amount that dropped; "iQty" can be the stack already owned (real samples
+    // carry both keys; the legacy sum of iQty gave ~1,400 Undead Energy per drop). Shape from the real Chaos War Medal
+    // dropItem sample, with an owned stack of 1,400 and 2 dropped.
+    var qtyEng = new PacketCollectorEngine();
+    qtyEng.ProcessExtensionPacketJson(wolfMap);
+    qtyEng.RecordMonsterKilled(9);
+    qtyEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"dropItem","items":{"24528":{"iLvl":1,"iStk":1000,"ItemID":24528,"dID":24528,"bCoins":false,"iQty":1400,"dQty":2,"bQuest":1,"sName":"Chaos War Medal","bTemp":false,"sType":"Resource","sReqQuests":""}}} } }""");
+    var medal = qtyEng.TakeDeltaSnapshot().Monsters["id:3986"].Drops[24528];
+    Assert(medal.DropEvents == 1 && medal.QuantitySamples == 1 && medal.AverageQuantity == 2,
+        $"The drop size must come from dQty, not from the owned stack in iQty (samples={medal.QuantitySamples}, avg={medal.AverageQuantity})");
+
     var mergedTwice = v3Store.FlushDelta(new GameDatabase());
     Assert(mergedTwice.Monsters["id:900"].KillRewards.Samples == 3 && Directory.GetFiles(v3Dir, "gamedata.v2-backup-*.json").Length == 1,
         "A v3 file must not be migrated again and empty flushes must not change counters");
