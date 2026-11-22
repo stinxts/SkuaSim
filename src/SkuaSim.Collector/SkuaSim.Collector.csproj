@@ -12,6 +12,13 @@
     <VibeSkuaDir Condition="'$(VibeSkuaDir)' == ''">$(LOCALAPPDATA)\VibeSkua\current\Assemblies</VibeSkuaDir>
   </PropertyGroup>
 
+  <!-- Release builds are shared with testers: map the local source path so the DLL does not carry this PC's user
+       folder (the PDB path is written into the DLL). -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <PathMap>$(MSBuildProjectDirectory)=/_/SkuaSim.Collector</PathMap>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
   <ItemGroup>
     <Reference Include="Skua.Core">
       <HintPath>$(VibeSkuaDir)\Skua.Core.dll</HintPath>
