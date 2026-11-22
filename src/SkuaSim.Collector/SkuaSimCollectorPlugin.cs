@@ -191,6 +191,8 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
             if (args[0] is string rawPacket && !string.IsNullOrWhiteSpace(rawPacket))
             {
                 EnqueueWork(() => _engine.ProcessClientPacket(rawPacket));
+                if (rawPacket.Contains("%mtcid%", StringComparison.Ordinal))
+                    ScheduleCellNumberCheck(rawPacket);
             }
         }
     }
@@ -401,6 +403,39 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
             catch
             {
                 // Never propagate exceptions from background map snapshot
+            }
+        }, token);
+    }
+
+    /// <summary>
+    /// %xt%zm%mtcid%room%N% (move to cell by number, CoreBots.PvPMove): read the character's cell now and 1.5 s later
+    /// (the script itself waits 2.5 s after the request) and record "N = new cell" for this map. Reads client state
+    /// only; nothing is sent.
+    /// </summary>
+    private void ScheduleCellNumberCheck(string rawPacket)
+    {
+        var parts = rawPacket.Split('%', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 5 || !string.Equals(parts[2], "mtcid", StringComparison.Ordinal) || !int.TryParse(parts[4], out var number))
+            return;
+        var token = _cts?.Token ?? CancellationToken.None;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var bot = _bot;
+                if (bot == null || !bot.Player.LoggedIn)
+                    return;
+                var map = bot.Map.Name;
+                var before = bot.Player.Cell;
+                await Task.Delay(1500, token).ConfigureAwait(false);
+                if (token.IsCancellationRequested || !IsCollectingActive() || !string.Equals(bot.Map.Name, map, StringComparison.OrdinalIgnoreCase))
+                    return;
+                var after = bot.Player.Cell;
+                EnqueueWork(() => _engine.RecordCellNumber(map, number, before, after));
+            }
+            catch
+            {
+                // Never propagate exceptions from background reads
             }
         }, token);
     }

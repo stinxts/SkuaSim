@@ -113,6 +113,19 @@ public sealed class CapturedMap
 
     /// <summary>Number of player-count samples taken on this map.</summary>
     public long PlayerCountSamples { get; set; }
+
+    /// <summary>
+    /// Cell number → cell name, learned from the client's "move to cell by number" request (%xt%zm%mtcid%room%N%,
+    /// used by CoreBots.PvPMove in Bludrut Brawl) paired with the cell the character is in right after it.
+    /// Each number keeps the votes per cell name; the most voted name is the answer.
+    /// </summary>
+    public Dictionary<int, Dictionary<string, long>> CellNumbers { get; set; } = new();
+
+    /// <summary>The most voted cell name for a cell number (null when unknown).</summary>
+    public string? CellForNumber(int number) =>
+        CellNumbers.TryGetValue(number, out var votes) && votes.Count > 0
+            ? votes.OrderByDescending(v => v.Value).ThenBy(v => v.Key, StringComparer.Ordinal).First().Key
+            : null;
 }
 
 public sealed class CapturedMapMonsterSpawn

@@ -30,7 +30,9 @@ public sealed class PacketSchemaSampler
     /// <summary>String (str) server packets sampled for protocol verification. Their arguments are numbers/cells only.</summary>
     public static readonly IReadOnlySet<string> ProtocolStringCommands = new HashSet<string>(StringComparer.Ordinal)
     {
-        "respawnMon", "resTimed"
+        "respawnMon", "resTimed",
+        // Move-to-cell-by-number reply (CoreBots.PvPMove), to confirm what the server sends back
+        "mtcid"
     };
 
     private static readonly HashSet<string> EntityIdKeys = new(StringComparer.OrdinalIgnoreCase)
@@ -54,7 +56,9 @@ public sealed class PacketSchemaSampler
         // Sell-back gold (CharItemID / iQtyNow are redacted)
         "sellItem",
         // XP table (intLevel, intExpToLevel)
-        "levelUp"
+        "levelUp",
+        // PvP (Bludrut Brawl): match events and team scores ("unm" is redacted)
+        "PVPE", "PVPS"
     };
 
     /// <summary>

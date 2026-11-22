@@ -1502,6 +1502,32 @@ public sealed partial class PacketCollectorEngine
     /// Records how many players are in the current room of a map (Skua Map.PlayerCount). Only the peak is kept: a lower
     /// bound of the room cap, which the client does not expose. A count, never names.
     /// </summary>
+    /// <summary>
+    /// The client asked to move to cell <paramref name="number"/> (%xt%zm%mtcid%room%N%, CoreBots.PvPMove) while in
+    /// <paramref name="cellBefore"/>; shortly after, the character is in <paramref name="cellAfter"/>. When the cell
+    /// changed, that is one vote for "number N = cellAfter" on this map. Cell names only, nothing personal.
+    /// </summary>
+    public void RecordCellNumber(string? mapName, int number, string? cellBefore, string? cellAfter)
+    {
+        var normMap = GameDatabase.NormalizeMapName(mapName);
+        var after = cellAfter?.Trim();
+        if (string.IsNullOrEmpty(normMap) || number < 0 || string.IsNullOrEmpty(after) ||
+            string.Equals(after, cellBefore?.Trim(), StringComparison.OrdinalIgnoreCase))
+            return;
+        lock (_sync)
+        {
+            var map = GetOrCreateMap(normMap);
+            map.CellNumbers ??= new();
+            if (!map.CellNumbers.TryGetValue(number, out var votes))
+                map.CellNumbers[number] = votes = new Dictionary<string, long>(StringComparer.Ordinal);
+            votes[after] = votes.GetValueOrDefault(after) + 1;
+            SessionCellNumberSamples++;
+        }
+    }
+
+    /// <summary>Cell-number votes recorded this session (shown in the plugin status).</summary>
+    public long SessionCellNumberSamples { get; private set; }
+
     public void RecordPlayerCount(string? mapName, int playerCount)
     {
         var normMap = GameDatabase.NormalizeMapName(mapName);

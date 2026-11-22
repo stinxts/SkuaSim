@@ -1106,6 +1106,38 @@ try
     Assert(keyDoc["CommandCounts"]!.Children<Newtonsoft.Json.Linq.JProperty>().Any(p => p.Name == "keys:addGoldExp:cmd,iCP,id,intExp,intGold,typ"),
         "The key census must record the key names of each command");
 
+    // (g) Cell numbers for "move to cell by number" (CoreBots.PvPMove: %xt%zm%mtcid%room%N%), learned from the cell the
+    // character is in right after the request (cell names from the collected bludrutbrawl map). A request that did not
+    // move the character is not a vote; the most voted name wins after merging.
+    var cellEng = new PacketCollectorEngine();
+    cellEng.RecordCellNumber("bludrutbrawl-999999", 5, "Enter0", "Morale0C");
+    cellEng.RecordCellNumber("bludrutbrawl", 5, "Enter0", "Morale0C");
+    cellEng.RecordCellNumber("bludrutbrawl", 4, "Morale0C", "Morale0B");
+    cellEng.RecordCellNumber("bludrutbrawl", 7, "Morale0B", "Morale0B"); // did not move: ignored
+    cellEng.RecordCellNumber("bludrutbrawl", 4, "Morale0C", "Morale0A"); // a stray vote
+    var cellDelta = cellEng.TakeDeltaSnapshot();
+    var brawl = cellDelta.Maps["bludrutbrawl"];
+    Assert(brawl.CellForNumber(5) == "Morale0C" && brawl.CellNumbers[5]["Morale0C"] == 2 && !brawl.CellNumbers.ContainsKey(7),
+        $"Cell numbers must be voted per map (room suffix dropped) and a request without a move ignored: {Newtonsoft.Json.JsonConvert.SerializeObject(brawl.CellNumbers)}");
+    var cellDb = new GameDatabase();
+    GameDatabaseStore.MergeInto(cellDb, cellDelta);
+    var more = new PacketCollectorEngine();
+    more.RecordCellNumber("bludrutbrawl", 4, "Morale0C", "Morale0B");
+    GameDatabaseStore.MergeInto(cellDb, more.TakeDeltaSnapshot());
+    Assert(cellDb.Maps["bludrutbrawl"].CellForNumber(4) == "Morale0B" && cellDb.Maps["bludrutbrawl"].CellNumbers[4]["Morale0B"] == 2,
+        "Merged votes must add up and the most voted cell name wins");
+    // The mtcid reply and the PvP event/score packets are sampled for verification (real key sets from the census
+    // skeletons: PVPE {cmd,team,typ,unm,val}, PVPS {cmd,pvpScore[{k,m,r,v}]}); the player name in "unm" is redacted.
+    var pvpSampler = new SkuaSim.Collector.Diagnostics.PacketSchemaSampler { Enabled = true };
+    pvpSampler.TryCaptureStringPacket(Newtonsoft.Json.Linq.JArray.Parse("""["mtcid","-1","5"]"""), 0, null, "bludrutbrawl");
+    pvpSampler.TryCaptureProtocol("PVPE", Newtonsoft.Json.Linq.JObject.Parse("""{"cmd":"PVPE","team":0,"typ":"kill","unm":"SomePlayer","val":"3"}"""), false, 0, "SomePlayer", "bludrutbrawl");
+    pvpSampler.TryCaptureProtocol("PVPS", Newtonsoft.Json.Linq.JObject.Parse("""{"cmd":"PVPS","pvpScore":[{"k":1,"m":2,"r":3,"v":4},{"k":0,"m":1,"r":0,"v":2}]}"""), false, 0, null, "bludrutbrawl");
+    var pvpPath = Path.Combine(v3Dir, "pvp_schemas.json");
+    pvpSampler.FlushToFiles(pvpPath);
+    var pvpText = File.ReadAllText(pvpPath);
+    Assert(pvpText.Contains("proto_str_mtcid") && pvpText.Contains("proto_PVPE") && pvpText.Contains("proto_PVPS") && !pvpText.Contains("SomePlayer"),
+        "mtcid, PVPE and PVPS must be sampled, with the player name redacted");
+
     var mergedTwice = v3Store.FlushDelta(new GameDatabase());
     Assert(mergedTwice.Monsters["id:900"].KillRewards.Samples == 3 && Directory.GetFiles(v3Dir, "gamedata.v2-backup-*.json").Length == 1,
         "A v3 file must not be migrated again and empty flushes must not change counters");

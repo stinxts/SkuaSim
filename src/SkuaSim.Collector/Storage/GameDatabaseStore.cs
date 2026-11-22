@@ -230,6 +230,15 @@ public sealed partial class GameDatabaseStore
                     dstMapItem.ActiveQuestCounts[questId] = dstMapItem.ActiveQuestCounts.GetValueOrDefault(questId) + count;
             }
 
+            dstMap.CellNumbers ??= new();
+            foreach (var (number, votes) in srcMap.CellNumbers ?? new())
+            {
+                if (!dstMap.CellNumbers.TryGetValue(number, out var dstVotes))
+                    dstMap.CellNumbers[number] = dstVotes = new Dictionary<string, long>(StringComparer.Ordinal);
+                foreach (var (cell, count) in votes)
+                    dstVotes[cell] = dstVotes.GetValueOrDefault(cell) + count;
+            }
+
             dstMap.PlayerCountSamples += srcMap.PlayerCountSamples;
             if (srcMap.PeakPlayersObserved > dstMap.PeakPlayersObserved)
             {
