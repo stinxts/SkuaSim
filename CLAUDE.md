@@ -60,7 +60,8 @@ dotnet run --project src\SkuaSim.UI
   Eastern (`AeCalendar.ToEastern`): dailies reset at 00:00, weeklies Friday 00:00, monthlies on the 1st. The AE calendar
   (`data\ae_calendar.json`) is only downloaded by `skuasim calendar-update`; simulations read the local file and
   never touch the network.
-- **Data tiers:** scenario > collected data (`gamedata.json` + `QuestData.json`) > synthesized fallback.
+- **Data tiers:** scenario > collected data (`gamedata.json` + other testers' exports in `data\contrib\`, merged in
+  memory in file-name order by `GameDataContributions`; `gamedata.json` is never rewritten by SkuaSim, + `QuestData.json`) > synthesized fallback.
   Anything invented must be reported with `Trace.Synthesize(key, description)` (shown in Violet in the UI).
   Never invent data for captured or scenario-defined maps.
 - **Privacy:** the Collector must never persist account/player names, inventories, chat or IPs (`unm`/`uid`/

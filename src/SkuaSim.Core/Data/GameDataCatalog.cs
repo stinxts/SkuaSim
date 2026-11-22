@@ -39,6 +39,9 @@ public sealed class GameDataCatalog
     public IReadOnlyDictionary<int, QuestData> Quests { get; }
     public string? QuestDataPath { get; }
 
+    /// <summary>Shared data from other testers merged into <see cref="Captured"/> (the contrib folder next to gamedata.json; empty when none).</summary>
+    public IReadOnlyList<GameDataContribution> Contributions { get; private init; } = Array.Empty<GameDataContribution>();
+
     private GameDataCatalog(GameDatabase captured, string? capturedPath, Dictionary<int, QuestData> quests, string? questDataPath)
     {
         Captured = captured;
@@ -48,14 +51,25 @@ public sealed class GameDataCatalog
         BuildIndexes();
     }
 
-    public static GameDataCatalog Load(string? gameDataPath, string? questDataPath)
+    public static GameDataCatalog Load(string? gameDataPath, string? questDataPath, bool includeContributions = true)
     {
         var captured = new GameDatabase();
         string? usedCaptured = null;
+        var contributions = new List<GameDataContribution>();
         if (!string.IsNullOrEmpty(gameDataPath) && File.Exists(gameDataPath))
         {
             captured = JsonConvert.DeserializeObject<GameDatabase>(File.ReadAllText(gameDataPath)) ?? new GameDatabase();
             usedCaptured = Path.GetFullPath(gameDataPath);
+
+            // Other testers' shared data (data\contrib\*.json), merged in memory; gamedata.json is never changed.
+            var contribFolder = GameDataContributions.FolderFor(gameDataPath);
+            if (includeContributions && Directory.Exists(contribFolder) && Directory.EnumerateFiles(contribFolder, "*.json").Any())
+            {
+                // Re-read with the collector's normalization (dictionary comparers, empty collections) before merging.
+                try { captured = SkuaSim.Collector.Storage.GameDatabaseStore.ReadSharedFile(gameDataPath); }
+                catch (InvalidDataException) { }
+                contributions = GameDataContributions.MergeInto(captured, gameDataPath);
+            }
         }
 
         var quests = new Dictionary<int, QuestData>();
@@ -68,7 +82,7 @@ public sealed class GameDataCatalog
             usedQuests = Path.GetFullPath(questDataPath);
         }
 
-        return new GameDataCatalog(captured, usedCaptured, quests, usedQuests);
+        return new GameDataCatalog(captured, usedCaptured, quests, usedQuests) { Contributions = contributions };
     }
 
     private void BuildIndexes()

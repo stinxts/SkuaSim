@@ -99,6 +99,8 @@ public sealed class ComputedCombatProfile
     public bool UsesCapturedClassData { get; init; }
     public int CapturedSkillCount { get; init; }
     public long CapturedSamples { get; init; }
+    /// <summary>Which collected combat profile was blended (empty = none compatible with this character).</summary>
+    public string ObservedCombatMatch { get; init; } = string.Empty;
 }
 
 /// <summary>
@@ -107,12 +109,6 @@ public sealed class ComputedCombatProfile
 /// </summary>
 public static class StatEngine
 {
-    // AQW enhancement stat weights per equipment slot
-    private const double WeaponSlotWeight = 0.33;
-    private const double ClassArmorSlotWeight = 0.25;
-    private const double HelmSlotWeight = 0.25;
-    private const double CapeSlotWeight = 0.17;
-
     /// <summary>AQW Wiki level stat pool: 15 + 747 * (Level - 1) / 99 (15 at Lv 1 -> 762 at Lv 100).</summary>
     public static double StatPoolForLevel(int level)
     {
@@ -167,8 +163,7 @@ public static class StatEngine
         double wis = pool * baseWeights.Wis;
         double lck = pool * baseWeights.Lck;
 
-        // 2. Enhancement contributions from Weapon, Class/Armor, Helm, Cape
-        double maxHpMultiplier = 1.0;
+        // 2. Enhancement contributions from Weapon, Class/Armor, Helm, Cape: exact AQW Wiki tables (AqwEnhancementTable).
         double healMultiplier = 1.0;
         double forgeOutDamageMultiplier = 1.0;
         double incomingDamageMultiplier = 1.0;
@@ -180,128 +175,119 @@ public static class StatEngine
         double procDpsFactor = 1.0;
         double lifestealRatio = 0.0;
 
-        void ApplyEnhancementSlot(InventoryItem? gear, double slotWeight)
+        void ApplyEnhancementSlot(InventoryItem? gear, EnhancementSlot slot)
         {
             if (gear == null || gear.EnhancementLevel <= 0 || gear.EnhancementPatternID <= 0)
                 return;
 
             var enhLvl = Math.Clamp(gear.EnhancementLevel, 1, lvl);
-            var enhPool = StatPoolForLevel(enhLvl) * slotWeight;
-            var w = GetEnhancementPatternWeights(gear.EnhancementPatternID);
+            var add = AqwEnhancementTable.StatsFor(gear.EnhancementPatternID, enhLvl, slot,
+                slot == EnhancementSlot.Weapon ? gear.ProcID : 0);
+            str += add.Str;
+            intl += add.Int;
+            end += add.End; // negative for Vim/Examen/Pneuma/Anima helms: that is how they lower max HP
+            dex += add.Dex;
+            wis += add.Wis;
+            lck += add.Lck;
 
-            str += enhPool * w.Str;
-            intl += enhPool * w.Int;
-            end += enhPool * w.End;
-            dex += enhPool * w.Dex;
-            wis += enhPool * w.Wis;
-            lck += enhPool * w.Lck;
-
-            // Special Forge helm/cape modifiers matching AQW mechanics
+            // Forge helm/cape passives, from the AQW Wiki (forge-helmet-enhancements, forge-cape-enhancements).
+            // Not modeled (no mana or hit-chance model): Vim/Examen "-33% Mana Consumption", Anima/Pneuma "+10% Hit
+            // Chance", Penitence "-25% DoT boost".
             switch (gear.EnhancementPatternID)
             {
-                case 25: // Vim Helm
-                    bonusHaste += 0.10;
-                    bonusDodge += 0.06;
-                    maxHpMultiplier *= 0.85;
-                    break;
-                case 26: // Examen Helm
-                    bonusCrit += 0.06;
-                    bonusHaste += 0.06;
-                    maxHpMultiplier *= 0.90;
-                    break;
-                case 27: // Pneuma Helm
-                    maxHpMultiplier *= 0.75;
-                    break;
-                case 28: // Anima Helm
-                    maxHpMultiplier *= 0.75;
-                    break;
-                case 32: // Hearty Helm
-                    maxHpMultiplier *= 1.50;
-                    break;
-                case 11: // Absolution Cape
+                case 11: // Absolution: +50% Healing Boost, -20% Physical Boost
                     healMultiplier *= 1.50;
-                    incomingDamageMultiplier *= 1.15;
+                    forgeOutDamageMultiplier *= archetype.DamageKind switch
+                    {
+                        ClassDamageKind.Physical => 0.80,
+                        ClassDamageKind.Magic => 1.00,
+                        _ => 0.90
+                    };
                     break;
-                case 12: // Avarice Cape
+                case 12: // Avarice: +10% Haste, -35% Damage Resistance
                     bonusHaste += 0.10;
-                    incomingDamageMultiplier *= 1.15;
+                    incomingDamageMultiplier *= 1.35;
                     break;
-                case 24: // Vainglory Cape
+                case 24: // Vainglory: +15% Damage Boost, -50% Healing Intake
                     forgeOutDamageMultiplier *= 1.15;
                     healMultiplier *= 0.50;
                     break;
-                case 29: // Penitence Cape
+                case 29: // Penitence: +25% Damage Resistance
                     forgeDrBonus += 0.25;
-                    bonusCritMult -= 0.15;
                     break;
-                case 30: // Lament Cape
+                case 30: // Lament: +20% Critical Chance, -5% Haste
                     bonusCrit += 0.20;
                     bonusHaste -= 0.05;
                     break;
             }
         }
 
-        ApplyEnhancementSlot(weapon, WeaponSlotWeight);
-        ApplyEnhancementSlot(clsItem, ClassArmorSlotWeight);
-        ApplyEnhancementSlot(helm, HelmSlotWeight);
-        ApplyEnhancementSlot(cape, CapeSlotWeight);
+        ApplyEnhancementSlot(weapon, EnhancementSlot.Weapon);
+        ApplyEnhancementSlot(clsItem, EnhancementSlot.Armor);
+        ApplyEnhancementSlot(helm, EnhancementSlot.Helm);
+        ApplyEnhancementSlot(cape, EnhancementSlot.Cape);
 
-        // Apply Awe / Forge Weapon Proc specials
+        // Weapon procs (AQW Wiki: wizard-awe-enh / lucky-awe-enh for the Awe procs, forge-weapon-enhancements for the
+        // Forge ones). Stat and buff effects follow the wiki; the extra proc damage itself is an average estimate
+        // (procDpsFactor) because the simulator does not roll procs hit by hit.
         if (weapon is { ProcID: > 0 })
         {
+            // Chance that a proc on auto attack (one every ~2 s) is active during a buff of `seconds`.
+            static double Uptime(double chance, double seconds) => 1.0 - Math.Pow(1.0 - chance, seconds / 2.0);
             switch (weapon.ProcID)
             {
-                case 2: // Spiral Carve
-                    bonusCrit += 0.08;
+                case 2: // Spiral Carve: 15% on auto attack, 200% hybrid damage, +25% Crit Chance for 10 s
+                    bonusCrit += 0.25 * Uptime(0.15, 10);
                     procDpsFactor *= 1.12;
                     break;
-                case 3: // Awe Blast
-                    procDpsFactor *= 1.12;
+                case 3: // Awe Blast: 30% on auto attack, 100% hybrid damage, target -15% Damage Resistance for 10 s
+                    procDpsFactor *= 1.0 + 0.15 * Uptime(0.30, 10);
                     break;
-                case 4: // Health Vamp
+                case 4: // Health Vamp: 50% on auto attack, 80% true damage, heals 125% of the base damage dealt
                     procDpsFactor *= 1.05;
                     lifestealRatio += 0.14;
                     break;
-                case 5: // Mana Vamp
+                case 5: // Mana Vamp: 80% on auto attack, 50% true damage, +10 mana
                     procDpsFactor *= 1.08;
                     break;
-                case 7: // Lacerate
+                case 7: // Lacerate: 2nd skill (2 s cooldown), target -10% Hit Chance and -10% Haste for 15 s (kept up)
                     procDpsFactor *= 1.10;
-                    bonusDodge += 0.05;
+                    bonusDodge += 0.10;
+                    incomingDamageMultiplier *= 1.0 / 1.10;
                     break;
-                case 8: // Smite
+                case 8: // Smite: 5th skill (15 s cooldown), 500% hybrid damage
                     procDpsFactor *= 1.14;
                     break;
-                case 9: // Valiance (+20% core stats proc uptime)
-                    str *= 1.20;
-                    intl *= 1.20;
-                    end *= 1.15;
-                    dex *= 1.20;
-                    wis *= 1.20;
-                    lck *= 1.20;
-                    procDpsFactor *= 1.15;
+                case 9: // Valiance: auto attack, 15 s cooldown, 20 s buff (always up): x1.3 STR/INT/DEX/WIS/END, x1.15 LCK
+                    str *= 1.30;
+                    intl *= 1.30;
+                    end *= 1.30;
+                    dex *= 1.30;
+                    wis *= 1.30;
+                    lck *= 1.15;
                     break;
-                case 10: // Arcana's Concerto
+                case 10: // Arcana's Concerto: 50% on auto attack, 50% hybrid damage, target -2% resistances per stack (11)
                     procDpsFactor *= 1.22;
                     break;
-                case 11: // Acheron
+                case 11: // Acheron: 3rd skill, 80% magic damage to 2 targets, Stygian DoT + up to +30% Damage Boost
                     procDpsFactor *= 1.24;
                     break;
-                case 12: // Elysium
+                case 12: // Elysium: 3rd skill, 500-2250% magic damage, up to 3 stacks of +10% Damage Boost
                     procDpsFactor *= 1.25;
                     lifestealRatio += 0.08;
                     break;
-                case 13: // Praxis
+                case 13: // Praxis: 2nd skill (4 s cooldown), 70% hybrid damage growing per hit on the same target
                     procDpsFactor *= 1.22;
                     break;
-                case 14: // Dauntless
+                case 14: // Dauntless: 2nd skill (3 s cooldown), 12 s buff (always up): +15% Crit, +25% Haste; lifesteal
                     procDpsFactor *= 1.30;
                     bonusHaste += 0.25;
-                    bonusCrit += 0.20;
+                    bonusCrit += 0.15;
                     lifestealRatio += 0.16;
                     break;
-                case 15: // Ravenous
-                    procDpsFactor *= 1.35;
+                case 15: // Ravenous: 3rd skill, 75-338% hybrid damage, +10% Damage Boost and +25% Crit for 10 s
+                    procDpsFactor *= 1.20;
+                    bonusCrit += 0.25;
                     break;
             }
         }
@@ -345,8 +331,14 @@ public static class StatEngine
         double statDodge = 0.04 + rDex * 0.14 + rWis * 0.08 + rLck * 0.03;
         var evasion = (float)Math.Clamp(statDodge + archetype.PassiveDodgeBonus + bonusDodge, 0.01, 0.90);
 
-        // Blend exact observed Collector dodge/crit rates slightly if captured data exists for this class
-        if (capturedClass?.Combat is { } obs)
+        // Blend observed Collector dodge/crit rates only from characters in the same level band with the same
+        // enhancement patterns (Phase 3.5 item 16): an endgame VHL's gear must not inflate a level-30 VHL.
+        var enhSig = ClassProfileKeys.EnhancementSignature(
+            weapon?.EnhancementPatternID ?? 0, weapon?.EnhancementLevel ?? 0, clsItem?.EnhancementPatternID ?? 0, clsItem?.EnhancementLevel ?? 0,
+            helm?.EnhancementPatternID ?? 0, helm?.EnhancementLevel ?? 0, cape?.EnhancementPatternID ?? 0, cape?.EnhancementLevel ?? 0);
+        var observedMatch = ClassCombatProfileMatch.Find(capturedClass, lvl, rank, enhSig);
+        var observed = observedMatch?.Stats;
+        if (observed is { } obs)
         {
             if (obs.AttacksTaken >= 20)
                 evasion = (float)Math.Clamp(evasion * 0.6 + obs.ObservedDodgeRate * 0.4, 0.01, 0.90);
@@ -355,7 +347,7 @@ public static class StatEngine
         }
 
         // Max Health from AQW level formula + END * 5
-        var computedMaxHp = Math.Max(100, (int)Math.Round((BaseHealthForLevel(lvl) + iEnd * 5.0) * maxHpMultiplier));
+        var computedMaxHp = Math.Max(100, (int)Math.Round(BaseHealthForLevel(lvl) + iEnd * 5.0));
 
         // 4. Primary Offensive Power -> Effective DPS
         double primaryPower = archetype.DamageKind switch
@@ -397,7 +389,7 @@ public static class StatEngine
         var effectiveDps = baseAutoSkillDps * critExpectedMult * hasteAttackMult * procDpsFactor * forgeOutDamageMultiplier * enhPenalty * gearBoosts.DamageAllMultiplier;
 
         // If Collector captured real class combat damage for this class, gently calibrate with level-normalized observed DPS
-        if (capturedClass?.Combat is { } clsCombat && clsCombat.Hits + clsCombat.Crits >= 10 && clsCombat.AverageDamagePerHit > 0)
+        if (observed is { } clsCombat && clsCombat.Hits + clsCombat.Crits >= 10 && clsCombat.AverageDamagePerHit > 0)
         {
             var obsPool = StatPoolForLevel((int)Math.Clamp(Math.Round(clsCombat.AverageDamageSampleLevel), 1, 100));
             var levelScale = pool / Math.Max(15.0, obsPool);
@@ -412,7 +404,7 @@ public static class StatEngine
             ? Math.Max(0.0, (sp * 0.55 + ap * 0.15 + computedMaxHp * 0.015) * archetype.SelfHealCoefficient * healMultiplier * hasteAttackMult * healUnlockFactor)
             : 0.0;
 
-        if (capturedClass?.Combat is { } healObs && healObs.HealEvents >= 5 && healObs.AverageHealPerEvent > 0 && combatHealPerSec > 0)
+        if (observed is { } healObs && healObs.HealEvents >= 5 && healObs.AverageHealPerEvent > 0 && combatHealPerSec > 0)
         {
             var obsPool = StatPoolForLevel((int)Math.Clamp(Math.Round(healObs.AverageHealSampleLevel), 1, 100));
             var obsHealEstimate = (healObs.AverageHealPerEvent / 4.0) * (pool / Math.Max(15.0, obsPool)) * healMultiplier;
@@ -421,7 +413,6 @@ public static class StatEngine
 
         var totalDr = Math.Clamp(archetype.DamageReduction + forgeDrBonus, 0.0, 0.75);
         var skills = BuildSkills(normalizedClass, rank, archetype, capturedClass);
-        var enhSig = $"W{weapon?.EnhancementPatternID ?? 0}:{weapon?.EnhancementLevel ?? 0}|C{clsItem?.EnhancementPatternID ?? 0}:{clsItem?.EnhancementLevel ?? 0}|H{helm?.EnhancementPatternID ?? 0}:{helm?.EnhancementLevel ?? 0}|K{cape?.EnhancementPatternID ?? 0}:{cape?.EnhancementLevel ?? 0}";
 
         var stats = new PlayerStats
         {
@@ -455,7 +446,8 @@ public static class StatEngine
             GearBoosts = gearBoosts,
             UsesCapturedClassData = capturedClass != null,
             CapturedSkillCount = capturedClass?.Skills.Count ?? 0,
-            CapturedSamples = capturedClass?.SamplesObserved ?? 0
+            CapturedSamples = capturedClass?.SamplesObserved ?? 0,
+            ObservedCombatMatch = observedMatch?.Description ?? string.Empty
         };
     }
 
@@ -627,29 +619,6 @@ public static class StatEngine
         AqwStatModel.DefensiveCaster => new(0.06, 0.28, 0.28, 0.08, 0.20, 0.10),
         AqwStatModel.LuckHybrid => new(0.16, 0.16, 0.14, 0.14, 0.12, 0.28),
         _ => new(0.18, 0.18, 0.20, 0.15, 0.15, 0.14) // FullHybrid
-    };
-
-    private static StatWeights GetEnhancementPatternWeights(int patternId) => patternId switch
-    {
-        2 => new(0.44, 0.00, 0.36, 0.20, 0.00, 0.00), // Fighter
-        3 => new(0.34, 0.00, 0.22, 0.44, 0.00, 0.00), // Thief
-        5 => new(0.23, 0.23, 0.22, 0.16, 0.16, 0.00), // Hybrid
-        6 => new(0.00, 0.46, 0.24, 0.00, 0.30, 0.00), // Wizard
-        7 => new(0.00, 0.38, 0.36, 0.00, 0.26, 0.00), // Healer
-        8 => new(0.00, 0.36, 0.18, 0.20, 0.00, 0.26), // SpellBreaker
-        9 => new(0.14, 0.12, 0.10, 0.10, 0.00, 0.54), // Lucky
-        10 => new(0.28, 0.28, 0.14, 0.15, 0.05, 0.10), // Forge base
-        11 => new(0.00, 0.40, 0.10, 0.10, 0.25, 0.15), // Absolution Cape
-        12 => new(0.15, 0.25, 0.05, 0.25, 0.15, 0.15), // Avarice Cape
-        24 => new(0.25, 0.25, 0.15, 0.15, 0.10, 0.10), // Vainglory Cape
-        25 => new(0.25, 0.00, 0.00, 0.55, 0.00, 0.20), // Vim Helm
-        26 => new(0.00, 0.45, 0.00, 0.15, 0.25, 0.15), // Examen Helm
-        27 => new(0.00, 0.65, 0.00, 0.00, 0.25, 0.10), // Pneuma Helm
-        28 => new(0.65, 0.00, 0.00, 0.15, 0.00, 0.20), // Anima Helm
-        29 => new(0.20, 0.15, 0.40, 0.10, 0.10, 0.05), // Penitence Cape
-        30 => new(0.10, 0.10, 0.10, 0.15, 0.15, 0.40), // Lament Cape
-        32 => new(0.15, 0.15, 0.55, 0.05, 0.05, 0.05), // Hearty Helm
-        _ => new(0.18, 0.18, 0.20, 0.15, 0.15, 0.14)
     };
 
     private static readonly string[] AllAqwRaces = { "Undead", "Chaos", "Dragonkin", "Human", "Elemental", "Drakath", "Orc" };

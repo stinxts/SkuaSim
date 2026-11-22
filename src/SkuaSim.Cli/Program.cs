@@ -31,6 +31,7 @@ internal static class CliEntry
             "calendar-update" => RunCalendarUpdate(rest, installation),
             "calendar-show" => RunCalendarShow(rest, installation),
             "whatif" => RunWhatIf(rest, installation),
+            "import-data" => RunImportData(rest, installation),
             _ => RunUnknown(cmd, installation)
         };
     }
@@ -185,6 +186,42 @@ internal static class CliEntry
             Console.WriteLine($"  {g.Key,-15} {g.Count(),4}");
     }
 
+    /// <summary>
+    /// Stores other testers' shared data ("Export for Sharing" .zip files) in data\contrib\, where every simulation merges
+    /// it with gamedata.json in memory. A newer export from the same tester replaces the older one.
+    /// </summary>
+    private static int RunImportData(string[] args, SkuaInstallation installation)
+    {
+        var files = args.TakeWhile(a => !a.StartsWith("--", StringComparison.Ordinal)).ToList();
+        if (files.Count == 0)
+        {
+            Console.Error.WriteLine("Usage: skuasim import-data <share.zip|gamedata.json> [more files...] [--gamedata <path>]");
+            return 1;
+        }
+
+        var runner = new SimulationRunner(installation);
+        var gameDataPath = GetOption(args, "--gamedata") ?? runner.FindDefaultGameDataPath();
+        if (gameDataPath == null)
+        {
+            Console.Error.WriteLine("Error: no gamedata.json found (use --gamedata <path>); shared data is stored next to it.");
+            return 1;
+        }
+
+        var ownId = GameDataContributions.FindOwnContributorId(installation.UserDataDirectory);
+        var failures = 0;
+        foreach (var file in files)
+        {
+            var result = File.Exists(file)
+                ? GameDataContributions.Import(file, gameDataPath, ownId)
+                : new GameDataContributions.ImportResult(file, null, "rejected: file not found");
+            Console.WriteLine($"{Path.GetFileName(file)}: {result.Message}");
+            if (result.StoredAs == null)
+                failures++;
+        }
+        Console.WriteLine($"Shared data folder: {GameDataContributions.FolderFor(gameDataPath)}");
+        return failures == 0 ? 0 : 2;
+    }
+
     private static int RunDbStats(string[] args, SkuaInstallation installation)
     {
         var runner = new SimulationRunner(installation);
@@ -211,6 +248,10 @@ internal static class CliEntry
         Console.WriteLine($"Items Cataloged    : {db.Items.Count:N0} ({totalDrops:N0} drop events)");
         Console.WriteLine($"Shops Captured     : {db.Shops.Count:N0}");
         Console.WriteLine($"Quests Captured    : {db.Quests.Count:N0}");
+        Console.WriteLine($"Collector Builds   : {(db.CollectorVersions.Count == 0 ? "(before 1.1.0)" : string.Join(", ", db.CollectorVersions.OrderBy(v => v.Key, StringComparer.Ordinal).Select(v => $"{v.Key} ×{v.Value:N0}")))}");
+        Console.WriteLine($"Shared Data        : {(catalog.Contributions.Count == 0 ? "(none)" : $"{catalog.Contributions.Count(c => c.Status == "merged")} file(s) merged")}");
+        foreach (var c in catalog.Contributions)
+            Console.WriteLine($"  {c.FileName}: {c.Status}" + (c.Status == "merged" ? $", {c.Kills:N0} kills, {c.Maps:N0} maps, exported {c.ExportedUtc:yyyy-MM-dd}" : ""));
         Console.WriteLine();
         Console.WriteLine("--- Static Game Catalog ---");
         Console.WriteLine($"QuestData Quests   : {catalog.QuestCount:N0}");
@@ -413,6 +454,7 @@ internal static class CliEntry
         Console.WriteLine("  skuasim calendar-update [--calendar <path>]   Download the AE calendar (artix.com/calendar) locally");
         Console.WriteLine("  skuasim calendar-show [--calendar <path>] [--date <utc>]");
         Console.WriteLine("  skuasim whatif <script.cs> --add \"Item\" [--add ...] [--scenario <file.json>] [--max-virtual-min <num>]   Compare a run with and without items (quest pets...)");
+        Console.WriteLine("  skuasim import-data <share.zip|gamedata.json> [...] [--gamedata <path>]   Add testers' shared data (data\\contrib\\, merged when simulating)");
         Console.WriteLine();
         Console.WriteLine("Run Options:");
         Console.WriteLine("  --scenario, -s <file.json>     Scenario JSON file describing player/world state");

@@ -50,6 +50,7 @@ internal static class CoreTests
             TestRealDataRewardsRespawnHouseResetsAndCalendar(runner, tempDir);
             TestBackgroundTaskDeterminism(runner, tempDir);
             TestQuestPetsAndUnlockItems(runner, tempDir);
+            TestClassProfilesAndSharedData(tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -1518,5 +1519,92 @@ internal static class CoreTests
             Thread.Sleep(20);
         }
         return predicate();
+    }
+
+    /// <summary>
+    /// Phase 3.5 items 16 and the tester-data flow: class combat is blended only from compatible profiles (level band,
+    /// patterns, rank group), and other testers' shared exports in data\contrib\ are imported (newest per contributor,
+    /// own export and ID-less files rejected) and merged in memory when the catalog loads.
+    /// </summary>
+    private static void TestClassProfilesAndSharedData(string tempDir)
+    {
+        Console.WriteLine("18. Testing class combat profiles (level band / gear) and shared tester data (import + merge)...");
+
+        // --- Combat profile matching ---
+        var cls = new SkuaSim.Collector.Models.CapturedClassProfile { Name = "Void Highlord" };
+        cls.CombatByProfile["L91-100|R10|W9:100|C9:100|H9:100|K9:100"] = new() { Hits = 80, Crits = 20, AttacksTaken = 50, DodgesTaken = 10 };
+        cls.CombatByProfile["L91-100|R10|W9:95|C9:100|H9:100|K9:100"] = new() { Hits = 10, Crits = 10 };
+        cls.CombatByProfile["L21-30|R5|W6:25|C6:25|H6:25|K6:25"] = new() { Hits = 30, Crits = 1 };
+        var exact = ClassCombatProfileMatch.Find(cls, 100, 10, "W9:100|C9:100|H9:100|K9:100");
+        Assert(exact != null && exact.Stats.Crits == 20 && exact.Description.EndsWith("(exact)"), $"Exact profile expected, got {exact?.Description}");
+        var samePatterns = ClassCombatProfileMatch.Find(cls, 95, 10, "W9:90|C9:90|H9:90|K9:90");
+        Assert(samePatterns != null && samePatterns.Stats.Crits == 30 && samePatterns.Stats.Hits == 90,
+            $"Same band + patterns should add both endgame profiles, got {samePatterns?.Description}");
+        Assert(ClassCombatProfileMatch.Find(cls, 30, 10, "W9:30|C9:30|H9:30|K9:30") == null,
+            "An endgame profile must not be blended into a level-30 character");
+        Assert(ClassCombatProfileMatch.Find(cls, 100, 5, "W9:100|C9:100|H9:100|K9:100") == null,
+            "Rank 5 is not compatible with rank 10 profiles (rank 10 passive)");
+        Assert(ClassCombatProfileMatch.Find(cls, 25, 5, "W6:25|C6:25|H6:25|K6:25") is { } low && low.Stats.Hits == 30, "Low-level profile expected");
+
+        // --- Shared tester data ---
+        var dataDir = Path.Combine(tempDir, "shared_data");
+        Directory.CreateDirectory(dataDir);
+        var gameDataPath = Path.Combine(dataDir, "gamedata.json");
+        SkuaSim.Collector.Models.GameDatabase MakeDb(long kills, string? contributor, DateTime? exported)
+        {
+            var db = new SkuaSim.Collector.Models.GameDatabase { ContributorId = contributor, ExportedUtc = exported };
+            db.Maps["sharedmap"] = new SkuaSim.Collector.Models.CapturedMap { Name = "sharedmap", Visits = 1 };
+            db.Monsters["id:777001"] = new SkuaSim.Collector.Models.CapturedMonster { Key = "id:777001", ID = 777001, Name = "Shared Slime", KillCount = kills, Level = 5 };
+            return db;
+        }
+        void Save(SkuaSim.Collector.Models.GameDatabase db, string path) => SkuaSim.Collector.Storage.GameDatabaseStore.WriteFile(path, db);
+
+        Save(MakeDb(10, null, null), gameDataPath);
+        var testerA = Path.Combine(tempDir, "testerA_old.json");
+        var testerANew = Path.Combine(tempDir, "testerA_new.json");
+        var testerB = Path.Combine(tempDir, "testerB.json");
+        var own = Path.Combine(tempDir, "own.json");
+        var noId = Path.Combine(tempDir, "noid.json");
+        Save(MakeDb(5, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", new DateTime(2026, 11, 20)), testerA);
+        Save(MakeDb(7, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", new DateTime(2026, 11, 22)), testerANew);
+        Save(MakeDb(100, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", new DateTime(2026, 11, 21)), testerB);
+        Save(MakeDb(1, "cccccccccccccccccccccccccccccccc", new DateTime(2026, 11, 21)), own);
+        Save(MakeDb(1, null, null), noId);
+
+        const string ownId = "cccccccccccccccccccccccccccccccc";
+        Assert(GameDataContributions.Import(testerA, gameDataPath, ownId).StoredAs != null, "Tester A import failed");
+        Assert(GameDataContributions.Import(testerANew, gameDataPath, ownId).StoredAs != null, "Tester A's newer export must replace the older one");
+        Assert(GameDataContributions.Import(testerA, gameDataPath, ownId).StoredAs == null, "An older export must not replace a newer one");
+        Assert(GameDataContributions.Import(testerB, gameDataPath, ownId).StoredAs != null, "Tester B import failed");
+        Assert(GameDataContributions.Import(own, gameDataPath, ownId).StoredAs == null, "This PC's own export must be rejected");
+        Assert(GameDataContributions.Import(noId, gameDataPath, ownId).StoredAs == null, "A file without contributor ID must be rejected");
+
+        var catalog = GameDataCatalog.Load(gameDataPath, null);
+        Assert(catalog.Contributions.Count == 2 && catalog.Contributions.All(c => c.Status == "merged"),
+            $"Expected 2 merged contributions, got {string.Join(", ", catalog.Contributions.Select(c => c.FileName + ":" + c.Status))}");
+        Assert(catalog.Captured.Monsters["id:777001"].KillCount == 10 + 7 + 100, $"Kills must add up (10 own + 7 A + 100 B), got {catalog.Captured.Monsters["id:777001"].KillCount}");
+        Assert(GameDataCatalog.Load(gameDataPath, null, includeContributions: false).Captured.Monsters["id:777001"].KillCount == 10,
+            "Without contributions only the own data is loaded");
+        var ownFile = SkuaSim.Collector.Storage.GameDatabaseStore.ReadSharedFile(gameDataPath);
+        Assert(ownFile.Monsters["id:777001"].KillCount == 10, "gamedata.json itself must never change");
+
+        // --- AQW Wiki enhancement tables (AqwEnhancementTable) ---
+        bool Near(int actual, int expected, int tol = 1) => Math.Abs(actual - expected) <= tol;
+        var wizArmor = AqwEnhancementTable.StatsFor(6, 100, EnhancementSlot.Armor);
+        Assert(wizArmor is { Int: 75, Wis: 30, End: 15, Lck: 30, Str: 0, Dex: 0 }, $"Wizard armor L100 must be 75/30/15/30 (wiki), got {wizArmor}");
+        var wizWeapon = AqwEnhancementTable.StatsFor(6, 100, EnhancementSlot.Weapon);
+        Assert(wizWeapon is { Int: 100, Wis: 40, End: 20, Lck: 40 }, $"Wizard weapon L100 must be 100/40/20/40 (Wizard Awe), got {wizWeapon}");
+        var fighter60 = AqwEnhancementTable.StatsFor(2, 60, EnhancementSlot.Armor);
+        Assert(Near(fighter60.Str, 40) && Near(fighter60.Dex, 12) && Near(fighter60.End, 39), $"Fighter armor L60 ~40/12/39 (wiki), got {fighter60}");
+        var wizCape51 = AqwEnhancementTable.StatsFor(6, 51, EnhancementSlot.Cape);
+        Assert(Near(wizCape51.Total, 60, 3), $"Wizard cape L51 ~60 points (wiki 30/12/6/12), got {wizCape51.Total}");
+        var vim = AqwEnhancementTable.StatsFor(25, 100, EnhancementSlot.Helm);
+        Assert(Near(vim.Dex, 198, 3) && Near(vim.End, -137, 3) && Near(vim.Lck, 76, 2), $"Vim helm L100 ~15/198/-137/76 (wiki), got {vim}");
+        var forgeCape = AqwEnhancementTable.StatsFor(30, 100, EnhancementSlot.Cape);
+        Assert(Near(forgeCape.Str, 30) && Near(forgeCape.Int, 30) && Near(forgeCape.Lck, 61), $"Lament cape L100 ~30/30/61 (wiki), got {forgeCape}");
+        var dauntless = AqwEnhancementTable.StatsFor(10, 100, EnhancementSlot.Weapon, procId: 14);
+        Assert(dauntless is { Str: 88, Dex: 26, End: 86 }, $"Dauntless weapon L100 must be 88/26/86 (wiki), got {dauntless}");
+        Assert(AqwEnhancementTable.StatsFor(6, 1, EnhancementSlot.Weapon) is { Int: 3, Wis: 1, End: 1, Lck: 1 }, "Wizard Awe L1 must be 3/1/1/1");
+        Console.WriteLine("   OK: compatible-only combat blending, newest export per contributor, merged in memory, wiki enhancement tables");
     }
 }

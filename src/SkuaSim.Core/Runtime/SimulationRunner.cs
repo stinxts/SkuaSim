@@ -228,6 +228,8 @@ public sealed class SimulationRunner
         using var trace = new SimulationTrace(options.TraceOutputPath, () => clock.NowMs, ms => clock.Format(ms));
         SimServiceProvider.Attach(trace);
         trace.Info($"Seed {seed}.");
+        foreach (var c in catalog.Contributions)
+            trace.Info($"Shared data {c.FileName}: {c.Status}" + (c.Status == "merged" ? $" ({c.Kills:N0} kills, {c.Maps:N0} maps, exported {c.ExportedUtc:yyyy-MM-dd})." : "."));
 
         var ctx = new SimContext(scenario, catalog, clock, trace, seed, _installation.Flavor)
         {

@@ -86,6 +86,7 @@ public sealed partial class PacketCollectorEngine
         {
             var snapshot = _delta;
             _delta = new GameDatabase();
+            snapshot.CollectorVersions[CollectorInfo.Version] = 1; // one flush by this build
             return snapshot;
         }
     }
@@ -104,7 +105,8 @@ public sealed partial class PacketCollectorEngine
                 || _delta.Procs.Count > 0
                 || _delta.Factions.Count > 0
                 || _delta.XpToNextLevel.Count > 0
-                || _delta.SellPrices.Count > 0;
+                || _delta.SellPrices.Count > 0
+                || _delta.Pvp.Count > 0;
         }
     }
 
@@ -133,7 +135,8 @@ public sealed partial class PacketCollectorEngine
     private static readonly HashSet<string> HandledServerCommands = new(StringComparer.Ordinal)
     {
         "moveToArea", "ct", "event", "updateClass", "equipItem", "sAct", "stu",
-        "dropItem", "addItems", "loadShop", "getQuests", "ccqr", "monsterDrops", "addGoldExp", "addFaction", "levelUp", "sellItem"
+        "dropItem", "addItems", "loadShop", "getQuests", "ccqr", "monsterDrops", "addGoldExp", "addFaction", "levelUp", "sellItem",
+        "PVPE", "PVPS"
     };
 
     private int _lastSellRequestItemId;
@@ -259,6 +262,12 @@ public sealed partial class PacketCollectorEngine
                     break;
                 case "sellItem":
                     HandleSellItemResponse(dataObj);
+                    break;
+                case "PVPE":
+                    HandlePvpEventPacket(dataObj);
+                    break;
+                case "PVPS":
+                    HandlePvpScorePacket(dataObj);
                     break;
             }
         }
@@ -636,6 +645,8 @@ public sealed partial class PacketCollectorEngine
         if (string.IsNullOrEmpty(normMap))
             return;
 
+        if (!string.IsNullOrEmpty(_pvpMap) && !string.Equals(_pvpMap, normMap, StringComparison.OrdinalIgnoreCase))
+            EndPvpMatchLocked();
         _currentMapName = normMap;
         _currentCell = "Enter";
         _currentPad = "Spawn";

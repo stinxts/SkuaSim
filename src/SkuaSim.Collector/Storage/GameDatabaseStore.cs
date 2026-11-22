@@ -1,4 +1,3 @@
-using System.IO.Compression;
 using System.Text;
 using Newtonsoft.Json;
 using SkuaSim.Collector.Models;
@@ -91,53 +90,6 @@ public sealed partial class GameDatabaseStore
 
             return current;
         });
-    }
-
-    /// <summary>
-    /// Exports a clean, shareable .zip archive containing gamedata.json and a summary manifest.
-    /// </summary>
-    public string ExportZipPackage(string exportDirectory)
-    {
-        Directory.CreateDirectory(exportDirectory);
-        var db = LoadCurrent();
-        var timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd_HHmmss");
-        var zipPath = Path.Combine(exportDirectory, $"skuasim_data_{timestamp}.zip");
-
-        using var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None);
-        using var archive = new ZipArchive(fs, ZipArchiveMode.Create);
-
-        var dataEntry = archive.CreateEntry("gamedata.json", CompressionLevel.Optimal);
-        using (var writer = new StreamWriter(dataEntry.Open(), new UTF8Encoding(false)))
-        {
-            writer.Write(JsonConvert.SerializeObject(db, JsonSettings));
-        }
-
-        var manifest = new
-        {
-            ExportedAtUtc = DateTime.UtcNow,
-            db.SchemaVersion,
-            db.TotalFlushesMerged,
-            Summary = new
-            {
-                MapsCount = db.Maps.Count,
-                MonstersCount = db.Monsters.Count,
-                TotalMonsterKills = db.Monsters.Values.Sum(m => m.KillCount),
-                ItemsCount = db.Items.Count,
-                ShopsCount = db.Shops.Count,
-                QuestsCount = db.Quests.Count,
-                ClassesCount = db.Classes.Count,
-                EnhancementsCount = db.Enhancements.Count,
-                ProcsCount = db.Procs.Count
-            }
-        };
-
-        var manifestEntry = archive.CreateEntry("manifest.json", CompressionLevel.Optimal);
-        using (var writer = new StreamWriter(manifestEntry.Open(), new UTF8Encoding(false)))
-        {
-            writer.Write(JsonConvert.SerializeObject(manifest, JsonSettings));
-        }
-
-        return zipPath;
     }
 
     private QuestCatalogHints? SafeHints()
@@ -550,6 +502,21 @@ public sealed partial class GameDatabaseStore
                 dst.Quantity = src.Quantity;
                 dst.LastSeenUtc = src.LastSeenUtc;
             }
+        }
+
+        // 8b. Collector builds that produced the data (flush counts)
+        target.CollectorVersions ??= new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach (var (version, flushes) in source.CollectorVersions ?? new Dictionary<string, long>())
+            if (!string.IsNullOrWhiteSpace(version) && flushes > 0)
+                target.CollectorVersions[version] = target.CollectorVersions.GetValueOrDefault(version) + flushes;
+
+        // 8c. PvP events and scores per map
+        target.Pvp ??= new Dictionary<string, CapturedPvpStats>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (pvpMap, srcPvp) in source.Pvp ?? new Dictionary<string, CapturedPvpStats>())
+        {
+            if (!target.Pvp.TryGetValue(pvpMap, out var dstPvp))
+                target.Pvp[pvpMap] = dstPvp = new CapturedPvpStats();
+            dstPvp.Merge(srcPvp);
         }
 
         // 9. Merge faction names (ID -> name only)

@@ -55,6 +55,25 @@ public sealed class GameDatabase
     /// <summary>Faction ID -> name (additive in v3; no player reputation is stored).</summary>
     public Dictionary<int, CapturedFaction> Factions { get; set; } = new();
 
+    /// <summary>
+    /// Collector build -> number of flushes it merged into this file (additive in v3), e.g. <c>"1.1.0+19e923d": 812</c>.
+    /// Files from before 1.1.0 have none.
+    /// </summary>
+    public Dictionary<string, long> CollectorVersions { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>PvP events and scores per map ("PVPE"/"PVPS"; additive in v3). Key "unknown" when the map was not known yet.</summary>
+    public Dictionary<string, CapturedPvpStats> Pvp { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Set only in a file exported for sharing: a random ID made once per collector install (not derived from the
+    /// account, the PC or the user), so SkuaSim can replace a tester's older export with the newer one instead of
+    /// counting the same kills twice. Never present in the collector's own gamedata.json.
+    /// </summary>
+    public string? ContributorId { get; set; }
+
+    /// <summary>Set only in a file exported for sharing: when it was exported (UTC, whole day).</summary>
+    public DateTime? ExportedUtc { get; set; }
+
     public static string NormalizeMapName(string? mapName)
     {
         if (string.IsNullOrWhiteSpace(mapName))
@@ -766,4 +785,51 @@ public sealed class CapturedQuest
     public HashSet<string> MapsAcceptedOn { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> MapsTurnedInOn { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>
+/// PvP match data for one map (additive in v3), from the server packets "PVPE" { team, typ, val, unm } (one event, e.g.
+/// team 0 killed a "Restorer"; the player name is never read) and "PVPS" { pvpScore: [ {k, m, r, v} per team ] }
+/// (score update; the meaning of k/m/r/v is still being worked out, hence the ordered sequence). Numbers only, no
+/// names and no times.
+/// </summary>
+public sealed class CapturedPvpStats
+{
+    public const int MaxSequence = 2000;
+    public const int MaxFinalScores = 500;
+
+    /// <summary>Event counts keyed <c>team{n}:{typ}:{val}</c>, e.g. <c>team0:kill:Restorer</c>.</summary>
+    public Dictionary<string, long> Events { get; set; } = new(StringComparer.Ordinal);
+
+    public long ScoreUpdates { get; set; }
+
+    /// <summary>
+    /// The last score of each match: <c>k,m,r,v|k,m,r,v</c> (team 0 | team 1). A match ends when the scores drop back
+    /// (a new match started) or when the character leaves the map.
+    /// </summary>
+    public List<string> FinalScores { get; set; } = new();
+
+    /// <summary>
+    /// Events and score changes in the order they arrived: <c>E:team0:kill:Restorer</c>, <c>S:10,3,4,1250|0,0,0,0</c>;
+    /// <c>---</c> separates flushes/sessions. Kept up to <see cref="MaxSequence"/> entries.
+    /// </summary>
+    public List<string> Sequence { get; set; } = new();
+
+    public void Merge(CapturedPvpStats? o)
+    {
+        if (o == null)
+            return;
+        foreach (var (key, count) in o.Events)
+            Events[key] = Events.GetValueOrDefault(key) + count;
+        ScoreUpdates += o.ScoreUpdates;
+        foreach (var s in o.FinalScores)
+            if (FinalScores.Count < MaxFinalScores)
+                FinalScores.Add(s);
+        if (o.Sequence.Count > 0 && Sequence.Count < MaxSequence)
+        {
+            if (Sequence.Count > 0)
+                Sequence.Add("---");
+            Sequence.AddRange(o.Sequence.Take(Math.Max(0, MaxSequence - Sequence.Count)));
+        }
+    }
 }

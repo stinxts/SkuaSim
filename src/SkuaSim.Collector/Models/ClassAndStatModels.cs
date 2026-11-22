@@ -13,9 +13,26 @@ public sealed class CapturedClassProfile
     public string InferredStatModel { get; set; } = "";
     public List<CapturedClassSkill> Skills { get; set; } = new();
     public List<CapturedClassPassive> Passives { get; set; } = new();
+    /// <summary>Latest snapshot per level, any gear (legacy; one account's gear overwrites another's).</summary>
     public Dictionary<int, CapturedLevelStatSnapshot> StatsByLevel { get; set; } = new();
+
+    /// <summary>
+    /// Latest snapshot per exact level, class rank and enhancement signature (additive in v3), key
+    /// <see cref="ClassProfileKeys.StatKey"/>, e.g. <c>100|R10|W6:100|C6:100|H6:100|K6:100</c>.
+    /// </summary>
+    public Dictionary<string, CapturedLevelStatSnapshot> StatsByProfile { get; set; } = new(StringComparer.Ordinal);
+
     public Dictionary<string, CapturedClassAuraStat> Auras { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>All combat of the class, every level and gear mixed (legacy aggregate; the simulator no longer blends it).</summary>
     public CapturedPlayerCombatStats Combat { get; set; } = new();
+
+    /// <summary>
+    /// Combat split by level band (10 levels), class rank and enhancement signature (additive in v3), key
+    /// <see cref="ClassProfileKeys.CombatKey"/>, e.g. <c>L91-100|R10|W6:100|C6:100|H6:100|K6:100</c>, so an endgame
+    /// character's crit/dodge is never blended into a low-level scenario with the same class.
+    /// </summary>
+    public Dictionary<string, CapturedPlayerCombatStats> CombatByProfile { get; set; } = new(StringComparer.Ordinal);
     public DateTime FirstSeenUtc { get; set; } = DateTime.UtcNow;
     public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
 }
@@ -108,11 +125,90 @@ public sealed class CapturedPlayerCombatStats
 
     [JsonIgnore]
     public double AverageHealSampleLevel => HealEvents > 0 ? (double)LevelSumForHeal / HealEvents : 0;
+
+    public CapturedPlayerCombatStats Clone() => (CapturedPlayerCombatStats)MemberwiseClone();
+
+    /// <summary>Adds another set of counters (MaxSingleHit takes the maximum).</summary>
+    public void Add(CapturedPlayerCombatStats o)
+    {
+        Hits += o.Hits;
+        Crits += o.Crits;
+        Misses += o.Misses;
+        TotalDamageDealt += o.TotalDamageDealt;
+        MaxSingleHit = Math.Max(MaxSingleHit, o.MaxSingleHit);
+        LevelSumForDamage += o.LevelSumForDamage;
+        HealEvents += o.HealEvents;
+        TotalHealingDone += o.TotalHealingDone;
+        LevelSumForHeal += o.LevelSumForHeal;
+        AttacksTaken += o.AttacksTaken;
+        DodgesTaken += o.DodgesTaken;
+        TotalDamageTaken += o.TotalDamageTaken;
+    }
+
+    /// <summary>Adds what changed between two snapshots of a counter set (<paramref name="before"/> → <paramref name="after"/>).</summary>
+    public void AddChange(CapturedPlayerCombatStats before, CapturedPlayerCombatStats after)
+    {
+        Hits += after.Hits - before.Hits;
+        Crits += after.Crits - before.Crits;
+        Misses += after.Misses - before.Misses;
+        TotalDamageDealt += after.TotalDamageDealt - before.TotalDamageDealt;
+        if (after.MaxSingleHit > before.MaxSingleHit)
+            MaxSingleHit = Math.Max(MaxSingleHit, after.MaxSingleHit);
+        LevelSumForDamage += after.LevelSumForDamage - before.LevelSumForDamage;
+        HealEvents += after.HealEvents - before.HealEvents;
+        TotalHealingDone += after.TotalHealingDone - before.TotalHealingDone;
+        LevelSumForHeal += after.LevelSumForHeal - before.LevelSumForHeal;
+        AttacksTaken += after.AttacksTaken - before.AttacksTaken;
+        DodgesTaken += after.DodgesTaken - before.DodgesTaken;
+        TotalDamageTaken += after.TotalDamageTaken - before.TotalDamageTaken;
+    }
+
+    [JsonIgnore]
+    public bool IsEmpty => Hits + Crits + Misses + HealEvents + AttacksTaken == 0 && TotalDamageTaken == 0;
+}
+
+/// <summary>
+/// Keys for class stats and combat split by character level, class rank and gear. The enhancement signature is
+/// <c>W{pattern}:{level}|C…|H…|K…</c> (weapon, class, helm, cape; 0:0 = not enhanced), the same string the
+/// simulator builds for a scenario. Rank 0 = unknown.
+/// </summary>
+public static class ClassProfileKeys
+{
+    public static string EnhancementSignature(int wPat, int wLvl, int cPat, int cLvl, int hPat, int hLvl, int kPat, int kLvl) =>
+        $"W{wPat}:{wLvl}|C{cPat}:{cLvl}|H{hPat}:{hLvl}|K{kPat}:{kLvl}";
+
+    /// <summary>First level of the 10-level band (1, 11, 21 … 91).</summary>
+    public static int BandStart(int level) => (Math.Clamp(level, 1, 100) - 1) / 10 * 10 + 1;
+
+    public static string Band(int level) => $"L{BandStart(level)}-{BandStart(level) + 9}";
+
+    public static string CombatKey(int level, int rank, string signature) => $"{Band(level)}|R{rank}|{signature}";
+
+    public static string StatKey(int level, int rank, string signature) => $"{level}|R{rank}|{signature}";
+
+    /// <summary>The signature's patterns only, without enhancement levels: <c>W6|C6|H6|K6</c>.</summary>
+    public static string PatternsOnly(string signature) =>
+        string.Join('|', signature.Split('|').Select(part => part.Split(':')[0]));
+
+    /// <summary>Splits a combat key into band, rank and signature; false for a malformed key.</summary>
+    public static bool TryParseCombatKey(string key, out string band, out int rank, out string signature)
+    {
+        band = signature = string.Empty;
+        rank = 0;
+        var parts = key.Split('|', 3);
+        if (parts.Length != 3 || !parts[0].StartsWith('L') || !parts[1].StartsWith('R') || !int.TryParse(parts[1].AsSpan(1), out rank))
+            return false;
+        band = parts[0];
+        signature = parts[2];
+        return true;
+    }
 }
 
 /// <summary>
 /// Anonymized enhancement pattern profile keyed by AQW `EnhPatternID`
 /// (e.g. 2=Fighter, 3=Thief, 6=Wizard, 9=Lucky, 25=Vim, 26=Examen, 27=Pneuma, 28=Anima).
+/// Legacy (2026-11-22): no longer recorded — it needed a "pure set" of gear and caught 1 pattern in 13.7k flushes.
+/// Old data is kept and merged; <see cref="CapturedClassProfile.StatsByProfile"/> replaces it.
 /// </summary>
 public sealed class CapturedEnhancementProfile
 {

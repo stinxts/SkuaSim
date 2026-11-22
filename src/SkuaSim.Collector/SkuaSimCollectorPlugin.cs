@@ -28,7 +28,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
 
     public string Name => "SkuaSim Collector";
     public string Author => "SkuaSim";
-    public string Description => "Passive game data collector (maps, monsters, damage, drops, shops, quests, classes, auras, and procs) for the SkuaSim test environment.";
+    public string Description => $"Passive game data collector (maps, monsters, damage, drops, shops, quests, classes, auras, and procs) for the SkuaSim test environment. Version {CollectorInfo.Version}.";
     public string OptionsStorage => "skuasim_collector_options";
 
     public List<IOption> Options { get; } = new()
@@ -36,7 +36,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
         new Option<bool>(OptEnabled, "Active Collection", "Enables or pauses passive background data collection.", true),
         new Option<bool>(OptCombatDetails, "Combat Details", "Collects monster min/max/avg damage, attack intervals, skill cues, zones, procs, and aura effects.", true),
         new Option<int>(OptFlushSeconds, "Save Interval (s)", "Interval in seconds to merge collected data into gamedata.json.", 30),
-        new Option<string>(OptMirrorFile, "Mirror File Path (Optional)", "Extra file path to mirror gamedata.json (e.g., SkuaSim project folder).", GetDefaultWorkspaceMirrorPath()),
+        new Option<string>(OptMirrorFile, "Mirror File Path (Optional)", "Extra file path to mirror gamedata.json (e.g., a SkuaSim workspace data folder). Empty by default; more paths can be listed in mirror_paths.txt in the data folder.", string.Empty),
         new Option<bool>(OptPacketSchemas, "Packet Schema Sampler", "Accumulates strictly anonymized sample payloads per combat/boss/event packet type into packet_schemas.json across sessions (zero personal data).", true)
     };
 
@@ -609,16 +609,16 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                     $"• Cataloged Items: {db.Items.Count} ({totalDrops} drops)\n" +
                     $"• Captured Shops: {db.Shops.Count}\n" +
                     $"• Captured Quests: {db.Quests.Count}\n" +
-                    $"• Captured Classes: {db.Classes.Count} ({db.Enhancements.Count} enh, {db.Procs.Count} procs)\n" +
+                    $"• Captured Classes: {db.Classes.Count} ({db.Procs.Count} procs)\n" +
                     $"• Packet Schemas: {(_engine.SchemaSampler.Enabled ? $"ON ({_engine.SchemaSampler.TotalSamplesCaptured} session samples)" : "OFF")}\n\n" +
                     $"=== Current Session (PID {Environment.ProcessId}) ===\n" +
                     $"• Processed Packets: {_engine.SessionPacketsProcessed}\n" +
                     $"• Visited Maps: {_engine.SessionMapsVisited}\n" +
                     $"• Recorded Kills: {_engine.SessionKillsRecorded}\n" +
                     $"• Recorded Drops: {_engine.SessionDropsRecorded}\n\n" +
-                    $"Primary File:\n{store.PrimaryFilePath}";
+                    $"Collector {CollectorInfo.Version}\nPrimary File:\n{store.PrimaryFilePath}";
 
-                Log($"[SkuaSim Collector] Maps={db.Maps.Count}, Monsters={db.Monsters.Count}, Kills={totalKills}, Items={db.Items.Count}, Shops={db.Shops.Count}, Quests={db.Quests.Count}, Classes={db.Classes.Count}, Enh={db.Enhancements.Count}, Procs={db.Procs.Count}");
+                Log($"[SkuaSim Collector] Maps={db.Maps.Count}, Monsters={db.Monsters.Count}, Kills={totalKills}, Items={db.Items.Count}, Shops={db.Shops.Count}, Quests={db.Quests.Count}, Classes={db.Classes.Count}, Procs={db.Procs.Count}, Collector={CollectorInfo.Version}");
 
                 if (_bot == null)
                     return;
@@ -628,7 +628,7 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                     summary,
                     "SkuaSim Collector — Status",
                     "Open Folder",
-                    "Export .zip",
+                    "Export for Sharing",
                     toggleLabel,
                     "Close");
 
@@ -641,13 +641,15 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                         UseShellExecute = true
                     });
                 }
-                else if (result.Text == "Export .zip")
+                else if (result.Text == "Export for Sharing")
                 {
                     var exportDir = Path.Combine(dataDir, "exports");
-                    var zipPath = store.ExportZipPackage(exportDir);
+                    var zipPath = store.ExportForSharing(exportDir);
                     Log($"[SkuaSim Collector] Exported package: {zipPath}");
                     _bot.ShowMessageBox(
-                        $"Data package exported successfully (anonymized, no personal data):\n\n{zipPath}",
+                        $"Shareable data package exported:\n\n{zipPath}\n\n" +
+                        "It holds game data only (maps, monsters, drops, shops, quests, class stats), with dates cut to the day " +
+                        "and a random contributor ID. Account names, inventories, chat and IPs are never collected.",
                         "SkuaSim Collector — Export Complete");
                 }
                 else if (result.Text == toggleLabel)
@@ -668,10 +670,8 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
         var primaryDir = GetPrimaryDataDirectory();
         var primaryFile = Path.Combine(primaryDir, "gamedata.json");
 
-        var mirrors = new List<string>();
-        var defaultMirror = GetDefaultWorkspaceMirrorPath();
-        if (!string.IsNullOrWhiteSpace(defaultMirror))
-            mirrors.Add(defaultMirror);
+        // No built-in mirror: a tester's install only writes its own data folder (Phase 3.5 item 18).
+        var mirrors = new List<string>(ReadMirrorPathsFile(primaryDir));
 
         var configuredMirror = GetStringOption(OptMirrorFile, string.Empty);
         if (!string.IsNullOrWhiteSpace(configuredMirror))
@@ -717,28 +717,31 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
         return Path.Combine(appData, "VibeSkua", "SkuaSim");
     }
 
-    private static string GetDefaultWorkspaceMirrorPath()
+    /// <summary>
+    /// Extra mirror files listed in <c>mirror_paths.txt</c> next to the primary gamedata.json (one path per line;
+    /// <c>#</c> starts a comment). It is a local, per-machine file — the collector has no built-in mirror, so a tester's
+    /// install only writes its own data folder. A SkuaSim developer lists the workspace's <c>data\gamedata.json</c> there.
+    /// </summary>
+    private static IEnumerable<string> ReadMirrorPathsFile(string primaryDir)
     {
+        var file = Path.Combine(primaryDir, "mirror_paths.txt");
+        string[] lines;
         try
         {
-            var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            foreach (var desktopFolder in new[] { "Área de Trabalho", "Desktop" })
-            {
-                var candidate = Path.Combine(userProfile, "OneDrive", desktopFolder, "SkuaSim", "data", "gamedata.json");
-                var parent = Path.GetDirectoryName(Path.GetDirectoryName(candidate));
-                if (!string.IsNullOrEmpty(parent) && Directory.Exists(parent))
-                    return candidate;
-            }
-
-            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-            var candidate2 = Path.Combine(desktop, "SkuaSim", "data", "gamedata.json");
-            var parent2 = Path.GetDirectoryName(Path.GetDirectoryName(candidate2));
-            if (!string.IsNullOrEmpty(parent2) && Directory.Exists(parent2))
-                return candidate2;
+            if (!File.Exists(file))
+                return Array.Empty<string>();
+            lines = File.ReadAllLines(file);
         }
-        catch { }
+        catch
+        {
+            return Array.Empty<string>();
+        }
 
-        return string.Empty;
+        return lines
+            .Select(l => l.Trim().Trim('"'))
+            .Where(l => l.Length > 0 && !l.StartsWith('#'))
+            .Select(l => l.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ? l : Path.Combine(l, "gamedata.json"))
+            .ToList();
     }
 
     private void CaptureLivePlayerSnapshot(IScriptInterface bot)

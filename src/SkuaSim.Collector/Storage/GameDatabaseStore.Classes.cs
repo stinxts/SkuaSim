@@ -14,6 +14,8 @@ public sealed partial class GameDatabaseStore
             cls.Auras = new Dictionary<string, CapturedClassAuraStat>(
                 cls.Auras ?? new Dictionary<string, CapturedClassAuraStat>(),
                 StringComparer.OrdinalIgnoreCase);
+            cls.StatsByProfile ??= new Dictionary<string, CapturedLevelStatSnapshot>(StringComparer.Ordinal);
+            cls.CombatByProfile ??= new Dictionary<string, CapturedPlayerCombatStats>(StringComparer.Ordinal);
 
             var procAuraKeys = cls.Auras.Keys
                 .Where(k => WeaponProcCatalog.ResolveProcIdFromAura(k, 0) > 0)
@@ -127,22 +129,32 @@ public sealed partial class GameDatabaseStore
                     }
                 }
 
-                dstCls.Combat ??= new CapturedPlayerCombatStats();
-                var sc = srcCls.Combat;
-                if (sc != null)
+                dstCls.StatsByProfile ??= new Dictionary<string, CapturedLevelStatSnapshot>(StringComparer.Ordinal);
+                if (srcCls.StatsByProfile != null)
                 {
-                    dstCls.Combat.Hits += sc.Hits;
-                    dstCls.Combat.Crits += sc.Crits;
-                    dstCls.Combat.Misses += sc.Misses;
-                    dstCls.Combat.TotalDamageDealt += sc.TotalDamageDealt;
-                    dstCls.Combat.MaxSingleHit = Math.Max(dstCls.Combat.MaxSingleHit, sc.MaxSingleHit);
-                    dstCls.Combat.LevelSumForDamage += sc.LevelSumForDamage;
-                    dstCls.Combat.HealEvents += sc.HealEvents;
-                    dstCls.Combat.TotalHealingDone += sc.TotalHealingDone;
-                    dstCls.Combat.LevelSumForHeal += sc.LevelSumForHeal;
-                    dstCls.Combat.AttacksTaken += sc.AttacksTaken;
-                    dstCls.Combat.DodgesTaken += sc.DodgesTaken;
-                    dstCls.Combat.TotalDamageTaken += sc.TotalDamageTaken;
+                    foreach (var (statKey, srcSnap) in srcCls.StatsByProfile)
+                    {
+                        // The same level, rank and gear give the same stats: keep the newest values, add the samples.
+                        var samples = Math.Max(1, srcSnap.Samples)
+                            + (dstCls.StatsByProfile.TryGetValue(statKey, out var old) ? old.Samples : 0);
+                        dstCls.StatsByProfile[statKey] = srcSnap;
+                        srcSnap.Samples = samples;
+                    }
+                }
+
+                dstCls.Combat ??= new CapturedPlayerCombatStats();
+                if (srcCls.Combat != null)
+                    dstCls.Combat.Add(srcCls.Combat);
+
+                dstCls.CombatByProfile ??= new Dictionary<string, CapturedPlayerCombatStats>(StringComparer.Ordinal);
+                if (srcCls.CombatByProfile != null)
+                {
+                    foreach (var (combatKey, srcCombat) in srcCls.CombatByProfile)
+                    {
+                        if (!dstCls.CombatByProfile.TryGetValue(combatKey, out var dstCombat))
+                            dstCls.CombatByProfile[combatKey] = dstCombat = new CapturedPlayerCombatStats();
+                        dstCombat.Add(srcCombat);
+                    }
                 }
 
                 dstCls.Auras ??= new Dictionary<string, CapturedClassAuraStat>(StringComparer.OrdinalIgnoreCase);

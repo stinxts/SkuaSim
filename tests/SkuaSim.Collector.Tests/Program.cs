@@ -294,8 +294,36 @@ try
     Assert(merged.Shops.ContainsKey(2031) && merged.Shops[2031].Items.Count == 1, "Shop 2031 not captured");
     Assert(merged.Quests.ContainsKey(8152) && merged.Quests[8152].AcceptedCount == 1 && merged.Quests[8152].TurnInCount == 1, "Quest 8152 stats mismatch");
 
-    var zipPath = store.ExportZipPackage(Path.Combine(tempDir, "exports"));
+    Assert(merged.CollectorVersions.TryGetValue(CollectorInfo.Version, out var flushesByBuild) && flushesByBuild == 2,
+        $"Expected 2 flushes recorded for collector {CollectorInfo.Version}");
+    Assert(merged.ContributorId == null && merged.ExportedUtc == null, "The collector's own file must not carry a contributor ID");
+
+    // Export for sharing: day-only dates, no migration log, a stable random contributor ID; read back and merge.
+    var zipPath = store.ExportForSharing(Path.Combine(tempDir, "exports"));
     Assert(File.Exists(zipPath), "Exported zip not created");
+    var shared = GameDatabaseStore.ReadSharedFile(zipPath);
+    Assert(Guid.TryParse(shared.ContributorId, out _), "Shared file has no contributor ID");
+    Assert(shared.MigrationLog.Count == 0, "Shared file must not carry the migration log");
+    Assert(shared.LastUpdatedUtc.TimeOfDay == TimeSpan.Zero && shared.Monsters["id:4901"].LastSeenUtc.TimeOfDay == TimeSpan.Zero,
+        "Shared file dates must be cut to the day");
+    Assert(shared.Monsters["id:4901"].KillCount == 2, "Shared file lost data");
+    var zip2 = store.ExportForSharing(Path.Combine(tempDir, "exports2"));
+    Assert(GameDatabaseStore.ReadSharedFile(zip2).ContributorId == shared.ContributorId, "Contributor ID must stay the same per install");
+    using (var archive = System.IO.Compression.ZipFile.OpenRead(zipPath))
+    {
+        var gameJson = new StreamReader(archive.GetEntry("gamedata.json")!.Open()).ReadToEnd();
+        Assert(!gameJson.Contains("p:777") && !gameJson.Contains(tempDir.Replace("\\", "\\\\")), "Shared file leaked an entity ref or a local path");
+    }
+    var combined = new GameDatabase();
+    GameDatabaseStore.MergeInto(combined, GameDatabaseStore.ReadSharedFile(primaryPath));
+    GameDatabaseStore.MergeInto(combined, shared);
+    Assert(combined.Monsters["id:4901"].KillCount == 4 && combined.CollectorVersions[CollectorInfo.Version] == 4,
+        "Two testers' files should add up");
+    var bogus = Path.Combine(tempDir, "not_gamedata.json");
+    File.WriteAllText(bogus, "{\"hello\": 1}");
+    var rejected = false;
+    try { GameDatabaseStore.ReadSharedFile(bogus); } catch (InvalidDataException) { rejected = true; }
+    Assert(rejected, "A file without collected data must be rejected");
 
     Console.WriteLine("4. Testing class skills (sAct), stat updates (stu), player combat (ct), enhancements & anonymization...");
     var c1 = new PacketCollectorEngine();
@@ -398,8 +426,20 @@ try
     Assert(mage.Combat.AttacksTaken == 3 && mage.Combat.DodgesTaken == 2,
         $"Expected 3 incoming attacks & 2 dodges, got {mage.Combat.AttacksTaken}/{mage.Combat.DodgesTaken}");
 
-    Assert(finalDb.Enhancements.TryGetValue(6, out var wizEnh) && wizEnh!.Name == "Wizard" && wizEnh.PureSetStatsByLevel.ContainsKey(10),
-        "Wizard enhancement profile not recorded");
+    // Combat and stats split by level band, rank (0 = unknown here) and enhancement signature (Phase 3.5 item 16)
+    Assert(mage.CombatByProfile.TryGetValue("L1-10|R0|W6:10|C6:10|H6:10|K6:10", out var wizGear)
+           && wizGear is { Crits: 1, Hits: 1, Misses: 1, HealEvents: 1, AttacksTaken: 2, DodgesTaken: 1, TotalDamageDealt: 500 },
+        $"Wizard-gear combat profile mismatch: {string.Join(", ", mage.CombatByProfile.Keys)}");
+    Assert(mage.CombatByProfile.TryGetValue("L1-10|R0|W0:0|C0:0|H0:0|K0:0", out var bare)
+           && bare is { Hits: 1, Crits: 0, AttacksTaken: 1, DodgesTaken: 1, TotalDamageDealt: 100 },
+        "Unenhanced combat profile mismatch (the second client must not mix into the first one's gear)");
+    Assert(mage.CombatByProfile.Count == 2, $"Expected 2 combat profiles, got {mage.CombatByProfile.Count}");
+    Assert(mage.StatsByProfile.TryGetValue("10|R0|W6:10|C6:10|H6:10|K6:10", out var lv10Profile) && lv10Profile.Intellect == 95,
+        "Stat snapshot by profile missing");
+    Assert(ClassProfileKeys.Band(91) == "L91-100" && ClassProfileKeys.Band(100) == "L91-100" && ClassProfileKeys.Band(11) == "L11-20",
+        "Level band boundaries");
+    // The old pure-set enhancement profile is no longer recorded (replaced by StatsByProfile)
+    Assert(!finalDb.Enhancements.ContainsKey(6), "Legacy enhancement profile should not be recorded any more");
     Assert(finalDb.Shops.TryGetValue(141, out var enhShop) && enhShop!.Items[0].EnhancementPatternID == 6,
         "Shop 141 EnhancementPatternID not captured");
 
@@ -1137,6 +1177,31 @@ try
     var pvpText = File.ReadAllText(pvpPath);
     Assert(pvpText.Contains("proto_str_mtcid") && pvpText.Contains("proto_PVPE") && pvpText.Contains("proto_PVPS") && !pvpText.Contains("SomePlayer"),
         "mtcid, PVPE and PVPS must be sampled, with the player name redacted");
+
+    // (g2) PvP events and scores are recorded per map (real shapes; the real final-looking sample was
+    // [{k:10,m:3,r:4,v:1250},{0,0,0,0}]). A lower score total = a new match; leaving the map ends the match.
+    var pvpEng = new PacketCollectorEngine();
+    static string PvpPacket(string dataObj) => "{\"params\":{\"type\":\"json\",\"dataObj\":" + dataObj + "}}";
+    pvpEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"moveToArea","strMapName":"bludrutbrawl-100001","strMapFileName":"bludrutbrawl.swf"}"""));
+    pvpEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"PVPE","team":0,"typ":"kill","unm":"SomePlayer","val":"Restorer"}"""));
+    pvpEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"PVPS","pvpScore":[{"k":1,"m":0,"r":1,"v":100},{"k":0,"m":0,"r":0,"v":0}]}"""));
+    pvpEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"PVPS","pvpScore":[{"k":10,"m":3,"r":4,"v":1250},{"k":0,"m":0,"r":0,"v":0}]}"""));
+    pvpEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"PVPS","pvpScore":[{"k":0,"m":0,"r":0,"v":0},{"k":1,"m":0,"r":0,"v":50}]}""")); // next match
+    pvpEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"moveToArea","strMapName":"battleon-1","strMapFileName":"battleon.swf"}"""));
+    var pvpDelta = pvpEng.TakeDeltaSnapshot();
+    Assert(pvpDelta.Pvp.TryGetValue("bludrutbrawl", out var brawlPvp), "PvP stats missing for bludrutbrawl");
+    Assert(brawlPvp!.Events.GetValueOrDefault("team0:kill:Restorer") == 1 && brawlPvp.ScoreUpdates == 3,
+        $"PvP events/score updates mismatch: {Newtonsoft.Json.JsonConvert.SerializeObject(brawlPvp)}");
+    Assert(brawlPvp.FinalScores.SequenceEqual(new[] { "10,3,4,1250|0,0,0,0", "0,0,0,0|1,0,0,50" }),
+        $"Final scores mismatch: {string.Join(" / ", brawlPvp.FinalScores)}");
+    Assert(brawlPvp.Sequence.First() == "E:team0:kill:Restorer" && brawlPvp.Sequence.Count == 4,
+        $"PvP sequence mismatch: {string.Join(" ; ", brawlPvp.Sequence)}");
+    Assert(!Newtonsoft.Json.JsonConvert.SerializeObject(pvpDelta).Contains("SomePlayer"), "PvP data must not contain player names");
+    var pvpDb = new GameDatabase();
+    GameDatabaseStore.MergeInto(pvpDb, pvpDelta);
+    GameDatabaseStore.MergeInto(pvpDb, pvpDelta);
+    Assert(pvpDb.Pvp["bludrutbrawl"].Events["team0:kill:Restorer"] == 2 && pvpDb.Pvp["bludrutbrawl"].FinalScores.Count == 4,
+        "Merged PvP stats must add up");
 
     // (h) Drop size: in dropItem, "dQty" is the amount that dropped; "iQty" can be the stack already owned (real samples
     // carry both keys; the legacy sum of iQty gave ~1,400 Undead Energy per drop). Shape from the real Chaos War Medal

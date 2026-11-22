@@ -458,6 +458,8 @@ public sealed partial class PacketCollectorEngine
             var cls = GetOrCreateClassDelta(_currentClassName);
             var level = Math.Max(1, _currentLevel);
             var now = DateTime.UtcNow;
+            // The tick updates the class aggregate; what changed is also added to the level/rank/gear profile below.
+            var combatBefore = cls.Combat.Clone();
             var sawExplicitHeal = false;
             var sawExplicitMonsterDmgToSelf = false;
             var sawSelfInflictedDmg = false;
@@ -500,8 +502,26 @@ public sealed partial class PacketCollectorEngine
 
             // Fallback / complement using ct.p player HP deltas ONLY when explicit actions did not already cover the tick
             ProcessPlayerHpDeltasFromP(dataObj, cls, level, now, sawExplicitHeal, sawExplicitMonsterDmgToSelf, sawSelfInflictedDmg, hasSelfSarsaCast, hasSaraInTick);
+
+            // Only with a known level: a profile keyed with a guessed level would mix gear tiers again.
+            if (_currentLevel > 0)
+            {
+                var change = new CapturedPlayerCombatStats();
+                change.AddChange(combatBefore, cls.Combat);
+                if (!change.IsEmpty)
+                {
+                    var key = ClassProfileKeys.CombatKey(_currentLevel, CurrentClassRank(), CurrentEnhancementSignature());
+                    if (!cls.CombatByProfile.TryGetValue(key, out var profile))
+                        cls.CombatByProfile[key] = profile = new CapturedPlayerCombatStats();
+                    profile.Add(change);
+                }
+            }
         }
     }
+
+    private string CurrentEnhancementSignature() => ClassProfileKeys.EnhancementSignature(
+        _weaponEnhPattern, _weaponEnhLevel, _classEnhPattern, _classEnhLevel,
+        _helmEnhPattern, _helmEnhLevel, _capeEnhPattern, _capeEnhLevel);
 
     private void ProcessPlayerCombatEntry(
         JObject act,
@@ -681,12 +701,12 @@ public sealed partial class PacketCollectorEngine
 
         cls.InferredStatModel = InferStatModel(intl, str, dex, wis, lck, end);
 
-        var sig = $"W{_weaponEnhPattern}:{_weaponEnhLevel}|C{_classEnhPattern}:{_classEnhLevel}|H{_helmEnhPattern}:{_helmEnhLevel}|K{_capeEnhPattern}:{_capeEnhLevel}";
-        cls.StatsByLevel[level] = new CapturedLevelStatSnapshot
+        var sig = CurrentEnhancementSignature();
+        CapturedLevelStatSnapshot Snapshot(int samples) => new()
         {
             Level = level,
             MaxHealth = maxHealth,
-            Samples = cls.StatsByLevel.TryGetValue(level, out var prev) ? prev.Samples + 1 : 1,
+            Samples = samples,
             Strength = str,
             Intellect = intl,
             Endurance = end,
@@ -702,46 +722,13 @@ public sealed partial class PacketCollectorEngine
             EnhancementSignature = sig
         };
 
-        // If at least 2 enhanced gear slots share the same non-zero PatternID at a consistent EnhLevel,
-        // record a clean reference snapshot for that enhancement pattern!
-        var activeSlots = new[]
-        {
-            (_weaponEnhPattern, _weaponEnhLevel),
-            (_classEnhPattern, _classEnhLevel),
-            (_helmEnhPattern, _helmEnhLevel),
-            (_capeEnhPattern, _capeEnhLevel)
-        }.Where(x => x.Item1 > 0 && x.Item2 > 0).ToList();
+        cls.StatsByLevel[level] = Snapshot(cls.StatsByLevel.TryGetValue(level, out var prev) ? prev.Samples + 1 : 1);
+        var statKey = ClassProfileKeys.StatKey(level, CurrentClassRank(), sig);
+        cls.StatsByProfile[statKey] = Snapshot(cls.StatsByProfile.TryGetValue(statKey, out var prevProfile) ? prevProfile.Samples + 1 : 1);
 
-        if (activeSlots.Count >= 2 &&
-            activeSlots.All(x => x.Item1 == activeSlots[0].Item1 && x.Item2 == activeSlots[0].Item2))
-        {
-            var patternId = activeSlots[0].Item1;
-            var enhLvl = activeSlots[0].Item2;
-            if (!_delta.Enhancements.TryGetValue(patternId, out var enh))
-            {
-                enh = new CapturedEnhancementProfile
-                {
-                    PatternID = patternId,
-                    Name = EnhancementPatternCatalog.GetPatternName(patternId),
-                    FirstSeenUtc = DateTime.UtcNow
-                };
-                _delta.Enhancements[patternId] = enh;
-            }
-            enh.Observations++;
-            enh.LastSeenUtc = DateTime.UtcNow;
-            enh.PureSetStatsByLevel[enhLvl] = new CapturedEnhancementLevelObservation
-            {
-                EnhancementLevel = enhLvl,
-                ReferenceClass = cls.Name,
-                Samples = enh.PureSetStatsByLevel.TryGetValue(enhLvl, out var prevObs) ? prevObs.Samples + 1 : 1,
-                Strength = str,
-                Intellect = intl,
-                Endurance = end,
-                Dexterity = dex,
-                Wisdom = wis,
-                Luck = lck
-            };
-        }
+        // The old per-pattern "pure set" enhancement profile (GameDatabase.Enhancements) is no longer recorded: it caught
+        // 1 pattern in 13.7k flushes and was never used. StatsByProfile keeps the real stats with every slot's pattern
+        // and level, which is what an enhancement model needs.
     }
 
     private static string InferStatModel(int intl, int str, int dex, int wis, int lck, int end)
