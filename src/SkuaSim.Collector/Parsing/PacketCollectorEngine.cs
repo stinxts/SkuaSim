@@ -108,7 +108,8 @@ public sealed partial class PacketCollectorEngine
                 || _delta.Factions.Count > 0
                 || _delta.XpToNextLevel.Count > 0
                 || _delta.SellPrices.Count > 0
-                || _delta.Pvp.Count > 0;
+                || _delta.Pvp.Count > 0
+                || _delta.ServerMessages.Count > 0;
         }
     }
 
@@ -178,6 +179,7 @@ public sealed partial class PacketCollectorEngine
                 lock (_sync)
                 {
                     SchemaSampler.TryCaptureStringPacket(strParts, _selfPlayerEntityId, _selfUsername, _currentMapName);
+                    HandleStringMessageLocked(strParts);
                     if (string.Equals(strParts[0]!.ToString(), "respawnMon", StringComparison.Ordinal))
                         HandleRespawnMon(strParts, DateTime.UtcNow);
                 }
@@ -200,6 +202,7 @@ public sealed partial class PacketCollectorEngine
             SchemaSampler.CountCommand(cmd);
             SchemaSampler.CountKeySet(cmd, dataObj);
             CommitEndedPvpMatchIfDueLocked();
+            HandleJsonMessageLocked(cmd, dataObj);
             var sampleMap = cmd == "moveToArea"
                 ? GameDatabase.NormalizeMapName(dataObj["strMapName"]?.ToString())
                 : _currentMapName;
@@ -294,6 +297,7 @@ public sealed partial class PacketCollectorEngine
         lock (_sync)
         {
             SessionPacketsProcessed++;
+            NoteClientCommandLocked(parts);
 
             switch (cmd)
             {

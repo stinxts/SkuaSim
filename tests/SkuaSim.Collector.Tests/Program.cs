@@ -1246,6 +1246,40 @@ try
     Assert(medal.DropEvents == 1 && medal.QuantitySamples == 1 && medal.AverageQuantity == 2,
         $"The drop size must come from dQty, not from the owned stack in iQty (samples={medal.QuantitySamples}, avg={medal.AverageQuantity})");
 
+    // (i) Server warnings/messages (collector 1.3.0). Shapes and texts from the CoreBots listeners that react to them
+    // (MapIsMemberLocked: str ["warning", room, text]; RelogRequieredListener: JSON strMessage); stored anonymized with
+    // the preceding client command; messages after a player-targeted command are never stored.
+    var msgEng = new PacketCollectorEngine();
+    msgEng.SetPlayerCombatContext(1, "Rogue", 50, selfUsername: "SecretHero");
+    static string StrPacket(params string[] parts) => "{\"params\":{\"type\":\"str\",\"dataObj\":" + Newtonsoft.Json.JsonConvert.SerializeObject(parts) + "}}";
+    msgEng.ProcessExtensionPacketJson(StrPacket("uotls", "-1", "OtherGuy", "afk:false"));
+    msgEng.ProcessClientPacket("%xt%zm%cmd%1%tfer%SecretHero%lair-1%Enter%Spawn%");
+    msgEng.ProcessExtensionPacketJson(StrPacket("warning", "-1", "\"lair\" is an Membership-Only Map."));
+    msgEng.ProcessClientPacket("%xt%zm%cmd%1%tfer%SecretHero%lair-2%Enter%Spawn%");
+    msgEng.ProcessExtensionPacketJson(StrPacket("warning", "-1", "\"lair\" is an Membership-Only Map."));
+    msgEng.ProcessClientPacket("%xt%zm%buyItem%1%1770%215%4706%");
+    msgEng.ProcessExtensionPacketJson("""{"params":{"type":"json","dataObj":{"cmd":"buyItem","bitSuccess":0,"strMessage":"Item is not buyable. Item Inventory full. Re-login to syncronize your real bag slot amount."}}}""");
+    msgEng.ProcessExtensionPacketJson(StrPacket("server", "-1", "SecretHero and OtherGuy: 12 seconds left"));
+    msgEng.ProcessClientPacket("%xt%zm%whisper%1%hi there%OtherGuy%");
+    msgEng.ProcessExtensionPacketJson(StrPacket("warning", "-1", "Player OtherGuy is busy."));
+    msgEng.ProcessClientPacket("%xt%zm%cmd%1%goto%SomeoneElse%");
+    msgEng.ProcessExtensionPacketJson(StrPacket("warning", "-1", "Player 'SomeoneElse' could not be found."));
+    var msgDelta = msgEng.TakeDeltaSnapshot();
+    var msgs = msgDelta.ServerMessages;
+    string MsgDump() => Newtonsoft.Json.JsonConvert.SerializeObject(msgs.Values.Select(m => $"{m.Kind}|{m.Text}|{string.Join(",", m.PrecededBy.Select(p => p.Key + "=" + p.Value))}"));
+    Assert(msgs.TryGetValue("warning|\"<Q>\" is an Membership-Only Map.", out var memberMsg) && memberMsg.Count == 2 && memberMsg.PrecededBy.GetValueOrDefault("cmd:tfer") == 2,
+        $"The member-map warning must be stored once with count 2 after cmd:tfer: {MsgDump()}");
+    Assert(msgs.TryGetValue("json:buyItem|Item is not buyable. Item Inventory full. Re-login to syncronize your real bag slot amount.", out var buyMsg) && buyMsg.PrecededBy.ContainsKey("buyItem"),
+        $"A JSON strMessage must be stored with its command and the preceding client command: {MsgDump()}");
+    Assert(msgs.ContainsKey("server|<SELF> and <PLAYER>: # seconds left"), $"Own name, room player names and digits must be masked: {MsgDump()}");
+    Assert(msgs.Count == 3 && msgEng.SessionServerMessagesSkipped == 2, $"Messages after whisper / slash commands must be skipped: {MsgDump()}");
+    var msgJson = Newtonsoft.Json.JsonConvert.SerializeObject(msgDelta);
+    Assert(!msgJson.Contains("SecretHero") && !msgJson.Contains("OtherGuy") && !msgJson.Contains("SomeoneElse"), "Server messages must not contain player names");
+    var msgDb = new GameDatabase();
+    GameDatabaseStore.MergeInto(msgDb, msgDelta);
+    GameDatabaseStore.MergeInto(msgDb, msgDelta);
+    Assert(msgDb.ServerMessages["warning|\"<Q>\" is an Membership-Only Map."].Count == 4, "Merged server message counts must add up");
+
     var mergedTwice = v3Store.FlushDelta(new GameDatabase());
     Assert(mergedTwice.Monsters["id:900"].KillRewards.Samples == 3 && Directory.GetFiles(v3Dir, "gamedata.v2-backup-*.json").Length == 1,
         "A v3 file must not be migrated again and empty flushes must not change counters");

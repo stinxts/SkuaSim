@@ -65,6 +65,13 @@ public sealed class GameDatabase
     public Dictionary<string, CapturedPvpStats> Pvp { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Server warnings and messages (additive in v3, collector 1.3.0), keyed <c>{Kind}|{Text}</c>: the anonymized text
+    /// template, how often it arrived and which client command preceded it. Used to simulate the server's warnings
+    /// with their real wording (scripts react to them through ExtensionPacketReceived).
+    /// </summary>
+    public Dictionary<string, CapturedServerMessage> ServerMessages { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>
     /// Set only in a file exported for sharing: a random ID made once per collector install (not derived from the
     /// account, the PC or the user), so SkuaSim can replace a tester's older export with the newer one instead of
     /// counting the same kills twice. Never present in the collector's own gamedata.json.
@@ -793,6 +800,54 @@ public sealed class CapturedQuest
 /// (score update; the meaning of k/m/r/v is still being worked out, hence the ordered sequence). Numbers only, no
 /// names and no times.
 /// </summary>
+/// <summary>
+/// One server warning/message template. The text is anonymized before it is stored: the character's own name becomes
+/// <c>&lt;SELF&gt;</c>, names of players seen in the room <c>&lt;PLAYER&gt;</c>, quoted text <c>&lt;Q&gt;</c> and digit runs
+/// <c>#</c>. Messages that follow a player-targeted client command (whisper, friend, party, slash commands) are never
+/// stored.
+/// </summary>
+public sealed class CapturedServerMessage
+{
+    public const int MaxTemplates = 2000;
+    public const int MaxKeysPerCounter = 30;
+
+    /// <summary><c>warning</c> / <c>server</c> (string packets) or <c>json:{cmd}</c> (a JSON packet's message field).</summary>
+    public string Kind { get; set; } = string.Empty;
+
+    public string Text { get; set; } = string.Empty;
+
+    public long Count { get; set; }
+
+    /// <summary>Client command sent within 3 s before the message (e.g. <c>tryQuestComplete</c>, <c>cmd:tfer</c>), or <c>none</c>.</summary>
+    public Dictionary<string, long> PrecededBy { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>Map the character was in.</summary>
+    public Dictionary<string, long> Maps { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public void Merge(CapturedServerMessage o)
+    {
+        if (string.IsNullOrEmpty(Kind))
+            Kind = o.Kind;
+        if (string.IsNullOrEmpty(Text))
+            Text = o.Text;
+        Count += o.Count;
+        AddCounts(PrecededBy, o.PrecededBy);
+        AddCounts(Maps, o.Maps);
+    }
+
+    internal static void AddCount(Dictionary<string, long> counts, string key, long amount = 1)
+    {
+        if (counts.ContainsKey(key) || counts.Count < MaxKeysPerCounter)
+            counts[key] = counts.GetValueOrDefault(key) + amount;
+    }
+
+    private static void AddCounts(Dictionary<string, long> target, Dictionary<string, long>? source)
+    {
+        foreach (var (key, count) in source ?? new())
+            AddCount(target, key, count);
+    }
+}
+
 public sealed class CapturedPvpMatch
 {
     /// <summary>Items received up to this long after the match ended (leaving the map or the next match) still count.</summary>

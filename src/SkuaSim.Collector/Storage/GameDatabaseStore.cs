@@ -510,6 +510,21 @@ public sealed partial class GameDatabaseStore
             if (!string.IsNullOrWhiteSpace(version) && flushes > 0)
                 target.CollectorVersions[version] = target.CollectorVersions.GetValueOrDefault(version) + flushes;
 
+        // 8b2. Server warning/message templates
+        target.ServerMessages ??= new Dictionary<string, CapturedServerMessage>(StringComparer.Ordinal);
+        foreach (var (msgKey, srcMsg) in source.ServerMessages ?? new Dictionary<string, CapturedServerMessage>())
+        {
+            if (srcMsg == null)
+                continue;
+            if (!target.ServerMessages.TryGetValue(msgKey, out var dstMsg))
+            {
+                if (target.ServerMessages.Count >= CapturedServerMessage.MaxTemplates)
+                    continue;
+                target.ServerMessages[msgKey] = dstMsg = new CapturedServerMessage();
+            }
+            dstMsg.Merge(srcMsg);
+        }
+
         // 8c. PvP events and scores per map
         target.Pvp ??= new Dictionary<string, CapturedPvpStats>(StringComparer.OrdinalIgnoreCase);
         foreach (var (pvpMap, srcPvp) in source.Pvp ?? new Dictionary<string, CapturedPvpStats>())
