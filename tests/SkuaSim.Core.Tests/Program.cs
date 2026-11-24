@@ -51,6 +51,7 @@ internal static class CoreTests
             TestBackgroundTaskDeterminism(runner, tempDir);
             TestQuestPetsAndUnlockItems(runner, tempDir);
             TestClassProfilesAndSharedData(tempDir);
+            TestPvpMatchMtcidAndTrophies(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -1128,6 +1129,103 @@ internal static class CoreTests
     /// registered-quest pattern) runs one thread at a time in virtual-time order, so the same seed repeats the run
     /// exactly, including the interleaving of main and background log lines.
     /// </summary>
+    /// <summary>
+    /// PvP NPC match (Bludrut Brawl): "mtcid" moves by the collected cell numbers, the enemy captain's death wins and adds
+    /// min(10, 1 + Restorers + 2 x Brawlers) Combat Trophies straight to the inventory (verified on 26 real matches:
+    /// 7 without the Restorers, 10 with them), the legacy captured "Combat Trophy" captain drop is not rolled, and killed
+    /// NPCs do not respawn during the match.
+    /// </summary>
+    private static void TestPvpMatchMtcidAndTrophies(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("19. Testing PvP matches (mtcid cell numbers, Bludrut Brawl trophies, no NPC respawn)...");
+        var gameDataPath = Path.Combine(tempDir, "gamedata_pvp_test.json");
+        File.WriteAllText(gameDataPath, """
+        {
+          "SchemaVersion": 3,
+          "Maps": { "bludrutbrawl": { "Name": "bludrutbrawl",
+            "Cells": { "Enter0": ["Spawn"], "Crossupper": [], "Resource1A": [], "Morale1A": [], "Captain1": [] },
+            "CellNumbers": { "14": { "Crossupper": 13 }, "18": { "Resource1A": 13 }, "15": { "Morale1A": 20 }, "28": { "Captain1": 19 } },
+            "Monsters": {
+              "9": { "MapID": 9, "MonsterID": 313, "Name": "(B) Defensive Restorer", "Cell": "Resource1A", "Level": 255, "MaxHP": 5000 },
+              "10": { "MapID": 10, "MonsterID": 313, "Name": "(B) Defensive Restorer", "Cell": "Resource1A", "Level": 255, "MaxHP": 5000 },
+              "13": { "MapID": 13, "MonsterID": 311, "Name": "(B) Brawler", "Cell": "Morale1A", "Level": 255, "MaxHP": 10000 },
+              "16": { "MapID": 16, "MonsterID": 309, "Name": "Team B Captain", "Cell": "Captain1", "Level": 255, "MaxHP": 15000 } } } },
+          "Monsters": { "id:309": { "Key": "id:309", "ID": 309, "Name": "Team B Captain", "Level": 255, "MaxHP": 15000, "KillCount": 37,
+            "Drops": { "4889": { "ItemID": 4889, "ItemName": "Combat Trophy", "DropEvents": 37, "TrackedDropEvents": 37, "EligibleKills": 37, "RateBasis": "all_kills" } } } },
+          "Items": { "4889": { "ID": 4889, "Name": "Combat Trophy", "Category": "Item", "MaxStack": 5000, "Coins": true } }
+        }
+        """);
+
+        static string Script(bool killAds) => $$"""
+        using Skua.Core.Interfaces;
+
+        public class BrawlBot
+        {
+            private static void Move(IScriptInterface bot, int n) { bot.Send.Packet($"%xt%zm%mtcid%{bot.Map.RoomID}%{n}%"); bot.Sleep(2500); }
+
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Map.Join("bludrutbrawl-999999", "Enter0", "Spawn");
+                Move(bot, 99); // unknown number: the character stays
+                bot.Log("after99=" + bot.Player.Cell);
+                if ({{(killAds ? "true" : "false")}})
+                {
+                    Move(bot, 14);
+                    Move(bot, 18);
+                    bot.Kill.Monster(9);
+                    bot.Kill.Monster(10);
+                    bot.Sleep(10_000);
+                    bot.Log("restorersAlive=" + bot.Monsters.MapMonsters.Count(m => m.MapID <= 10 && m.HP > 0));
+                }
+                Move(bot, 15);
+                bot.Kill.Monster(13);
+                Move(bot, 28);
+                bot.Log("cell=" + bot.Player.Cell);
+                bot.Kill.Monster(16);
+                bot.Sleep(3000);
+                bot.Log("trophies=" + bot.Inventory.GetQuantity("Combat Trophy") + " drops=" + bot.Drops.CurrentDrops.Count());
+                // CoreBots.CanBuy reads ACs through Flash; CoreBots.SellItem sells with a raw packet.
+                bot.Log("coins=" + bot.Flash.GetGameObject<int>("world.myAvatar.objData.intCoins"));
+                bot.Send.Packet($"%xt%zm%sellItem%{bot.Map.RoomID}%4889%1%123%");
+                bot.Log("afterSell=" + bot.Inventory.GetQuantity("Combat Trophy"));
+            }
+        }
+        """;
+
+        SimulationReport RunBrawl(bool killAds)
+        {
+            var path = Path.Combine(tempDir, killAds ? "BrawlAdsBot.cs" : "BrawlBot.cs");
+            File.WriteAllText(path, Script(killAds));
+            return runner.Run(new SimulationRunOptions
+            {
+                ScriptPath = path,
+                GameDataPath = gameDataPath,
+                Scenario = new Scenario
+                {
+                    Name = "Brawl",
+                    Player = new PlayerSetup { Username = "Tester", Level = 100, Coins = 1234, MaxHealth = 100_000, DamagePerSecond = 20_000 },
+                    Limits = new LimitsSetup { MaxVirtualMinutes = 30 }
+                }
+            });
+        }
+
+        var noAds = RunBrawl(killAds: false);
+        var ads = RunBrawl(killAds: true);
+        string Logs(SimulationReport r) => string.Join(" | ", r.ScriptLogs.Select(l => l.Text));
+        Assert(noAds.Outcome == SimulationOutcome.Completed && ads.Outcome == SimulationOutcome.Completed,
+            $"Both runs must complete ({noAds.Outcome}: {noAds.StopReason}; {ads.Outcome}: {ads.StopReason})");
+        Assert(Logs(noAds).Contains("after99=Enter0") && noAds.Warnings.Any(w => w.Text.Contains("mtcid 99")),
+            $"An uncollected cell number must not move the character and must warn: {Logs(noAds)}");
+        Assert(Logs(noAds).Contains("cell=Captain1"), $"mtcid must move by the collected cell numbers: {Logs(noAds)}");
+        Assert(Logs(noAds).Contains("trophies=3 drops=0") && noAds.PvpMatchesWon == 1,
+            $"Brawler (2) + win (1) = 3 trophies, added to the inventory, no Combat Trophy drop rolled: {Logs(noAds)}");
+        Assert(Logs(ads).Contains("restorersAlive=0") && Logs(ads).Contains("trophies=5 drops=0"),
+            $"Killed Restorers stay dead and add 1 each (2 + 2 + 1 = 5): {Logs(ads)}");
+        Assert(Logs(noAds).Contains("coins=1234") && Logs(noAds).Contains("afterSell=2"),
+            $"Flash intCoins must return the ACs and the sellItem packet must sell: {Logs(noAds)}");
+        Console.WriteLine($"   OK: no ads 3 trophies, with 2 Restorers 5 trophies, mtcid moves, unknown number warns, intCoins + sellItem packet");
+    }
+
     private static void TestBackgroundTaskDeterminism(SimulationRunner runner, string tempDir)
     {
         Console.WriteLine("16. Testing background tasks (Task.Run / Task.Delay / Task.WaitAll / new Random) run in a fixed order...");

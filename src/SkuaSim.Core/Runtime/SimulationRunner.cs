@@ -406,6 +406,8 @@ public sealed class SimulationRunner
             TotalApiCalls = trace.TotalApiCalls,
             Kills = ctx.World.Kills,
             Deaths = ctx.World.Deaths,
+            PvpMatchesWon = ctx.World.PvpMatchesWon,
+            PvpRewardsGiven = ctx.World.PvpRewardsGiven,
             DropsPicked = ctx.World.DropsPicked,
             QuestsAccepted = ctx.World.QuestsAcceptedCount,
             QuestsCompleted = ctx.World.QuestsCompletedCount,

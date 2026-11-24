@@ -836,6 +836,7 @@ public sealed partial class SimWorld
             SpawnCell = finalCell;
             SpawnPad = finalPad;
             MapLoaded = true;
+            ResetPvpMatchLocked();
             MapsVisited.Add(name);
             if (Map.Synthesized)
                 SynthesizedMapsVisited.Add(name);
@@ -1338,19 +1339,27 @@ public sealed partial class SimWorld
             GainReputation(repData.FactionIds.First(), (int)Math.Round(repData.AverageBaseRep), $"kill {monster.Name}");
         Trace.World($"Defeated {monster.Name} (MapID {monster.MapID}) in {monster.Cell} (+{boostedXp} xp, +{boostedGold} gold).");
 
-        var respawnMs = ResolveRespawnMs(monster);
-        var map = Map;
-        _ctx.Clock.Scheduler.Schedule(Now + respawnMs, "respawn:" + monster.Name, () =>
+        if (_pvpRule is { NpcsRespawn: false })
         {
-            lock (Sync)
+            Trace.World($"{monster.Name} stays dead for the rest of the {MapName} match (PvP NPCs do not respawn).");
+        }
+        else
+        {
+            var respawnMs = ResolveRespawnMs(monster);
+            var map = Map;
+            _ctx.Clock.Scheduler.Schedule(Now + respawnMs, "respawn:" + monster.Name, () =>
             {
-                monster.Engaged = false;
-                if (Map == map)
-                    monster.HP = monster.MaxHP;
-            }
-        });
+                lock (Sync)
+                {
+                    monster.Engaged = false;
+                    if (Map == map)
+                        monster.HP = monster.MaxHP;
+                }
+            });
+        }
 
         _ctx.RaiseEvent("MonsterKilled", monster.MapID);
+        OnPvpMonsterDeathLocked(monster);
         RollDrops(monster);
     }
 
@@ -1570,6 +1579,11 @@ public sealed partial class SimWorld
             foreach (var drop in monster.Data.Drops.Values)
             {
                 if (dropped.Contains(drop.ItemID))
+                    continue;
+
+                // A PvP match reward (e.g. Combat Trophy) is granted by the match rule; older collector builds recorded
+                // it as a drop of the captain because it arrives right after the kill.
+                if (IsPvpRewardItem(drop.ItemID, drop.ItemName))
                     continue;
 
                 // Quest-gated items (AQW "sReqQuests") only drop while one of their quests is active.

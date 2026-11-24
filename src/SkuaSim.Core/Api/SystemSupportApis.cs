@@ -273,6 +273,18 @@ public sealed class SendApi : ApiBase
                     World.Jump(parts[4], parts[5], autoCorrect: true);
                 break;
 
+            case "sellItem":
+                // %xt%zm%sellItem%<room>%<ItemID>%<qty>%<CharItemID>% — CoreBots.SellItem.
+                if (parts.Length >= 6 && int.TryParse(parts[4], out var sellItemId) && int.TryParse(parts[5], out var sellQty))
+                    World.Sell(null, sellItemId, Math.Max(1, sellQty));
+                break;
+
+            case "mtcid":
+                // %xt%zm%mtcid%<room>%<cell number>% — PvP door move (CoreBots.PvPMove).
+                if (parts.Length >= 5 && int.TryParse(parts[4], out var cellNumber))
+                    World.MoveToCellNumber(cellNumber);
+                break;
+
             case "acceptQuest":
                 if (parts.Length >= 5 && int.TryParse(parts[4], out var acceptQuestId))
                     World.AcceptQuest(acceptQuestId);
@@ -374,8 +386,22 @@ public sealed class FlashApi : ApiBase
     public object? Call(string function, Type type, object[] args) => DefaultValues.For(type);
     public bool IsNull(string path) => false;
 
+    /// <summary>
+    /// Numeric avatar fields read through Flash (CoreBots.CanBuy checks ACs with
+    /// <c>GetGameObject&lt;int&gt;("world.myAvatar.objData.intCoins")</c>).
+    /// </summary>
+    private long? AvatarNumber(string path) => path.ToLowerInvariant() switch
+    {
+        "world.myavatar.objdata.intcoins" => World.Coins,
+        "world.myavatar.objdata.intgold" => World.Gold,
+        "world.myavatar.objdata.intlevel" => World.Level,
+        _ => null
+    };
+
     public string GetGameObject(string path)
     {
+        if (AvatarNumber(path) is { } number)
+            return number.ToString(System.Globalization.CultureInfo.InvariantCulture);
         if (string.Equals(path, "sfc.myUserName", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(path, "world.myAvatar.objData.strUsername", StringComparison.OrdinalIgnoreCase))
             return JsonConvert.SerializeObject(World.Username ?? "SimPlayer");
@@ -395,6 +421,8 @@ public sealed class FlashApi : ApiBase
     {
         try
         {
+            if (AvatarNumber(path) is { } number)
+                return (T)Convert.ChangeType(number, Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T), System.Globalization.CultureInfo.InvariantCulture);
             if (string.Equals(path, "sfc.myUserName", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(path, "world.myAvatar.objData.strUsername", StringComparison.OrdinalIgnoreCase))
                 return typeof(T) == typeof(string) ? (T)(object)(World.Username ?? "SimPlayer") : def;

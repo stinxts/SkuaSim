@@ -34,6 +34,8 @@ public sealed class SimulationReport
     public long TotalApiCalls { get; init; }
     public int Kills { get; init; }
     public int Deaths { get; init; }
+    public int PvpMatchesWon { get; init; }
+    public int PvpRewardsGiven { get; init; }
     public int DropsPicked { get; init; }
     public int QuestsAccepted { get; init; }
     public int QuestsCompleted { get; init; }
@@ -131,6 +133,8 @@ public sealed class SimulationReport
         sb.AppendLine($"| Combat (Crits / Dodges / Healed) | {FinalState.PlayerCrits:N0} crits / {FinalState.PlayerDodges:N0} dodges / {FinalState.TotalHealingDone:N0} HP healed |");
         sb.AppendLine($"| Monsters Killed | {Kills:N0} |");
         sb.AppendLine($"| Player Deaths | {Deaths:N0} |");
+        if (PvpMatchesWon > 0)
+            sb.AppendLine($"| PvP Matches Won / Rewards | {PvpMatchesWon:N0} / {PvpRewardsGiven:N0} |");
         sb.AppendLine($"| Drops Picked Up | {DropsPicked:N0} |");
         sb.AppendLine($"| Quests Accepted / Completed | {QuestsAccepted:N0} / {QuestsCompleted:N0} |");
         sb.AppendLine($"| Maps Visited | {(MapsVisited.Count > 0 ? string.Join(", ", MapsVisited.Select(m => $"`{m}`")) : "_none_")} |");
