@@ -598,8 +598,8 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
                 var active = IsCollectingActive();
                 var dataDir = Path.GetDirectoryName(store.PrimaryFilePath) ?? GetPrimaryDataDirectory();
 
-                var totalKills = db.Monsters.Values.Sum(m => m.KillCount);
-                var totalDrops = db.Monsters.Values.Sum(m => m.Drops.Values.Sum(d => d.DropEvents));
+                var totalKills = db.Monsters.Values.Sum(m => m.AllKillsObserved);
+                var totalDrops = db.Monsters.Values.Sum(m => m.Drops.Values.Sum(d => d.DropEvents + d.CreditedDropEvents));
 
                 var summary =
                     $"Status: {(active ? "ACTIVE (Collecting in background)" : "PAUSED")}\n\n" +

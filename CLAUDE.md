@@ -74,9 +74,9 @@ dotnet run --project src\SkuaSim.UI
 - **Verify before parsing:** confirm real packet keys from `packet_schemas.json` samples (allowlist in
   `PacketSchemaSampler.ProtocolCommands`, plus the command census) before writing a parser, and build tests from
   those real anonymized samples, never from invented packets.
-- **`gamedata.json` is versioned** (`GameDatabase.CurrentSchemaVersion`, now 3). A schema change needs a migration step in
+- **`gamedata.json` is versioned** (`GameDatabase.CurrentSchemaVersion`, now 4). A schema change needs a migration step in
   `Storage/GameDatabaseMigrations.cs` (chained by `MigrateToCurrent`); the store writes a dated backup first, and a
-  migration only deletes provably wrong records. Quest-gated denominators come from `KillsByActiveQuestSet` (never sum
+  migration only deletes provably wrong records. Quest-gated denominators come from `CreditedKillsByActiveQuestSet` (v4; legacy `KillsByActiveQuestSet`) (never sum
   per-quest counts: a kill made with several required quests active must count once).
   Drop rates are derived only in `DropRates.Recompute`; `EstimatedDropChance == null` means "unknown" and the
   simulator must never treat it as 0 %.

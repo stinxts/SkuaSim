@@ -21,8 +21,18 @@ public sealed class GameDatabase
     /// client-side room cap. Additive v3 fields (no migration needed, older files load them empty): quest
     /// <see cref="CapturedQuest.ObservedReward"/> and the faction ID → name catalog (<see cref="Factions"/>).
     /// </para>
+    /// <para>
+    /// v4 (2026-11-24, collector 1.4.0): drop rates from credited kills. A kill counts only when this client receives
+    /// its "addGoldExp" (typ "m"): the server sends it to every player with a share of the kill (damage, aura, debuff),
+    /// so deaths caused by other players in the room no longer dilute the rates. A drop is credited to the last credited
+    /// kill, and kills of different monsters credited within <see cref="DropRates.SimultaneousKillWindowMs"/> of each
+    /// other are left out (with their drops), so a drop is never credited to the wrong monster. New counters:
+    /// <see cref="CapturedMonster.CreditedKills"/>, <see cref="CapturedMonster.CreditedKillsByActiveQuestSet"/>,
+    /// <see cref="CapturedDropStat.CreditedDropEvents"/>; the v1–v3 counters (KillCount, DropEvents…) are kept frozen as
+    /// legacy data and only used until enough credited kills exist (<see cref="CapturedDropStat.RateSource"/>).
+    /// </para>
     /// </summary>
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 4;
 
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
     public DateTime LastUpdatedUtc { get; set; } = DateTime.UtcNow;
@@ -51,6 +61,13 @@ public sealed class GameDatabase
     /// preceding "sellItem" request (item ID). Item ID -> last observed amount. Additive in v3.
     /// </summary>
     public Dictionary<int, CapturedSellPrice> SellPrices { get; set; } = new();
+
+    /// <summary>
+    /// v4 drop-attribution counters (counts only, summed on merge), used to tune the attribution windows: "kills:credited",
+    /// "kills:ambiguous", "drops:ambiguous_discarded", "drops:no_credited_kill", "order:drop_before_credit" and
+    /// "delay_ms:&lt;bucket&gt;" (time from the credited kill to its drop).
+    /// </summary>
+    public Dictionary<string, long> DropAttribution { get; set; } = new(StringComparer.Ordinal);
 
     /// <summary>Faction ID -> name (additive in v3; no player reputation is stored).</summary>
     public Dictionary<int, CapturedFaction> Factions { get; set; } = new();
@@ -427,10 +444,30 @@ public sealed class CapturedMonster
     /// </summary>
     public Dictionary<string, HashSet<string>> MapsSeen { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Legacy (collectors before 1.4.0, frozen since v4): every death seen in the room, including monsters killed by
+    /// other players without a share for this client. Use <see cref="AllKillsObserved"/> for totals.
+    /// </summary>
     public long KillCount { get; set; }
 
-    /// <summary>Kills recorded while the player's active quest list was known (v2+ collectors only).</summary>
+    /// <summary>Legacy (frozen since v4): kills recorded while the player's active quest list was known.</summary>
     public long TrackedKills { get; set; }
+
+    /// <summary>
+    /// v4: kills credited to this client ("addGoldExp" typ "m") with no kill of a different monster credited within
+    /// <see cref="DropRates.SimultaneousKillWindowMs"/>: the denominator of the credited drop rates.
+    /// </summary>
+    public long CreditedKills { get; set; }
+
+    /// <summary>v4: credited kills left out because a different monster was credited at the same moment (AoE, fast kills).</summary>
+    public long AmbiguousCreditedKills { get; set; }
+
+    /// <summary>v4: <see cref="CreditedKills"/> made while the active quest list was known, keyed like <see cref="KillsByActiveQuestSet"/>.</summary>
+    public Dictionary<string, long> CreditedKillsByActiveQuestSet { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>Kills of any collector version (legacy room deaths + v4 credited kills), for totals and ordering only.</summary>
+    [JsonIgnore]
+    public long AllKillsObserved => KillCount + CreditedKills + AmbiguousCreditedKills;
 
     /// <summary>
     /// Legacy (v2 collectors, frozen since v3): quest ID -> tracked kills with that quest active. Summing it over an
@@ -440,9 +477,9 @@ public sealed class CapturedMonster
     public Dictionary<int, long> KillsWhileQuestActive { get; set; } = new();
 
     /// <summary>
-    /// Tracked kills keyed by the exact set of active quest IDs at kill time ("" = none active; ascending IDs joined
-    /// with ","). A quest-gated drop's denominator is the sum over sets containing any of its required quests, so each
-    /// kill counts once.
+    /// Legacy (frozen since v4): tracked kills keyed by the exact set of active quest IDs at kill time ("" = none active;
+    /// ascending IDs joined with ","). A quest-gated drop's denominator is the sum over sets containing any of its
+    /// required quests, so each kill counts once.
     /// </summary>
     public Dictionary<string, long> KillsByActiveQuestSet { get; set; } = new(StringComparer.Ordinal);
 
@@ -572,14 +609,57 @@ public sealed class CapturedDropStat
     /// </summary>
     public string RateBasis { get; set; } = DropRates.AllKills;
 
-    /// <summary>Observed drop chance, or null when there is no trustworthy measurement yet (simulators must not use 0).</summary>
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
-    public double? EstimatedDropChance => RateBasis switch
+    /// <summary>v4: drops credited to an unambiguous credited kill (numerator of the credited all-kills rate).</summary>
+    public long CreditedDropEvents { get; set; }
+
+    /// <summary>v4: <see cref="CreditedDropEvents"/> recorded while the active quest list was known (quest-gated numerator).</summary>
+    public long CreditedTrackedDropEvents { get; set; }
+
+    /// <summary>v4: denominator of the credited rate, recomputed by <see cref="DropRates"/> (like <see cref="EligibleKills"/>).</summary>
+    public long CreditedEligibleKills { get; set; }
+
+    /// <summary>v4: basis of the credited rate, same values as <see cref="RateBasis"/>.</summary>
+    public string CreditedRateBasis { get; set; } = DropRates.Unverified;
+
+    /// <summary>
+    /// Which measurement <see cref="EstimatedDropChance"/> uses, recomputed by <see cref="DropRates"/>: "credited" (v4),
+    /// "legacy" (collectors before 1.4.0: other players' kills diluted it and drops could be credited to the wrong
+    /// monster), "credited_absent" (never dropped in at least <see cref="DropRates.MinCreditedKillsForAbsence"/>
+    /// eligible credited kills: chance null, the simulator does not drop it) or "none".
+    /// </summary>
+    public string RateSource { get; set; } = DropRates.SourceNone;
+
+    /// <summary>Drop chance measured by collectors before 1.4.0, or null.</summary>
+    [JsonIgnore]
+    public double? LegacyDropChance => RateBasis switch
     {
         DropRates.QuestActiveKills when EligibleKills > 0 && TrackedDropEvents > 0 =>
             Math.Min(1.0, Math.Round((double)TrackedDropEvents / EligibleKills, 4)),
         DropRates.AllKills when EligibleKills > 0 && DropEvents > 0 =>
             Math.Min(1.0, Math.Round((double)DropEvents / EligibleKills, 4)),
+        _ => null
+    };
+
+    /// <summary>Drop chance measured from credited kills (v4), or null.</summary>
+    [JsonIgnore]
+    public double? CreditedDropChance => CreditedRateBasis switch
+    {
+        DropRates.QuestActiveKills when CreditedEligibleKills > 0 && CreditedTrackedDropEvents > 0 =>
+            Math.Min(1.0, Math.Round((double)CreditedTrackedDropEvents / CreditedEligibleKills, 4)),
+        DropRates.AllKills when CreditedEligibleKills > 0 && CreditedDropEvents > 0 =>
+            Math.Min(1.0, Math.Round((double)CreditedDropEvents / CreditedEligibleKills, 4)),
+        _ => null
+    };
+
+    /// <summary>
+    /// Observed drop chance from <see cref="RateSource"/>, or null when there is no trustworthy measurement yet
+    /// (simulators must not use 0; "credited_absent" is the only measured absence).
+    /// </summary>
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Include)]
+    public double? EstimatedDropChance => RateSource switch
+    {
+        DropRates.SourceCredited => CreditedDropChance,
+        DropRates.SourceLegacy => LegacyDropChance,
         _ => null
     };
 }
@@ -590,6 +670,27 @@ public static class DropRates
     public const string AllKills = "all_kills";
     public const string QuestActiveKills = "quest_active_kills";
     public const string Unverified = "unverified";
+
+    public const string SourceCredited = "credited";
+    public const string SourceLegacy = "legacy";
+    public const string SourceCreditedAbsent = "credited_absent";
+    public const string SourceNone = "none";
+
+    /// <summary>
+    /// Credited kills of different monsters closer than this are ambiguous for drop attribution (one AoE hit, or kills
+    /// faster than the drop packet). Drops arrive ~30–150 ms after their "addGoldExp" (live samples, 2026-11-20).
+    /// </summary>
+    public const int SimultaneousKillWindowMs = 500;
+
+    /// <summary>A credited rate replaces a legacy one once it rests on this many eligible credited kills.</summary>
+    public const long MinCreditedKillsForRate = 50;
+
+    /// <summary>
+    /// An item that never dropped in this many eligible credited kills is reported as absent ("credited_absent"),
+    /// e.g. a quest item the legacy attribution credited to the other monster of the cell. A 1 % drop has a 5 % chance
+    /// of zero drops in 300 kills.
+    /// </summary>
+    public const long MinCreditedKillsForAbsence = 300;
 
     /// <summary>Key of <see cref="CapturedMonster.KillsByActiveQuestSet"/>: ascending distinct positive IDs joined with ",".</summary>
     public static string QuestSetKey(IEnumerable<int> questIds) =>
@@ -604,8 +705,20 @@ public static class DropRates
         if (requiredQuestIds.Count == 0)
             return 0;
 
+        long legacy = 0;
+        foreach (var questId in requiredQuestIds)
+            legacy = Math.Max(legacy, monster.KillsWhileQuestActive.GetValueOrDefault(questId));
+        return KillsWithAnyQuest(monster.KillsByActiveQuestSet, requiredQuestIds) + legacy;
+    }
+
+    /// <summary>v4: credited kills made with any of the required quests active (each kill once).</summary>
+    public static long CreditedQuestActiveEligibleKills(CapturedMonster monster, IReadOnlyCollection<int> requiredQuestIds) =>
+        requiredQuestIds.Count == 0 ? 0 : KillsWithAnyQuest(monster.CreditedKillsByActiveQuestSet, requiredQuestIds);
+
+    private static long KillsWithAnyQuest(Dictionary<string, long>? killsBySet, IReadOnlyCollection<int> requiredQuestIds)
+    {
         long eligible = 0;
-        foreach (var (setKey, kills) in monster.KillsByActiveQuestSet)
+        foreach (var (setKey, kills) in killsBySet ?? new())
         {
             if (kills <= 0 || setKey.Length == 0)
                 continue;
@@ -618,17 +731,14 @@ public static class DropRates
                 }
             }
         }
-
-        long legacy = 0;
-        foreach (var questId in requiredQuestIds)
-            legacy = Math.Max(legacy, monster.KillsWhileQuestActive.GetValueOrDefault(questId));
-        return eligible + legacy;
+        return eligible;
     }
 
     public static void Recompute(CapturedMonster monster)
     {
         foreach (var drop in monster.Drops.Values)
         {
+            // Legacy measurement (collectors before 1.4.0), unchanged.
             if (drop.QuestGated)
             {
                 var eligible = QuestActiveEligibleKills(monster, drop.RequiredQuestIds);
@@ -649,7 +759,39 @@ public static class DropRates
                 drop.EligibleKills = Math.Max(monster.KillCount, drop.DropEvents);
                 drop.RateBasis = drop.DropEvents > 0 ? AllKills : Unverified;
             }
+
+            // Credited measurement (v4).
+            if (drop.QuestGated)
+            {
+                var eligible = CreditedQuestActiveEligibleKills(monster, drop.RequiredQuestIds);
+                drop.CreditedEligibleKills = Math.Max(eligible, drop.CreditedTrackedDropEvents);
+                drop.CreditedRateBasis = drop.CreditedTrackedDropEvents > 0 ? QuestActiveKills : Unverified;
+            }
+            else
+            {
+                drop.CreditedEligibleKills = Math.Max(monster.CreditedKills, drop.CreditedDropEvents);
+                drop.CreditedRateBasis = drop.CreditedDropEvents > 0 ? AllKills : Unverified;
+            }
+
+            drop.RateSource = ChooseSource(drop);
         }
+    }
+
+    /// <summary>
+    /// The credited rate wins once it rests on <see cref="MinCreditedKillsForRate"/> eligible kills, or when there is no
+    /// legacy rate; an item never seen in <see cref="MinCreditedKillsForAbsence"/> eligible credited kills is absent;
+    /// otherwise the legacy rate is kept (flagged by the simulator).
+    /// </summary>
+    private static string ChooseSource(CapturedDropStat drop)
+    {
+        var credited = drop.CreditedDropChance;
+        if (credited != null && (drop.CreditedEligibleKills >= MinCreditedKillsForRate || drop.LegacyDropChance == null))
+            return SourceCredited;
+        if (credited == null && drop.CreditedEligibleKills >= MinCreditedKillsForAbsence)
+            return SourceCreditedAbsent;
+        if (drop.LegacyDropChance != null)
+            return SourceLegacy;
+        return credited != null ? SourceCredited : SourceNone;
     }
 }
 

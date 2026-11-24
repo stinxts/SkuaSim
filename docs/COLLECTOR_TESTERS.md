@@ -16,7 +16,7 @@ Thanks for helping. The SkuaSim Collector is a Skua/VibeSkua plugin that writes 
    - Skua: `%APPDATA%\Skua\plugins\`
 
    Paste the path into the File Explorer address bar to open it.
-3. Start the client. The **SkuaSim Collector** button in the plugins menu shows the status and the collector version, which should be 1.3.1 or newer.
+3. Start the client. The **SkuaSim Collector** button in the plugins menu shows the status and the collector version, which should be 1.4.0 or newer. If you run several clients, update all of them at the same time: an older collector rewriting the file made by 1.4.0 erases its new drop counters.
 
 The collector was built and tested on VibeSkua. It should also work on official Skua, but that has not been fully verified yet. If you use Skua, please report any errors you see.
 

@@ -70,6 +70,13 @@ public sealed class GameDataCatalog
                 catch (InvalidDataException) { }
                 contributions = GameDataContributions.MergeInto(captured, gameDataPath);
             }
+
+            // An older file (or a mirror not yet rewritten by a current collector) is migrated in memory only, so every
+            // drop has its rate source (legacy vs credited kills); gamedata.json itself is never changed here.
+            if (captured.SchemaVersion < GameDatabase.CurrentSchemaVersion)
+                SkuaSim.Collector.Storage.GameDatabaseMigrations.MigrateToCurrent(captured, null);
+            foreach (var monster in captured.Monsters.Values)
+                DropRates.Recompute(monster);
         }
 
         var quests = new Dictionary<int, QuestData>();
@@ -302,7 +309,7 @@ public sealed class GameDataCatalog
         if (monsterId > 0 && _monstersById.TryGetValue(monsterId, out var byId))
             return byId;
         if (!string.IsNullOrWhiteSpace(name) && _monstersByName.TryGetValue(name.Trim(), out var list))
-            return list.OrderByDescending(m => m.KillCount).First();
+            return list.OrderByDescending(m => m.AllKillsObserved).First();
         return null;
     }
 

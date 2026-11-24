@@ -19,6 +19,15 @@ void Assert(bool condition, string message)
         throw new Exception($"Assertion failed: {message}");
 }
 
+// A kill credited to this client: the death in the room plus the server's "addGoldExp" for that MonMapID (real shape,
+// sent even with 0 XP/gold). Credited kills stay pending for DropRates.SimultaneousKillWindowMs before they are counted.
+void CreditKill(PacketCollectorEngine eng, int monMapId)
+{
+    eng.RecordMonsterKilled(monMapId);
+    eng.ProcessExtensionPacketJson("{\"params\":{\"type\":\"json\",\"dataObj\":{\"cmd\":\"addGoldExp\",\"typ\":\"m\",\"intExp\":0,\"intGold\":0,\"id\":" + monMapId + "}}}");
+}
+const int PendingKillWaitMs = DropRates.SimultaneousKillWindowMs + 100;
+
 Console.WriteLine("1. Verifying plugin discovery (ISkuaPlugin)...");
 var pluginAsm = typeof(SkuaSimCollectorPlugin).Assembly;
 var pluginTypes = pluginAsm.DefinedTypes.Where(t => typeof(ISkuaPlugin).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract).ToList();
@@ -115,6 +124,8 @@ engine1.ProcessExtensionPacketJson("""
 }
 """);
 
+// The server credits the kill to this client (real addGoldExp shape: sent even with 0 XP/gold)
+engine1.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"addGoldExp","typ":"m","intExp":0,"intGold":0,"id":1} } }""");
 // Simulate dropItem right after kill
 engine1.ProcessExtensionPacketJson("""
 {
@@ -261,6 +272,17 @@ engine2.ProcessExtensionPacketJson("""
 }
 """);
 
+engine2.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"addGoldExp","typ":"m","intExp":0,"intGold":0,"id":1} } }""");
+// A death in the room without this client's addGoldExp (another player's kill) is not a kill for drop rates.
+var engine3 = new PacketCollectorEngine();
+engine3.ProcessExtensionPacketJson("""
+{ "params": { "type": "json", "dataObj": { "cmd": "moveToArea", "strMapName": "ultraezrajal-1234",
+  "mondef": [ { "MonID": 4901, "strMonName": "Ultra Ezrajal", "intLevel": 100, "intHPMax": 15000000 } ],
+  "monmap": [ { "MonMapID": 1, "strFrame": "r2" } ],
+  "monbranch": [ { "MonMapID": 1, "MonID": 4901, "intHP": 15000000, "intHPMax": 15000000 } ] } } }
+""");
+engine3.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": { "cmd": "ct", "m": { "1": { "intHP": 0 } } } } }""");
+Thread.Sleep(600); // credited kills stay pending for DropRates.SimultaneousKillWindowMs
 Console.WriteLine("3. Testing persistence and multi-client merge in GameDatabaseStore...");
 var tempDir = Path.Combine(Path.GetTempPath(), $"skuasim_test_{Guid.NewGuid():N}");
 var primaryPath = Path.Combine(tempDir, "gamedata.json");
@@ -270,32 +292,33 @@ try
 {
     var store = new GameDatabaseStore(primaryPath, new[] { mirrorPath });
     store.FlushDelta(engine1.TakeDeltaSnapshot());
-    var merged = store.FlushDelta(engine2.TakeDeltaSnapshot());
+    store.FlushDelta(engine2.TakeDeltaSnapshot());
+    var merged = store.FlushDelta(engine3.TakeDeltaSnapshot());
 
     Assert(File.Exists(primaryPath), "Primary gamedata.json not created");
     Assert(File.Exists(mirrorPath), "Mirror gamedata.json not created");
-    Assert(merged.TotalFlushesMerged == 2, $"Expected 2 flushes, got {merged.TotalFlushesMerged}");
+    Assert(merged.TotalFlushesMerged == 3, $"Expected 3 flushes, got {merged.TotalFlushesMerged}");
 
     var map = merged.Maps["ultraezrajal"];
-    Assert(map.Visits == 2, $"Expected 2 map visits, got {map.Visits}");
+    Assert(map.Visits == 3, $"Expected 3 map visits, got {map.Visits}");
     Assert(map.Cells.ContainsKey("r2") && map.Cells["r2"].Contains("Left"), "Expected cell r2 with pad Left");
     Assert(map.MapItems[55001].GrantedItemIDs.Contains(77001), "Expected map item 55001 -> item 77001");
 
     var mon = merged.Monsters["id:4901"];
     Assert(mon.Name == "Ultra Ezrajal", "Monster name mismatch");
-    Assert(mon.KillCount == 2, $"Expected 2 kills across both clients, got {mon.KillCount}");
+    Assert(mon.CreditedKills == 2 && mon.KillCount == 0, $"Expected 2 credited kills across both clients (the uncredited room death is not one), got {mon.CreditedKills} (legacy {mon.KillCount})");
     Assert(mon.Combat.Hits == 2 && mon.Combat.Crits == 1, "Combat hit/crit count mismatch");
     Assert(mon.Combat.MinDamage == 3500 && mon.Combat.MaxDamage == 6100, "Combat min/max damage mismatch");
     Assert(mon.Combat.CounterAttacksObserved >= 1, "Counter-attack not recorded");
     Assert(mon.Auras.ContainsKey("Counter Attack"), "Aura Counter Attack not recorded");
-    Assert(mon.Drops[61890].DropEvents == 1 && mon.Drops[61890].TotalQuantity == 5, "Drop count mismatch");
+    Assert(mon.Drops[61890].CreditedDropEvents == 1 && mon.Drops[61890].DropEvents == 0 && mon.Drops[61890].RateSource == DropRates.SourceCredited, "Drop count mismatch");
     Assert(mon.Drops[61890].EstimatedDropChance is { } chance61890 && Math.Abs(chance61890 - 0.5) < 0.001, $"Expected 0.5 drop chance (1/2 kills), got {mon.Drops[61890].EstimatedDropChance}");
 
     Assert(merged.Shops.ContainsKey(2031) && merged.Shops[2031].Items.Count == 1, "Shop 2031 not captured");
     Assert(merged.Quests.ContainsKey(8152) && merged.Quests[8152].AcceptedCount == 1 && merged.Quests[8152].TurnInCount == 1, "Quest 8152 stats mismatch");
 
-    Assert(merged.CollectorVersions.TryGetValue(CollectorInfo.Version, out var flushesByBuild) && flushesByBuild == 2,
-        $"Expected 2 flushes recorded for collector {CollectorInfo.Version}");
+    Assert(merged.CollectorVersions.TryGetValue(CollectorInfo.Version, out var flushesByBuild) && flushesByBuild == 3,
+        $"Expected 3 flushes recorded for collector {CollectorInfo.Version}");
     Assert(merged.ContributorId == null && merged.ExportedUtc == null, "The collector's own file must not carry a contributor ID");
 
     // Export for sharing: day-only dates, no migration log, a stable random contributor ID; read back and merge.
@@ -306,7 +329,7 @@ try
     Assert(shared.MigrationLog.Count == 0, "Shared file must not carry the migration log");
     Assert(shared.LastUpdatedUtc.TimeOfDay == TimeSpan.Zero && shared.Monsters["id:4901"].LastSeenUtc.TimeOfDay == TimeSpan.Zero,
         "Shared file dates must be cut to the day");
-    Assert(shared.Monsters["id:4901"].KillCount == 2, "Shared file lost data");
+    Assert(shared.Monsters["id:4901"].CreditedKills == 2, "Shared file lost data");
     var zip2 = store.ExportForSharing(Path.Combine(tempDir, "exports2"));
     Assert(GameDatabaseStore.ReadSharedFile(zip2).ContributorId == shared.ContributorId, "Contributor ID must stay the same per install");
     using (var archive = System.IO.Compression.ZipFile.OpenRead(zipPath))
@@ -317,7 +340,7 @@ try
     var combined = new GameDatabase();
     GameDatabaseStore.MergeInto(combined, GameDatabaseStore.ReadSharedFile(primaryPath));
     GameDatabaseStore.MergeInto(combined, shared);
-    Assert(combined.Monsters["id:4901"].KillCount == 4 && combined.CollectorVersions[CollectorInfo.Version] == 4,
+    Assert(combined.Monsters["id:4901"].CreditedKills == 4 && combined.CollectorVersions[CollectorInfo.Version] == 6,
         "Two testers' files should add up");
     var bogus = Path.Combine(tempDir, "not_gamedata.json");
     File.WriteAllText(bogus, "{\"hello\": 1}");
@@ -846,7 +869,7 @@ try
     """);
 
     // (a) A real monster drop right after a kill is credited to the monster.
-    realEng.RecordMonsterKilled(1);
+    CreditKill(realEng, 1);
     realEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"dropItem","items":{"898":{"ItemID":898,"sName":"Corrupted Armet","sType":"Helm","bTemp":false,"iQty":1,"iStk":1,"sReqQuests":""}}} } }""");
     // (b) The quest reward that arrives right after the turn-in is NOT credited to that same monster.
     realEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"QuestID":802,"msg":"","rewardObj":{"intCoins":0,"intExp":0,"iCP":0,"intGold":0,"typ":"q"},"sName":"Elders' Blood","cmd":"ccqr","bSuccess":1} } }""");
@@ -857,6 +880,7 @@ try
     realEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","strMapName":"house","areaName":"house-74055984","areaId":184962,"intType":1,"houseData":{"items":[1,2]},"uoBranch":[]} } }""");
     realEng.ProcessExtensionPacketJson("""{ "params": { "type": "str", "dataObj": [ "respawnMon", "-1", "1" ] } }""");
 
+    Thread.Sleep(PendingKillWaitMs);
     var realDelta = realEng.TakeDeltaSnapshot();
     var knight = realDelta.Monsters["id:170"];
     Assert(knight.Level == 4 && knight.Race == "Chaos" && knight.WeaponDps == 9,
@@ -925,7 +949,9 @@ try
     var v2Store = new GameDatabaseStore(v2Path) { QuestHintsProvider = () => hints };
     var migrated = v2Store.FlushDelta(new GameDatabase());
     var mv = migrated.Monsters["id:700"];
-    Assert(migrated.SchemaVersion == GameDatabase.CurrentSchemaVersion && migrated.MigrationLog.Count == 2, "Database must be migrated v1->v2->v3 with one log entry per step");
+    Assert(migrated.SchemaVersion == GameDatabase.CurrentSchemaVersion && migrated.MigrationLog.Count == 3, "Database must be migrated v1->v2->v3->v4 with one log entry per step");
+    Assert(mv.Drops[4].RateSource == DropRates.SourceLegacy && mv.Drops[3].RateSource == DropRates.SourceNone,
+        "Migrated rates are legacy (an unverified one has no source)");
     Assert(v2Store.LastMigrationBackupPath != null && File.Exists(v2Store.LastMigrationBackupPath) &&
            File.ReadAllText(v2Store.LastMigrationBackupPath).Contains("\"SchemaVersion\":1"), "A dated v1 backup must be written before migrating");
     Assert(!mv.Drops.ContainsKey(1), "Impossible drop records (more drops than kills) must be removed");
@@ -943,22 +969,24 @@ try
     var qEng = new PacketCollectorEngine();
     void Join(PacketCollectorEngine e) => e.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","strMapName":"arcangrove","mondef":[{"sRace":"Beast","strMonName":"Gorillaphant","intLevel":10,"MonID":250}],"monmap":[{"MonID":250,"strFrame":"Enter","MonMapID":1}],"monBranch":[{"intHP":900,"intHPMax":900,"iLvl":10,"wDPS":20,"MonMapID":1,"MonID":250}]} } }""");
     Join(qEng);
-    qEng.RecordMonsterKilled(1); // active list unknown -> not tracked
+    CreditKill(qEng, 1); // active list unknown -> not tracked
     qEng.SyncActiveQuests(new[] { 802 });
     Thread.Sleep(450); // the engine deduplicates kills of the same MonMapID reported within 400 ms
-    qEng.RecordMonsterKilled(1);
+    CreditKill(qEng, 1);
     qEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"addItems","items":{"5574":{"ItemID":5574,"sName":"Slain Gorillaphant","bTemp":true,"sType":"Quest Item","iStk":57,"iQty":1,"sReqQuests":"795,802"}}} } }""");
     qEng.SyncActiveQuests(Array.Empty<int>());
     Thread.Sleep(450);
-    qEng.RecordMonsterKilled(1);
+    CreditKill(qEng, 1);
+    Thread.Sleep(PendingKillWaitMs);
     var qDelta = qEng.TakeDeltaSnapshot();
     var gorilla = qDelta.Monsters["id:250"];
     var slain = gorilla.Drops[5574];
-    Assert(gorilla.KillCount == 3 && gorilla.TrackedKills == 2 && gorilla.KillsByActiveQuestSet.GetValueOrDefault("802") == 1 && gorilla.KillsByActiveQuestSet.GetValueOrDefault("") == 1,
-        $"Kills must be tracked per active quest set only once the list is known (Kill={gorilla.KillCount}, Tracked={gorilla.TrackedKills}, sets={string.Join(";", gorilla.KillsByActiveQuestSet)})");
-    Assert(slain.QuestGated && slain.RequiredQuestIds.SetEquals(new[] { 795, 802 }) && slain.TrackedDropEvents == 1 &&
-           slain.RateBasis == DropRates.QuestActiveKills && slain.EstimatedDropChance == 1.0,
-        $"A quest-gated drop's rate must use quest-active kills (basis={slain.RateBasis}, chance={slain.EstimatedDropChance})");
+    Assert(gorilla.CreditedKills == 3 && gorilla.KillCount == 0 && gorilla.CreditedKillsByActiveQuestSet.GetValueOrDefault("802") == 1 &&
+           gorilla.CreditedKillsByActiveQuestSet.GetValueOrDefault("") == 1 && gorilla.CreditedKillsByActiveQuestSet.Count == 2,
+        $"Kills must be tracked per active quest set only once the list is known (Credited={gorilla.CreditedKills}, sets={string.Join(";", gorilla.CreditedKillsByActiveQuestSet)})");
+    Assert(slain.QuestGated && slain.RequiredQuestIds.SetEquals(new[] { 795, 802 }) && slain.CreditedTrackedDropEvents == 1 &&
+           slain.CreditedRateBasis == DropRates.QuestActiveKills && slain.RateSource == DropRates.SourceCredited && slain.EstimatedDropChance == 1.0,
+        $"A quest-gated drop's rate must use quest-active kills (basis={slain.CreditedRateBasis}, chance={slain.EstimatedDropChance})");
 
     // (c) Passive official drop list (real monsterDrops shape, items keyed by ItemID): official + gated, no invented rate.
     qEng.ProcessExtensionPacketJson("""
@@ -995,7 +1023,7 @@ try
     mergeStore.FlushDelta(mDelta);
     var mergedV2 = mergeStore.FlushDelta(official.Key == "id:250" ? new GameDatabase { Monsters = { [official.Key] = official } } : new GameDatabase());
     var mg = mergedV2.Monsters["id:250"];
-    Assert(mergedV2.SchemaVersion == GameDatabase.CurrentSchemaVersion && mg.KillsByActiveQuestSet.GetValueOrDefault("802") == 1 && mg.Drops[5574].RateBasis == DropRates.QuestActiveKills &&
+    Assert(mergedV2.SchemaVersion == GameDatabase.CurrentSchemaVersion && mg.CreditedKillsByActiveQuestSet.GetValueOrDefault("802") == 1 && mg.Drops[5574].CreditedRateBasis == DropRates.QuestActiveKills &&
            mg.Drops[104953].IsOfficialDrop && mergedV2.Maps["arcangrove"].PeakPlayersObserved == 6 && mergedV2.Maps["arcangrove"].MapItems[5044].RequiredQuestIds.Contains(7277),
         "Merged database must keep quest-set counters, official flags, map-item quests and peak occupancy");
     Console.WriteLine($"   OK: migrated v1->v2 ({migrated.MigrationLog[0].Split(':').Last().Trim()[..60]}...), gated rates, official drops, map items, peak occupancy");
@@ -1012,29 +1040,31 @@ try
     v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"typ":"q","intExp":625,"intGold":0,"bonusExp":125,"cmd":"addGoldExp"} } }""");
 
     // (b) Quest-set kills: an item required by quests 10 and 11 must count a kill with both active only once.
+    // Each credited kill adds one more zero-XP/zero-gold reward sample (3 here).
     v3Eng.SyncActiveQuests(new[] { 10, 11 });
-    v3Eng.RecordMonsterKilled(1);
-    v3Eng.RecordMonsterKilled(2);
+    CreditKill(v3Eng, 1);
+    CreditKill(v3Eng, 2);
     var respawnFrom = DateTime.UtcNow;
     v3Eng.SyncActiveQuests(new[] { 10 });
     Thread.Sleep(450);
-    v3Eng.RecordMonsterKilled(1);
+    CreditKill(v3Eng, 1);
     v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"addItems","items":{"77001":{"ItemID":77001,"sName":"Wolf Fang","bTemp":true,"sType":"Quest Item","iStk":5,"iQty":1,"sReqQuests":"10,11"}}} } }""");
 
     // (c) Respawn: kill of MonMapID 2 -> ["respawnMon", "-1", "2"] (real str packet layout).
     Thread.Sleep(Math.Max(0, 600 - (int)(DateTime.UtcNow - respawnFrom).TotalMilliseconds));
     v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "str", "dataObj": [ "respawnMon", "-1", "2" ] } }""");
     v3Eng.ProcessExtensionPacketJson("""{ "params": { "type": "str", "dataObj": [ "respawnMon", "-1", "2" ] } }"""); // duplicate: no pending death
+    Thread.Sleep(PendingKillWaitMs);
     var v3Delta = v3Eng.TakeDeltaSnapshot();
     var wolf = v3Delta.Monsters["id:900"];
     var kr = wolf.KillRewards;
-    Assert(kr.Samples == 3 && kr.ExpSamples == 2 && kr.TotalBaseExp == 40 + 480 && kr.MinBaseExp == 40 && kr.MaxBaseExp == 480 && kr.ZeroExpSamples == 1 &&
-           kr.GoldSamples == 2 && kr.TotalBaseGold == 12 + 144 && kr.ZeroGoldSamples == 1 && Math.Abs(kr.AverageBaseGold - 78) < 0.01,
+    Assert(kr.Samples == 6 && kr.ExpSamples == 2 && kr.TotalBaseExp == 40 + 480 && kr.MinBaseExp == 40 && kr.MaxBaseExp == 480 && kr.ZeroExpSamples == 4 &&
+           kr.GoldSamples == 2 && kr.TotalBaseGold == 12 + 144 && kr.ZeroGoldSamples == 4 && Math.Abs(kr.AverageBaseGold - 78) < 0.01,
         $"Kill rewards must store base values and skip zeros (exp={kr.TotalBaseExp}/{kr.ExpSamples}, gold={kr.TotalBaseGold}/{kr.GoldSamples})");
     var fang = wolf.Drops[77001];
-    Assert(wolf.KillsByActiveQuestSet.GetValueOrDefault("10,11") == 2 && wolf.KillsByActiveQuestSet.GetValueOrDefault("10") == 1 &&
-           fang.QuestGated && fang.EligibleKills == 3 && fang.EstimatedDropChance is { } fangRate && Math.Abs(fangRate - 0.3333) < 0.001,
-        $"Each kill must count once for an item required by several active quests (eligible={fang.EligibleKills}, chance={fang.EstimatedDropChance})");
+    Assert(wolf.CreditedKills == 6 && wolf.CreditedKillsByActiveQuestSet.GetValueOrDefault("10,11") == 2 && wolf.CreditedKillsByActiveQuestSet.GetValueOrDefault("10") == 1 &&
+           fang.QuestGated && fang.CreditedEligibleKills == 3 && fang.EstimatedDropChance is { } fangRate && Math.Abs(fangRate - 0.3333) < 0.001,
+        $"Each kill must count once for an item required by several active quests (eligible={fang.CreditedEligibleKills}, chance={fang.EstimatedDropChance})");
     var wolfSpawn = v3Delta.Maps["chaoscrypt"].Monsters[2];
     Assert(wolf.Respawn.Samples == 1 && wolfSpawn.Respawn.Samples == 1 && wolfSpawn.Respawn.MinMs >= 500 && wolfSpawn.Respawn.MinMs < 5000,
         $"A respawn sample must be recorded once per death (monster={wolf.Respawn.Samples}, spawn={wolfSpawn.Respawn.Samples}, ms={wolfSpawn.Respawn.MinMs})");
@@ -1054,13 +1084,13 @@ try
     var v3Store = new GameDatabaseStore(v3Path);
     var mergedV3 = v3Store.FlushDelta(v3Delta);
     var mm = mergedV3.Monsters["id:901"].Drops[77002];
-    Assert(mergedV3.SchemaVersion == 3 && mergedV3.MigrationLog.Count == 1 && Directory.GetFiles(v3Dir, "gamedata.v2-backup-*.json").Length == 1,
-        "A v2 file must be backed up and migrated to v3");
+    Assert(mergedV3.SchemaVersion == GameDatabase.CurrentSchemaVersion && mergedV3.MigrationLog.Count == 2 && Directory.GetFiles(v3Dir, "gamedata.v2-backup-*.json").Length == 1,
+        "A v2 file must be backed up and migrated to v3, then v4");
     Assert(mm.EligibleKills == 20 && mm.EstimatedDropChance is { } mmRate && Math.Abs(mmRate - 0.5) < 0.001,
         $"Legacy per-quest counts must not be summed (eligible={mm.EligibleKills}, chance={mm.EstimatedDropChance})");
     var mergedWolf = mergedV3.Monsters["id:900"];
     Assert(mergedWolf.KillRewards.TotalBaseExp == 520 && mergedWolf.Respawn.Samples == 1 && mergedV3.Maps["chaoscrypt"].Monsters[2].Respawn.Samples == 1 &&
-           mergedWolf.KillsByActiveQuestSet.GetValueOrDefault("10,11") == 2, "Merge must keep kill rewards, respawn samples and quest-set kills");
+           mergedWolf.CreditedKillsByActiveQuestSet.GetValueOrDefault("10,11") == 2, "Merge must keep kill rewards, respawn samples and quest-set kills");
     // (e) Base quest reward from the real ccqr rewardObj (quest 7277) and the faction ID -> name catalog from addFaction
     // (keys verified from the live skeleton; the player's rank/rep must not be stored).
     var rewardEng = new PacketCollectorEngine();
@@ -1240,10 +1270,11 @@ try
     // dropItem sample, with an owned stack of 1,400 and 2 dropped.
     var qtyEng = new PacketCollectorEngine();
     qtyEng.ProcessExtensionPacketJson(wolfMap);
-    qtyEng.RecordMonsterKilled(9);
+    CreditKill(qtyEng, 9);
     qtyEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"dropItem","items":{"24528":{"iLvl":1,"iStk":1000,"ItemID":24528,"dID":24528,"bCoins":false,"iQty":1400,"dQty":2,"bQuest":1,"sName":"Chaos War Medal","bTemp":false,"sType":"Resource","sReqQuests":""}}} } }""");
+    Thread.Sleep(PendingKillWaitMs);
     var medal = qtyEng.TakeDeltaSnapshot().Monsters["id:3986"].Drops[24528];
-    Assert(medal.DropEvents == 1 && medal.QuantitySamples == 1 && medal.AverageQuantity == 2,
+    Assert(medal.CreditedDropEvents == 1 && medal.QuantitySamples == 1 && medal.AverageQuantity == 2,
         $"The drop size must come from dQty, not from the owned stack in iQty (samples={medal.QuantitySamples}, avg={medal.AverageQuantity})");
 
     // (i) Server warnings/messages (collector 1.3.0). Shapes and texts from the CoreBots listeners that react to them
@@ -1282,9 +1313,70 @@ try
     Assert(msgDb.ServerMessages["warning|\"<Q>\" is an Membership-Only Map."].Count == 4, "Merged server message counts must add up");
 
     var mergedTwice = v3Store.FlushDelta(new GameDatabase());
-    Assert(mergedTwice.Monsters["id:900"].KillRewards.Samples == 3 && Directory.GetFiles(v3Dir, "gamedata.v2-backup-*.json").Length == 1,
-        "A v3 file must not be migrated again and empty flushes must not change counters");
+    Assert(mergedTwice.Monsters["id:900"].KillRewards.Samples == 6 && Directory.GetFiles(v3Dir, "gamedata.v2-backup-*.json").Length == 1,
+        "A current file must not be migrated again and empty flushes must not change counters");
     Console.WriteLine($"   OK: base XP {kr.AverageBaseExp}/kill, base gold {kr.AverageBaseGold}/kill, respawn {wolfSpawn.Respawn.MinMs} ms, quest-set rate {fang.EstimatedDropChance:P1}, v2->v3 migrated");
+
+    Console.WriteLine("11. Testing schema v4 (credited kills, ambiguous AoE kills, legacy vs credited rates, newer-schema guard)...");
+    // Sandsea / Enter: Bupers Camel (MonID 531) and Cactus Creeper (532) share the cell. Collector 1.3.x counted every death
+    // in the room and credited a drop to the last monster that died, which split each quest item between the two.
+    var sEng = new PacketCollectorEngine();
+    sEng.ProcessExtensionPacketJson("""{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","strMapName":"sandsea","mondef":[{"sRace":"Beast","strMonName":"Bupers Camel","intLevel":20,"MonID":531},{"sRace":"Plant","strMonName":"Cactus Creeper","intLevel":20,"MonID":532}],"monmap":[{"MonID":531,"strFrame":"Enter","MonMapID":1},{"MonID":532,"strFrame":"Enter","MonMapID":2}],"monBranch":[{"intHP":1000,"intHPMax":1000,"iLvl":20,"MonMapID":1,"MonID":531},{"intHP":1000,"intHPMax":1000,"iLvl":20,"MonMapID":2,"MonID":532}]} } }""");
+    const string camelDocument = """{ "params": { "type": "json", "dataObj": {"cmd":"addItems","items":{"6609":{"ItemID":6609,"sName":"Bupers Camel Document","bTemp":true,"sType":"Quest Item","iStk":10,"iQty":1}}} } }""";
+    const string creeperHead = """{ "params": { "type": "json", "dataObj": {"cmd":"addItems","items":{"6610":{"ItemID":6610,"sName":"Cactus Creeper Head","bTemp":true,"sType":"Quest Item","iStk":10,"iQty":1}}} } }""";
+    // (a) Another player's kill: a death in the room without this client's addGoldExp counts nothing.
+    sEng.RecordMonsterKilled(2);
+    // (b) A clean credited kill and its drop.
+    CreditKill(sEng, 1);
+    sEng.ProcessExtensionPacketJson(camelDocument);
+    Thread.Sleep(PendingKillWaitMs);
+    // (c) One AoE hit kills both monsters: either could have dropped the item, so both kills and the drop are left out.
+    CreditKill(sEng, 1);
+    CreditKill(sEng, 2);
+    sEng.ProcessExtensionPacketJson(creeperHead);
+    Thread.Sleep(PendingKillWaitMs);
+    // (d) Own camel kill, then another player's creeper dies before the drop arrives: the drop stays with the camel.
+    Thread.Sleep(1000); // the same item within 1.5 s is treated as the dropItem/addItems duplicate of one drop
+    CreditKill(sEng, 1);
+    sEng.RecordMonsterKilled(2);
+    sEng.ProcessExtensionPacketJson(camelDocument);
+    Thread.Sleep(PendingKillWaitMs);
+    var sDelta = sEng.TakeDeltaSnapshot();
+    var camel = sDelta.Monsters["id:531"];
+    var creeper = sDelta.Monsters["id:532"];
+    var doc = camel.Drops[6609];
+    Assert(camel.CreditedKills == 2 && camel.AmbiguousCreditedKills == 1 && creeper.CreditedKills == 0 && creeper.AmbiguousCreditedKills == 1 &&
+           camel.KillCount == 0 && creeper.KillCount == 0,
+        $"Only unambiguous credited kills count (camel {camel.CreditedKills}+{camel.AmbiguousCreditedKills}, creeper {creeper.CreditedKills}+{creeper.AmbiguousCreditedKills})");
+    Assert(doc.CreditedDropEvents == 2 && doc.RateSource == DropRates.SourceCredited && doc.EstimatedDropChance == 1.0 && creeper.Drops.Count == 0 && !camel.Drops.ContainsKey(6610),
+        $"Drops must follow the credited kill and ambiguous drops must be discarded (doc {doc.CreditedDropEvents}, creeper drops {creeper.Drops.Count})");
+    Assert(sDelta.DropAttribution.GetValueOrDefault("kills:ambiguous") == 2 && sDelta.DropAttribution.GetValueOrDefault("drops:ambiguous_discarded") == 1 &&
+           sDelta.DropAttribution.GetValueOrDefault("kills:credited") == 2 && sDelta.DropAttribution.Where(p => p.Key.StartsWith("delay_ms:")).Sum(p => p.Value) == 3,
+        $"Attribution counters mismatch: {string.Join(", ", sDelta.DropAttribution)}");
+
+    // (e) Rate source: a legacy rate is kept until the credited one rests on enough kills; a measured absence replaces it.
+    var mixed = new CapturedMonster { Key = "id:532", ID = 532, Name = "Cactus Creeper", KillCount = 1000, CreditedKills = 20 };
+    mixed.Drops[6610] = new CapturedDropStat { ItemID = 6610, ItemName = "Cactus Creeper Head", DropEvents = 250, CreditedDropEvents = 10 };
+    mixed.Drops[6609] = new CapturedDropStat { ItemID = 6609, ItemName = "Bupers Camel Document", DropEvents = 260 };
+    DropRates.Recompute(mixed);
+    Assert(mixed.Drops[6610].RateSource == DropRates.SourceLegacy && mixed.Drops[6610].EstimatedDropChance == 0.25,
+        $"Below {DropRates.MinCreditedKillsForRate} credited kills the legacy rate stays (got {mixed.Drops[6610].RateSource} {mixed.Drops[6610].EstimatedDropChance})");
+    mixed.CreditedKills = DropRates.MinCreditedKillsForAbsence;
+    mixed.Drops[6610].CreditedDropEvents = 150;
+    DropRates.Recompute(mixed);
+    Assert(mixed.Drops[6610].RateSource == DropRates.SourceCredited && mixed.Drops[6610].EstimatedDropChance == 0.5,
+        $"With enough credited kills the credited rate wins (got {mixed.Drops[6610].RateSource} {mixed.Drops[6610].EstimatedDropChance})");
+    Assert(mixed.Drops[6609].RateSource == DropRates.SourceCreditedAbsent && mixed.Drops[6609].EstimatedDropChance == null,
+        $"An item never dropped in {DropRates.MinCreditedKillsForAbsence} credited kills is absent (got {mixed.Drops[6609].RateSource})");
+
+    // (f) A file written by a newer collector is never rewritten by this one (it would drop the fields it does not know).
+    var futurePath = Path.Combine(tempDir, "future", "gamedata.json");
+    Directory.CreateDirectory(Path.GetDirectoryName(futurePath)!);
+    File.WriteAllText(futurePath, "{\"SchemaVersion\": 99, \"Monsters\": {}}");
+    var refusedNewer = false;
+    try { new GameDatabaseStore(futurePath).FlushDelta(sDelta); } catch (InvalidOperationException) { refusedNewer = true; }
+    Assert(refusedNewer && File.ReadAllText(futurePath).Contains("99"), "A newer-schema file must not be overwritten");
+    Console.WriteLine($"   OK: credited kills camel {camel.CreditedKills} (+{camel.AmbiguousCreditedKills} ambiguous), doc rate {doc.EstimatedDropChance:P0}, legacy/credited/absent sources, newer schema refused");
 
     Console.WriteLine("   OK: All Collector tests passed successfully!");
 }

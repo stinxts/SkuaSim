@@ -1077,6 +1077,7 @@ internal static class CoreTests
           "Maps": { "zzgatemap": { "Name": "zzgatemap", "Cells": { "Enter": ["Spawn"], "r1": ["Left"] },
             "Monsters": { "1": { "MapID": 1, "MonsterID": 990001, "Name": "Gate Beast", "Cell": "r1", "Level": 5, "MaxHP": 300 } } } },
           "Monsters": { "id:990001": { "Key": "id:990001", "ID": 990001, "Name": "Gate Beast", "Level": 5, "MaxHP": 300, "KillCount": 50,
+            "KillsWhileQuestActive": { "802": 10 },
             "Drops": {
               "990101": { "ItemID": 990101, "ItemName": "Gated Fang", "DropEvents": 10, "TrackedDropEvents": 10, "EligibleKills": 10,
                           "QuestGated": true, "RequiredQuestIds": [802], "RateBasis": "quest_active_kills" },

@@ -69,7 +69,31 @@ public static class GameDatabaseMigrations
             lines.Add(MigrateToV2(db, externalHints));
         if (db.SchemaVersion < 3)
             lines.Add(MigrateToV3(db));
+        if (db.SchemaVersion < 4)
+            lines.Add(MigrateToV4(db));
         return lines;
+    }
+
+    /// <summary>
+    /// v3 → v4. Deletes nothing and changes no counter. The v1–v3 kill/drop counters become frozen legacy data (they
+    /// count deaths caused by other players and may credit a drop to the other monster of the cell, which cannot be
+    /// separated afterwards); credited-kill counters start empty and replace them per drop as they grow. Each drop's
+    /// <see cref="CapturedDropStat.RateSource"/> is computed ("legacy" for every measured rate at this point).
+    /// </summary>
+    public static string MigrateToV4(GameDatabase db)
+    {
+        if (db.SchemaVersion >= 4)
+            return "already v4";
+
+        foreach (var monster in db.Monsters.Values)
+            DropRates.Recompute(monster);
+
+        db.SchemaVersion = 4;
+        var summary = $"{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}Z v3->v4: no records removed; existing kill/drop counts kept " +
+                      "as legacy (they include other players' kills and drops credited to the last monster that died in the room). " +
+                      "New: credited kills (addGoldExp) and unambiguous drop attribution; each drop's rate source is chosen per drop.";
+        db.MigrationLog.Add(summary);
+        return summary;
     }
 
     /// <summary>

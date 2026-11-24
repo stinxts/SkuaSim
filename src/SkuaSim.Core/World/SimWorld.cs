@@ -1628,10 +1628,22 @@ public sealed partial class SimWorld
                     inferredGated = true;
                 }
 
+                // Measured absence: never dropped in enough kills credited to the collecting player (collector 1.4.0+),
+                // e.g. a quest item older collectors credited to the other monster of the cell.
+                if (drop.RateSource == DropRates.SourceCreditedAbsent)
+                {
+                    Trace.Synthesize($"absent:{monster.Name.ToLowerInvariant()}:{drop.ItemID}",
+                        $"'{drop.ItemName}' never dropped from '{monster.Name}' in {drop.CreditedEligibleKills:N0} credited kills (collector 1.4.0+): not dropped, although older collectors recorded it.");
+                    continue;
+                }
+
                 double chance;
                 if (!inferredGated && drop.EstimatedDropChance is { } observed)
                 {
                     chance = observed;
+                    if (drop.RateSource == DropRates.SourceLegacy)
+                        Trace.Synthesize($"legacyrate:{monster.Name.ToLowerInvariant()}:{drop.ItemID}",
+                            $"'{drop.ItemName}' from '{monster.Name}' uses a rate measured by collectors before 1.4.0 ({observed:P1}; only {drop.CreditedEligibleKills:N0} credited kills so far): it counted other players' kills and could credit drops to the wrong monster of the cell.");
                 }
                 else if (inferredGated)
                 {
@@ -1645,7 +1657,7 @@ public sealed partial class SimWorld
                     chance = Math.Clamp(Rules.GenericDropChance, 0, 1);
                     var why = drop.QuestGated
                         ? "quest-gated and not yet measured with the quest active"
-                        : drop.IsOfficialDrop && drop.DropEvents == 0 ? "on the official drop list but never observed dropping" : "rate not measured";
+                        : drop.IsOfficialDrop && drop.DropEvents + drop.CreditedDropEvents == 0 ? "on the official drop list but never observed dropping" : "rate not measured";
                     Trace.Synthesize($"droprate:{monster.Name.ToLowerInvariant()}:{drop.ItemID}",
                         $"'{drop.ItemName}' is a known drop of '{monster.Name}' ({why}): using an invented {chance:P0} chance.");
                 }

@@ -56,7 +56,7 @@ public sealed partial class GameDatabaseStore
                 {
                     Maps = db.Maps.Count,
                     Monsters = db.Monsters.Count,
-                    Kills = db.Monsters.Values.Sum(m => m.KillCount),
+                    Kills = db.Monsters.Values.Sum(m => m.AllKillsObserved),
                     Items = db.Items.Count,
                     Shops = db.Shops.Count,
                     Quests = db.Quests.Count,

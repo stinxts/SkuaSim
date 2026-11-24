@@ -42,7 +42,7 @@ public static class GameDataContributions
             try
             {
                 var db = GameDatabaseStore.ReadSharedFile(file);
-                var kills = db.Monsters.Values.Sum(m => m.KillCount);
+                var kills = db.Monsters.Values.Sum(m => m.AllKillsObserved);
                 var maps = db.Maps.Count;
                 GameDatabaseStore.MergeInto(target, db);
                 used.Add(new GameDataContribution(name, db.ContributorId ?? "", db.ExportedUtc, kills, maps, "merged"));
@@ -108,7 +108,7 @@ public static class GameDataContributions
         File.WriteAllText(tmp, json);
         File.Move(tmp, target, overwrite: true);
 
-        var kills = db.Monsters.Values.Sum(m => m.KillCount);
+        var kills = db.Monsters.Values.Sum(m => m.AllKillsObserved);
         var versions = db.CollectorVersions.Count == 0 ? "collector before 1.1.0" : string.Join(", ", db.CollectorVersions.Keys.OrderBy(v => v, StringComparer.Ordinal));
         return new ImportResult(sourcePath, target,
             $"stored: {db.Maps.Count:N0} maps, {db.Monsters.Count:N0} monsters, {kills:N0} kills, {db.Quests.Count:N0} quests, " +

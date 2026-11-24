@@ -23,11 +23,28 @@ public sealed partial class PacketCollectorEngine
     // Active map monsters indexed by MonMapID
     private readonly Dictionary<int, ActiveMonsterState> _mapMonsters = new();
 
-    // Recently killed monster tracking for drop attribution
-    private string? _lastKilledMonsterKey;
-    private int _lastKilledMonsterId;
-    private string _lastKilledMonsterName = string.Empty;
+    // Credited kills ("addGoldExp" typ "m") for drop attribution. A kill stays pending for
+    // DropRates.SimultaneousKillWindowMs so a kill of a different monster credited right after it can still mark both as
+    // ambiguous; its drops wait with it and are committed (or discarded) together.
+    private readonly List<CreditedKill> _pendingCreditedKills = new();
+    private CreditedKill? _lastCreditedKill;
     private DateTime _lastKillTimeUtc = DateTime.MinValue;
+    private DateTime _lastAttributedDropUtc = DateTime.MinValue;
+
+    private sealed class CreditedKill
+    {
+        public DateTime At { get; init; }
+        public int MonsterId { get; init; }
+        public string Name { get; init; } = string.Empty;
+        public string MonsterKey { get; init; } = string.Empty;
+        public bool QuestsKnown { get; init; }
+        public string QuestSetKey { get; init; } = string.Empty;
+        public bool Ambiguous { get; set; }
+        public bool Finalized { get; set; }
+        public List<PendingDrop> Drops { get; } = new();
+    }
+
+    private sealed record PendingDrop(int ItemId, string ItemName, bool IsTemp, int? MeasuredQuantity, int[] RequiredQuestIds);
 
     // Recently dropped items via dropItem so addItems right after doesn't double-count
     private readonly Dictionary<int, DateTime> _recentDropItemTimes = new();
@@ -85,6 +102,7 @@ public sealed partial class PacketCollectorEngine
         lock (_sync)
         {
             CommitEndedPvpMatchIfDueLocked();
+            FinalizeDueCreditedKillsLocked(DateTime.UtcNow);
             var snapshot = _delta;
             _delta = new GameDatabase();
             snapshot.CollectorVersions[CollectorInfo.Version] = 1; // one flush by this build
@@ -97,7 +115,9 @@ public sealed partial class PacketCollectorEngine
         lock (_sync)
         {
             CommitEndedPvpMatchIfDueLocked();
+            FinalizeDueCreditedKillsLocked(DateTime.UtcNow);
             return _delta.Maps.Count > 0
+                || _delta.DropAttribution.Count > 0
                 || _delta.Monsters.Count > 0
                 || _delta.Items.Count > 0
                 || _delta.Shops.Count > 0
@@ -202,6 +222,7 @@ public sealed partial class PacketCollectorEngine
             SchemaSampler.CountCommand(cmd);
             SchemaSampler.CountKeySet(cmd, dataObj);
             CommitEndedPvpMatchIfDueLocked();
+            FinalizeDueCreditedKillsLocked(DateTime.UtcNow);
             HandleJsonMessageLocked(cmd, dataObj);
             var sampleMap = cmd == "moveToArea"
                 ? GameDatabase.NormalizeMapName(dataObj["strMapName"]?.ToString())
@@ -1457,51 +1478,94 @@ public sealed partial class PacketCollectorEngine
             if ((now - active.LastDeathCountedUtc).TotalMilliseconds < 400)
                 return;
 
+            // A death in the room is only used for respawn timing: it may be another player's kill. Kills for drop
+            // rates are counted when this client is credited ("addGoldExp", see CreditKillLocked).
             active.LastDeathCountedUtc = now;
             active.PendingRespawnSinceUtc = now;
             active.CurrentHP = 0;
-
-            var mon = GetOrCreateMonster(active.MonsterID, active.Name);
-            CountKill(mon);
-
-            _lastKilledMonsterKey = mon.Key;
-            _lastKilledMonsterId = mon.ID;
-            _lastKilledMonsterName = mon.Name;
-            _lastKillTimeUtc = now;
-            SessionKillsRecorded++;
-            return;
-        }
-
-        // Fallback if monMapId wasn't in _mapMonsters: attribute to sole monster in current cell
-        var cellMonsters = GetMonstersInCell(_currentCell);
-        if (cellMonsters.Count == 1)
-        {
-            var mon = cellMonsters[0];
-            CountKill(mon);
-            _lastKilledMonsterKey = mon.Key;
-            _lastKilledMonsterId = mon.ID;
-            _lastKilledMonsterName = mon.Name;
-            _lastKillTimeUtc = now;
-            SessionKillsRecorded++;
         }
     }
 
     /// <summary>
-    /// Counts a kill. When the active quest list is known, also counts it as a tracked kill under the exact active
-    /// quest set: the denominator of quest-gated drop rates (those items can only drop while one of their quests is
-    /// active). Keying by the whole set makes each kill count once even when several required quests are active.
+    /// A kill credited to this client: the server sent its "addGoldExp" (typ "m") for that MonMapID. It is sent to every
+    /// player with a share of the kill (damage, aura, debuff) and to no one else, so each client of an army counts its
+    /// own share and receives its own drops. The kill stays pending for <see cref="DropRates.SimultaneousKillWindowMs"/>:
+    /// a different monster credited within that window makes both ambiguous (their drops could belong to either).
     /// </summary>
-    private void CountKill(CapturedMonster mon)
+    private void CreditKillLocked(ActiveMonsterState active, DateTime now)
     {
-        mon.KillCount++;
-        if (_activeQuestsKnown)
+        FinalizeDueCreditedKillsLocked(now);
+        if (_lastAttributedDropUtc != DateTime.MinValue && (now - _lastAttributedDropUtc).TotalMilliseconds < 300)
+            CountDropAttribution("order:drop_before_credit"); // would credit a drop to the previous kill; expected 0
+
+        var kill = new CreditedKill
         {
-            mon.TrackedKills++;
-            var setKey = DropRates.QuestSetKey(_activeQuestIds);
-            mon.KillsByActiveQuestSet[setKey] = mon.KillsByActiveQuestSet.GetValueOrDefault(setKey) + 1;
+            At = now,
+            MonsterId = active.MonsterID,
+            Name = active.Name,
+            MonsterKey = active.Key,
+            QuestsKnown = _activeQuestsKnown,
+            QuestSetKey = _activeQuestsKnown ? DropRates.QuestSetKey(_activeQuestIds) : string.Empty
+        };
+        foreach (var other in _pendingCreditedKills)
+        {
+            if (!string.Equals(other.MonsterKey, kill.MonsterKey, StringComparison.OrdinalIgnoreCase) &&
+                (now - other.At).TotalMilliseconds <= DropRates.SimultaneousKillWindowMs)
+            {
+                other.Ambiguous = true;
+                kill.Ambiguous = true;
+            }
         }
+        _pendingCreditedKills.Add(kill);
+        _lastCreditedKill = kill;
+        _lastKillTimeUtc = now;
+        SessionKillsRecorded++;
+    }
+
+    /// <summary>Commits the credited kills whose ambiguity window has passed (all of them when <paramref name="all"/>).</summary>
+    private void FinalizeDueCreditedKillsLocked(DateTime now, bool all = false)
+    {
+        if (_pendingCreditedKills.Count == 0)
+            return;
+        var due = _pendingCreditedKills
+            .Where(k => all || (now - k.At).TotalMilliseconds > DropRates.SimultaneousKillWindowMs)
+            .ToList();
+        foreach (var kill in due)
+        {
+            _pendingCreditedKills.Remove(kill);
+            CommitCreditedKillLocked(kill);
+        }
+    }
+
+    /// <summary>
+    /// Counts a finalized credited kill. An unambiguous kill enters the denominators (all kills, and the exact active
+    /// quest set when the list is known, so each kill counts once even with several required quests active) together
+    /// with its drops; an ambiguous one is only counted as such and its drops are discarded.
+    /// </summary>
+    private void CommitCreditedKillLocked(CreditedKill kill)
+    {
+        kill.Finalized = true;
+        var mon = GetOrCreateMonster(kill.MonsterId, kill.Name);
+        if (kill.Ambiguous)
+        {
+            mon.AmbiguousCreditedKills++;
+            CountDropAttribution("kills:ambiguous");
+            if (kill.Drops.Count > 0)
+                CountDropAttribution("drops:ambiguous_discarded", kill.Drops.Count);
+            return;
+        }
+
+        mon.CreditedKills++;
+        if (kill.QuestsKnown)
+            mon.CreditedKillsByActiveQuestSet[kill.QuestSetKey] = mon.CreditedKillsByActiveQuestSet.GetValueOrDefault(kill.QuestSetKey) + 1;
+        CountDropAttribution("kills:credited");
+        foreach (var drop in kill.Drops)
+            RecordCreditedDropLocked(mon, drop, kill.QuestsKnown);
         DropRates.Recompute(mon);
     }
+
+    private void CountDropAttribution(string key, long count = 1) =>
+        _delta.DropAttribution[key] = _delta.DropAttribution.GetValueOrDefault(key) + count;
 
     /// <summary>
     /// Replaces the known active quest list (from the client's Bot.Quests.Active). Until the first sync the list is
@@ -1624,6 +1688,7 @@ public sealed partial class PacketCollectorEngine
         if (monMapId <= 0 || !_mapMonsters.TryGetValue(monMapId, out var active))
             return;
 
+        CreditKillLocked(active, DateTime.UtcNow);
         var mon = GetOrCreateMonster(active.MonsterID, active.Name);
         mon.KillRewards.Add(
             ParseInt(dataObj["intExp"]), ParseInt(dataObj["bonusExp"]),
@@ -1673,9 +1738,14 @@ public sealed partial class PacketCollectorEngine
         return !_sessionQuestRewardItems.TryGetValue(_lastTurnInQuestId, out var rewards) || rewards.Contains(itemId);
     }
 
+    /// <summary>
+    /// Credits an item that just arrived to the last kill credited to this client (within
+    /// <see cref="DropAttributionWindowSeconds"/>). There is deliberately no "first monster in the cell" fallback, and a
+    /// death in the room is not enough: items arriving without a recent credited kill come from quests, merges, map
+    /// items, shops or another player's kill. The drop is committed with its kill (see CommitCreditedKillLocked).
+    /// </summary>
     private void AttributeDropToMonster(int itemId, string itemName, bool isTemp, int quantity, int? measuredQuantity = null)
     {
-        CapturedMonster? targetMonster = null;
         var now = DateTime.UtcNow;
 
         if (IsLikelyQuestReward(itemId, now))
@@ -1684,52 +1754,76 @@ public sealed partial class PacketCollectorEngine
             return;
         }
 
-        // Only credit the monster that was just killed. There is deliberately no "first monster in the cell" fallback:
-        // items arriving without a recent kill come from quests, merges, map items or shops, never from that monster.
-        if (!string.IsNullOrEmpty(_lastKilledMonsterKey) &&
-            (now - _lastKillTimeUtc).TotalSeconds <= DropAttributionWindowSeconds)
-        {
-            // The delta may have been flushed since the kill; recreate the entry instead of losing the drop.
-            targetMonster = _delta.Monsters.TryGetValue(_lastKilledMonsterKey, out var killedMon)
-                ? killedMon
-                : GetOrCreateMonster(_lastKilledMonsterId, _lastKilledMonsterName);
-        }
-
-        if (targetMonster == null)
+        FinalizeDueCreditedKillsLocked(now);
+        var kill = _lastCreditedKill;
+        if (kill == null || (now - kill.At).TotalSeconds > DropAttributionWindowSeconds)
         {
             SessionUnattributedDropsSkipped++;
+            CountDropAttribution("drops:no_credited_kill");
             return;
         }
 
-        if (!targetMonster.Drops.TryGetValue(itemId, out var dropStat))
+        _lastAttributedDropUtc = now;
+        CountDropAttribution("delay_ms:" + DelayBucket((now - kill.At).TotalMilliseconds));
+        var requiredBy = _delta.Items.TryGetValue(itemId, out var itemInfo) ? itemInfo.RequiredByQuestIds.ToArray() : Array.Empty<int>();
+        var drop = new PendingDrop(itemId, itemName, isTemp, measuredQuantity, requiredBy);
+        if (!kill.Finalized)
+        {
+            kill.Drops.Add(drop);
+        }
+        else if (kill.Ambiguous)
+        {
+            CountDropAttribution("drops:ambiguous_discarded");
+        }
+        else
+        {
+            // The delta may have been flushed since the kill; GetOrCreateMonster recreates the entry.
+            var mon = GetOrCreateMonster(kill.MonsterId, kill.Name);
+            RecordCreditedDropLocked(mon, drop, kill.QuestsKnown);
+            DropRates.Recompute(mon);
+        }
+    }
+
+    /// <summary>Delay from the credited kill to its drop, in coarse buckets (diagnostic for the attribution windows).</summary>
+    private static string DelayBucket(double ms) => ms switch
+    {
+        < 100 => "0000-0099",
+        < 250 => "0100-0249",
+        < 500 => "0250-0499",
+        < 1000 => "0500-0999",
+        < 2500 => "1000-2499",
+        _ => "2500+"
+    };
+
+    private void RecordCreditedDropLocked(CapturedMonster mon, PendingDrop drop, bool questsKnown)
+    {
+        if (!mon.Drops.TryGetValue(drop.ItemId, out var dropStat))
         {
             dropStat = new CapturedDropStat
             {
-                ItemID = itemId,
-                ItemName = itemName,
-                Temp = isTemp
+                ItemID = drop.ItemId,
+                ItemName = drop.ItemName,
+                Temp = drop.IsTemp
             };
-            targetMonster.Drops[itemId] = dropStat;
+            mon.Drops[drop.ItemId] = dropStat;
         }
 
-        if (!string.IsNullOrWhiteSpace(itemName))
-            dropStat.ItemName = itemName;
-        dropStat.Temp |= isTemp;
-        dropStat.DropEvents++;
-        if (_activeQuestsKnown)
-            dropStat.TrackedDropEvents++;
-        dropStat.TotalQuantity += Math.Max(1, quantity);
-        if (measuredQuantity is > 0)
+        if (!string.IsNullOrWhiteSpace(drop.ItemName))
+            dropStat.ItemName = drop.ItemName;
+        dropStat.Temp |= drop.IsTemp;
+        dropStat.CreditedDropEvents++;
+        if (questsKnown)
+            dropStat.CreditedTrackedDropEvents++;
+        if (drop.MeasuredQuantity is > 0)
         {
-            dropStat.MeasuredQuantity += measuredQuantity.Value;
+            dropStat.MeasuredQuantity += drop.MeasuredQuantity.Value;
             dropStat.QuantitySamples++;
         }
-        if (_delta.Items.TryGetValue(itemId, out var itemInfo) && itemInfo.RequiredByQuestIds.Count > 0)
+        if (drop.RequiredQuestIds.Length > 0)
         {
             dropStat.QuestGated = true;
-            dropStat.RequiredQuestIds.UnionWith(itemInfo.RequiredByQuestIds);
+            dropStat.RequiredQuestIds.UnionWith(drop.RequiredQuestIds);
         }
-        DropRates.Recompute(targetMonster);
         SessionDropsRecorded++;
     }
 

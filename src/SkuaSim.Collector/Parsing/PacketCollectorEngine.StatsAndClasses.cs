@@ -262,6 +262,9 @@ public sealed partial class PacketCollectorEngine
         _currentClassCp = -1;
         _classRankHint = 0;
         _lastSelfHp = -1;
+        // Drops after a login never belong to the previous character's kills.
+        FinalizeDueCreditedKillsLocked(DateTime.UtcNow, all: true);
+        _lastCreditedKill = null;
         CharacterContextResets++;
     }
 

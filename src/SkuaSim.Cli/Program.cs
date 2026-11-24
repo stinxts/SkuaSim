@@ -231,8 +231,8 @@ internal static class CliEntry
 
         var catalog = GameDataCatalog.Load(gameDataPath, questDataPath);
         var db = catalog.Captured;
-        var totalKills = db.Monsters.Values.Sum(m => m.KillCount);
-        var totalDrops = db.Monsters.Values.Sum(m => m.Drops.Values.Sum(d => d.DropEvents));
+        var totalKills = db.Monsters.Values.Sum(m => m.AllKillsObserved);
+        var totalDrops = db.Monsters.Values.Sum(m => m.Drops.Values.Sum(d => d.DropEvents + d.CreditedDropEvents));
 
         Console.WriteLine("=== SkuaSim Environment & Database Summary ===");
         Console.WriteLine($"Client Flavor      : {installation.Flavor}");

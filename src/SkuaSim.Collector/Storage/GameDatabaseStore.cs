@@ -58,6 +58,11 @@ public sealed partial class GameDatabaseStore
         return ExecuteWithMutex(() =>
         {
             var current = LoadFromDiskInternal(PrimaryFilePath);
+            // A newer collector wrote this file: saving it with this build's model would silently drop the fields this
+            // build does not know (e.g. a 1.3.x collector erasing the v4 credited-kill counters). The delta is lost.
+            if (current.SchemaVersion > GameDatabase.CurrentSchemaVersion)
+                throw new InvalidOperationException(
+                    $"gamedata.json is schema v{current.SchemaVersion}, newer than this collector (v{GameDatabase.CurrentSchemaVersion}): update the collector.");
             if (current.SchemaVersion < GameDatabase.CurrentSchemaVersion)
             {
                 if (File.Exists(PrimaryFilePath))
@@ -258,6 +263,11 @@ public sealed partial class GameDatabaseStore
             dstMon.KillsByActiveQuestSet ??= new(StringComparer.Ordinal);
             foreach (var (setKey, kills) in srcMon.KillsByActiveQuestSet ?? new())
                 dstMon.KillsByActiveQuestSet[setKey] = dstMon.KillsByActiveQuestSet.GetValueOrDefault(setKey) + kills;
+            dstMon.CreditedKills += srcMon.CreditedKills;
+            dstMon.AmbiguousCreditedKills += srcMon.AmbiguousCreditedKills;
+            dstMon.CreditedKillsByActiveQuestSet ??= new(StringComparer.Ordinal);
+            foreach (var (setKey, kills) in srcMon.CreditedKillsByActiveQuestSet ?? new())
+                dstMon.CreditedKillsByActiveQuestSet[setKey] = dstMon.CreditedKillsByActiveQuestSet.GetValueOrDefault(setKey) + kills;
             (dstMon.KillRewards ??= new()).Merge(srcMon.KillRewards);
             (dstMon.Respawn ??= new()).Merge(srcMon.Respawn);
             if (srcMon.OfficialDropsObservedUtc > (dstMon.OfficialDropsObservedUtc ?? DateTime.MinValue))
@@ -364,6 +374,8 @@ public sealed partial class GameDatabaseStore
                 dstDrop.MeasuredQuantity += srcDrop.MeasuredQuantity;
                 dstDrop.QuantitySamples += srcDrop.QuantitySamples;
                 dstDrop.TrackedDropEvents += srcDrop.TrackedDropEvents;
+                dstDrop.CreditedDropEvents += srcDrop.CreditedDropEvents;
+                dstDrop.CreditedTrackedDropEvents += srcDrop.CreditedTrackedDropEvents;
                 dstDrop.IsOfficialDrop |= srcDrop.IsOfficialDrop;
                 dstDrop.QuestGated |= srcDrop.QuestGated;
                 dstDrop.RequiredQuestIds.UnionWith(srcDrop.RequiredQuestIds);
@@ -485,6 +497,10 @@ public sealed partial class GameDatabaseStore
         foreach (var (level, toNext) in source.XpToNextLevel ?? new())
             if (level > 0 && toNext > 0)
                 target.XpToNextLevel[level] = toNext;
+
+        target.DropAttribution ??= new(StringComparer.Ordinal);
+        foreach (var (key, count) in source.DropAttribution ?? new())
+            target.DropAttribution[key] = target.DropAttribution.GetValueOrDefault(key) + count;
 
         // 8. Sell prices (latest amount per item, samples summed)
         target.SellPrices ??= new();
