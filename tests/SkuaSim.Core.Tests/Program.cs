@@ -54,6 +54,7 @@ internal static class CoreTests
             TestPvpMatchMtcidAndTrophies(runner, tempDir);
             TestServerWarnings(runner, tempDir);
             TestInjectedFaults(runner, tempDir);
+            TestScenarioAssertions(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -1463,6 +1464,130 @@ internal static class CoreTests
         Assert(again.InjectedFaults.SequenceEqual(report.InjectedFaults), "The same scenario must inject the same faults at the same times");
         Console.WriteLine($"   OK: {report.InjectedFaults.Count} faults fired, script effects as expected, identical on a second run");
     }
+
+    private static void TestScenarioAssertions(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("22. Testing scenario asserts (pass, fail, gained, invalid, compile error, JSON round-trip)...");
+        var gameDataPath = Path.Combine(tempDir, "gamedata_asserts_test.json");
+        File.WriteAllText(gameDataPath, """
+        {
+          "SchemaVersion": 3,
+          "Maps": { "zzassertmap": { "Name": "zzassertmap", "Cells": { "Enter": ["Spawn"] },
+            "Monsters": { "1": { "MapID": 1, "MonsterID": 990711, "Name": "Assert Beast", "Cell": "Enter", "Level": 5, "MaxHP": 300 } } } },
+          "Monsters": { "id:990711": { "Key": "id:990711", "ID": 990711, "Name": "Assert Beast", "Level": 5, "MaxHP": 300, "KillCount": 10,
+            "Drops": { "990811": { "ItemID": 990811, "ItemName": "Assert Shard", "Temp": true, "DropEvents": 10, "TrackedDropEvents": 10, "EligibleKills": 10, "RateBasis": "all_kills" } } } },
+          "Shops": { "9211": { "ID": 9211, "Name": "Assert Shop", "Items": [
+            { "ShopItemID": 1, "ID": 990911, "Name": "Assert Gem", "Category": "Item", "Cost": 100, "Coins": false, "MaxStack": 10 } ] } }
+        }
+        """);
+
+        var script = Path.Combine(tempDir, "AssertBot.cs");
+        File.WriteAllText(script, """
+        using Skua.Core.Interfaces;
+
+        public class AssertBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Map.Join("zzassertmap");
+                for (var i = 0; i < 3; i++)
+                {
+                    bot.Kill.Monster("Assert Beast");
+                    bot.Sleep(6000);
+                }
+                bot.Shops.Load(9211);
+                bot.Shops.BuyItem("Assert Gem");
+                bot.Shops.BuyItem("Assert Gem");
+                bot.Log("assert bot done");
+            }
+        }
+        """);
+
+        var scenarioJson = """
+        {
+          "Name": "Asserts",
+          "Script": "AssertBot.cs",
+          "Player": { "Username": "Tester", "Level": 50, "Gold": 1000, "CompleteEquipment": false, "MaxHealth": 10000, "DamagePerSecond": 5000 },
+          "Limits": { "MaxVirtualMinutes": 10 },
+          "Asserts": [
+            { "check": "outcome", "is": ["Completed"] },
+            { "check": "item", "name": "assert gem", "in": "inventory", "exactly": 2 },
+            { "check": "item", "name": "Assert Gem", "gained": true, "min": 2 },
+            { "check": "gold", "gained": true, "min": -200, "max": -100 },
+            { "check": "kills", "name": "Assert Beast", "exactly": 3 },
+            { "check": "deaths" },
+            { "check": "drops", "name": "Assert Shard" },
+            { "check": "map", "is": ["zzassertmap"] },
+            { "check": "mapVisited", "name": "zzassertmap" },
+            { "check": "scriptLog", "text": "ASSERT BOT DONE", "exactly": 1 },
+            { "check": "questTurnIns", "max": 0 },
+            { "check": "virtualMinutes", "max": 10 },
+            { "check": "unimplemented" },
+            { "check": "level", "min": 60, "description": "expected failure: level 60" },
+            { "check": "kills", "max": 2 },
+            { "check": "noSuchCheck" },
+            { "check": "item" },
+            { "check": "level" },
+            { "check": "deaths", "gained": true }
+          ]
+        }
+        """;
+        var scenarioPath = Path.Combine(tempDir, "asserts_scenario.json");
+        File.WriteAllText(scenarioPath, scenarioJson);
+        var scenario = Scenario.Load(scenarioPath);
+        Assert(scenario.Asserts.Count == 19 && scenario.Script == "AssertBot.cs", "Asserts and script must load from JSON (case-insensitive keys)");
+        var roundTrip = JsonSerializerRoundTrip(scenario);
+        Assert(roundTrip.Asserts.Count == 19 && roundTrip.Asserts[1].Exactly == 2 && roundTrip.Asserts[0].Is.SequenceEqual(new[] { "Completed" }),
+            "Asserts must survive a save/load round-trip (scenario editor)");
+
+        var report = runner.Run(new SimulationRunOptions { ScriptPath = script, GameDataPath = gameDataPath, Scenario = scenario });
+        var logs = string.Join(" | ", report.ScriptLogs.Select(l => l.Text));
+        Assert(report.Outcome == SimulationOutcome.Completed, $"Run must complete ({report.Outcome}: {report.StopReason}) {logs}");
+        Assert(report.Assertions.Count == 19, $"Every assert must produce a result, got {report.Assertions.Count}");
+        string Show(AssertionResult a) => $"#{a.Index} {a.Check} {(a.Passed ? "PASS" : "FAIL")} [{a.Description}] expected {a.Expected}, got {a.Actual}";
+        var all = string.Join(Environment.NewLine, report.Assertions.Select(Show));
+        for (var i = 0; i < 13; i++)
+            Assert(report.Assertions[i].Passed, $"Assert #{i + 1} must pass:{Environment.NewLine}{all}");
+        for (var i = 13; i < 19; i++)
+            Assert(!report.Assertions[i].Passed, $"Assert #{i + 1} must fail:{Environment.NewLine}{all}");
+        Assert(report.Assertions[2].Actual.Contains("+2"), $"Gained must show the change: {Show(report.Assertions[2])}");
+        Assert(report.Assertions[13].Description == "expected failure: level 60" && report.Assertions[13].Actual == "50", Show(report.Assertions[13]));
+        Assert(report.Assertions[14].Actual == "3", $"kills max 2 must report 3: {Show(report.Assertions[14])}");
+        foreach (var i in new[] { 15, 16, 17, 18 })
+            Assert(report.Assertions[i].Actual.StartsWith("invalid:"), $"Assert #{i + 1} must be reported invalid: {Show(report.Assertions[i])}");
+        Assert(report.AssertionsFailed == 6, $"6 asserts must fail, got {report.AssertionsFailed}");
+        var markdown = report.ToMarkdown();
+        Assert(markdown.Contains("## Scenario Assertions") && markdown.Contains("**FAILED** (13/19 passed)"), "Markdown must show the assertion section and summary");
+
+        // A compile error: only the outcome assert can be evaluated; the rest fail as "did not run".
+        var broken = Path.Combine(tempDir, "BrokenAssertBot.cs");
+        File.WriteAllText(broken, "public class BrokenAssertBot { public void ScriptMain(Skua.Core.Interfaces.IScriptInterface bot) { this does not compile } }");
+        var brokenReport = runner.Run(new SimulationRunOptions
+        {
+            ScriptPath = broken,
+            GameDataPath = gameDataPath,
+            Scenario = new Scenario
+            {
+                Asserts = new List<AssertSetup>
+                {
+                    new() { Check = "outcome", Is = new List<string> { "CompileError" } },
+                    new() { Check = "deaths" }
+                }
+            }
+        });
+        Assert(brokenReport.Outcome == SimulationOutcome.CompileError && brokenReport.Assertions.Count == 2
+               && brokenReport.Assertions[0].Passed && !brokenReport.Assertions[1].Passed
+               && brokenReport.Assertions[1].Actual.Contains("did not run"),
+            $"Compile error asserts: {string.Join(" / ", brokenReport.Assertions.Select(Show))}");
+
+        // Deterministic: the same scenario gives the same assertion results.
+        var again = runner.Run(new SimulationRunOptions { ScriptPath = script, GameDataPath = gameDataPath, Scenario = Scenario.Load(scenarioPath) });
+        Assert(again.Assertions.SequenceEqual(report.Assertions), "The same scenario must give the same assertion results");
+        Console.WriteLine($"   OK: 13 asserts passed, 6 expected failures (2 wrong values, 4 invalid), compile-error handling, identical on a second run");
+    }
+
+    private static Scenario JsonSerializerRoundTrip(Scenario scenario) =>
+        System.Text.Json.JsonSerializer.Deserialize<Scenario>(scenario.ToJson(), Scenario.JsonOptions)!;
 
     private static void TestBackgroundTaskDeterminism(SimulationRunner runner, string tempDir)
     {

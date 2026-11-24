@@ -71,6 +71,19 @@ public sealed class Scenario
     /// </summary>
     public List<FaultSetup> Faults { get; set; } = new();
 
+    /// <summary>
+    /// Expected results checked when the run ends (report section "Scenario Assertions", CLI exit code 4 when one fails),
+    /// so a bug scenario becomes a regression test: e.g. the run completes, the item was bought, a quest was turned in
+    /// N times, nothing was synthesized.
+    /// </summary>
+    public List<AssertSetup> Asserts { get; set; } = new();
+
+    /// <summary>
+    /// Script this scenario is made for (relative to the Skua <c>Scripts\</c> folder, or absolute). Used by
+    /// <c>skuasim test</c>, and by <c>skuasim run</c> when no script is given.
+    /// </summary>
+    public string? Script { get; set; }
+
     [JsonIgnore]
     public string? SourcePath { get; set; }
 
@@ -232,6 +245,48 @@ public sealed class FaultSetup
 
     /// <summary>dropDrought: kills without drops (default 10).</summary>
     public int? Kills { get; set; }
+}
+
+/// <summary>
+/// One expected result, checked against the report when the run ends. <see cref="Check"/>:
+/// <c>outcome</c> (<see cref="Is"/>: Completed, StoppedByScript, LimitReached, ScriptException, Stalled),
+/// <c>item</c> (<see cref="Name"/>, <see cref="In"/>), <c>questTurnIns</c> (<see cref="Quest"/>, or all quests),
+/// <c>questCompleted</c> (<see cref="Quest"/>), <c>level</c>, <c>gold</c>, <c>coins</c>, <c>classRank</c>,
+/// <c>factionRank</c> (<see cref="Name"/>), <c>kills</c> / <c>drops</c> (optional <see cref="Name"/>), <c>deaths</c>,
+/// <c>virtualMinutes</c>, <c>map</c> (final map in <see cref="Is"/>), <c>mapVisited</c> (<see cref="Name"/>),
+/// <c>serverMessage</c> / <c>scriptLog</c> / <c>warning</c> (<see cref="Text"/> contained, counted),
+/// <c>injectedFaults</c>, <c>synthesized</c> (invented data records, optional <see cref="Text"/> in the key or
+/// description), <c>synthesizedMaps</c>, <c>unimplemented</c> (API members touched, optional <see cref="Text"/>).
+/// Numbers are compared with <see cref="Min"/> / <see cref="Max"/> / <see cref="Exactly"/>; without them, counts of
+/// problems (deaths, synthesized, synthesizedMaps, unimplemented) default to "max 0" and other counts to "min 1".
+/// </summary>
+public sealed class AssertSetup
+{
+    public string Check { get; set; } = "";
+
+    /// <summary>Optional label shown in the report instead of the generated one.</summary>
+    public string? Description { get; set; }
+
+    /// <summary>Item, monster, faction or map name (case-insensitive).</summary>
+    public string? Name { get; set; }
+
+    public int? Quest { get; set; }
+
+    /// <summary>Text to look for (case-insensitive substring).</summary>
+    public string? Text { get; set; }
+
+    /// <summary>item: where to count it — <c>any</c> (default: inventory + bank + temp + house), <c>inventory</c>, <c>bank</c>, <c>temp</c>, <c>house</c>.</summary>
+    public string? In { get; set; }
+
+    /// <summary>outcome / map: accepted values.</summary>
+    public List<string> Is { get; set; } = new();
+
+    public double? Min { get; set; }
+    public double? Max { get; set; }
+    public double? Exactly { get; set; }
+
+    /// <summary>item / gold / coins / level / classRank / factionRank: compare the change since the start instead of the final value.</summary>
+    public bool Gained { get; set; }
 }
 
 public sealed class WorldSetup

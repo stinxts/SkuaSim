@@ -276,6 +276,15 @@ public partial class DiagnosticsViewModel : ViewModelBase
             FatalErrorDetails = report.StopReason ?? "The player made no progress for the configured virtual time.";
             CompileErrors.Clear();
         }
+        else if (report.AssertionsFailed > 0)
+        {
+            HasFatalError = true;
+            HasCompileErrors = false;
+            FatalErrorTitle = $"Scenario Assertions Failed ({report.AssertionsFailed}/{report.Assertions.Count}) — {Path.GetFileName(report.ScriptPath)}";
+            FatalErrorDetails = string.Join(Environment.NewLine, report.Assertions.Where(a => !a.Passed)
+                .Select(a => $"#{a.Index} {a.Description}{Environment.NewLine}    expected {a.Expected}, got {a.Actual}"));
+            CompileErrors.Clear();
+        }
         else
         {
             HasFatalError = false;

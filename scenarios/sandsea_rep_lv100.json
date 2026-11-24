@@ -13,5 +13,13 @@
   "Inventory": [
     { "Name": "Void Highlord", "Category": "Class", "Equipped": true, "EnhancementPatternID": 9, "EnhancementLevel": 100 }
   ],
-  "Limits": { "MaxVirtualMinutes": 720, "MaxNoProgressMinutes": 60 }
+  "Limits": { "MaxVirtualMinutes": 720, "MaxNoProgressMinutes": 60 },
+  "Script": "Farm/REP/SandseaREP.cs",
+  "Asserts": [
+    { "check": "outcome", "is": ["Completed"] },
+    { "check": "factionRank", "name": "Sandsea", "exactly": 10 },
+    { "check": "questTurnIns", "exactly": 303, "description": "303 turn-ins x 1,000 rep = rank 10 (302,500 rep)" },
+    { "check": "deaths" },
+    { "check": "synthesizedMaps" }
+  ]
 }

@@ -19,5 +19,19 @@
     { "Kind": "buyDesync", "Target": "Undead Warrior" },
     { "Kind": "disconnect", "Action": "join", "Target": "greenguardwest" }
   ],
-  "Limits": { "MaxVirtualMinutes": 300, "MaxNoProgressMinutes": 30 }
+  "Limits": { "MaxVirtualMinutes": 300, "MaxNoProgressMinutes": 30 },
+  "Script": "Legion/JoinLegion.cs",
+  "Asserts": [
+    { "check": "outcome", "is": ["Completed"] },
+    { "check": "injectedFaults", "exactly": 2 },
+    { "check": "scriptLog", "text": "Inventory de-sync (AE Issue) detected", "description": "CoreBots relogs after the purchase de-sync" },
+    { "check": "scriptLog", "text": "Bought 1 Undead Warrior", "description": "the Undead Warrior is bought on retry" },
+    { "check": "questCompleted", "quest": 789 },
+    { "check": "questCompleted", "quest": 790 },
+    { "check": "questCompleted", "quest": 791 },
+    { "check": "questCompleted", "quest": 792 },
+    { "check": "questCompleted", "quest": 793 },
+    { "check": "scriptLog", "text": "Sold all of \"Undead Warrior\"", "description": "the armor is sold back at the end" },
+    { "check": "deaths" }
+  ]
 }

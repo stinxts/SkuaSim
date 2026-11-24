@@ -47,6 +47,9 @@ public sealed class SimulationReport
     public Dictionary<string, int> ServerMessages { get; init; } = new();
     /// <summary>Scenario faults that fired, in order ("[time] kind on action #n (target)").</summary>
     public List<string> InjectedFaults { get; init; } = new();
+    /// <summary>Scenario asserts checked at the end of the run (empty when the scenario has none).</summary>
+    public List<AssertionResult> Assertions { get; init; } = new();
+    public int AssertionsFailed => Assertions.Count(a => !a.Passed);
     public Dictionary<int, int> QuestTurnIns { get; init; } = new();
     public WorldSnapshot InitialState { get; init; } = new();
     public WorldSnapshot FinalState { get; init; } = new();
@@ -89,6 +92,8 @@ public sealed class SimulationReport
             sb.AppendLine($"- **Scenario:** `{ScenarioName}`");
         sb.AppendLine($"- **Seed:** `{Seed}`");
         sb.AppendLine($"- **Outcome:** **{Outcome}**{(string.IsNullOrEmpty(StopReason) ? "" : $" ({StopReason})")}");
+        if (Assertions.Count > 0)
+            sb.AppendLine($"- **Assertions:** **{(AssertionsFailed == 0 ? "PASSED" : "FAILED")}** ({Assertions.Count - AssertionsFailed}/{Assertions.Count} passed)");
         sb.AppendLine($"- **Compile Time:** `{CompileDuration.TotalMilliseconds:F0} ms`");
         sb.AppendLine($"- **Real Time:** `{RealDuration.TotalSeconds:F2} s`");
         sb.AppendLine($"- **Simulated (Virtual) Time:** `{FormatVirtual(VirtualDuration)}`");
@@ -109,6 +114,16 @@ public sealed class SimulationReport
         if (!string.IsNullOrEmpty(TraceFilePath))
             sb.AppendLine($"- **Full Trace File:** `{TraceFilePath}`");
         sb.AppendLine();
+
+        if (Assertions.Count > 0)
+        {
+            sb.AppendLine("## Scenario Assertions");
+            sb.AppendLine("| # | Result | Assert | Expected | Actual |");
+            sb.AppendLine("|---|---|---|---|---|");
+            foreach (var a in Assertions)
+                sb.AppendLine($"| {a.Index} | {(a.Passed ? "PASS" : "**FAIL**")} | {Cell(a.Description)} | {Cell(a.Expected)} | {Cell(a.Actual)} |");
+            sb.AppendLine();
+        }
 
         if (CompileErrors.Count > 0)
         {
@@ -234,6 +249,8 @@ public sealed class SimulationReport
 
         return sb.ToString();
     }
+
+    private static string Cell(string text) => text.Replace("|", "\\|").Replace('\n', ' ');
 
     private static string FormatVirtual(TimeSpan t) =>
         $"{(int)t.TotalHours:00}:{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds:000}";

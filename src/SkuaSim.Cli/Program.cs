@@ -28,6 +28,7 @@ internal static class CliEntry
             "db-stats" or "stats" => RunDbStats(rest, installation),
             "compile" => RunCompile(rest, installation),
             "run" => RunSimulation(rest, installation),
+            "test" => RunTestSuite(rest, installation),
             "calendar-update" => RunCalendarUpdate(rest, installation),
             "calendar-show" => RunCalendarShow(rest, installation),
             "whatif" => RunWhatIf(rest, installation),
@@ -294,15 +295,17 @@ internal static class CliEntry
 
     private static int RunSimulation(string[] args, SkuaInstallation installation)
     {
-        if (args.Length == 0)
+        const string usage = "Usage: skuasim run [<script.cs>] [--scenario <file.json>] [--seed <int|random>] [--max-virtual-min <num>] [--max-real-sec <num>] [--max-no-progress-min <num>] [--start-date <utc|now>] [--ae-calendar] [--report <path.md>] [--trace <path.jsonl>] [--export-scenario <path.json>]";
+        var scenarioPath = GetOption(args, "--scenario") ?? GetOption(args, "-s");
+        var scenario = !string.IsNullOrEmpty(scenarioPath) ? Scenario.Load(scenarioPath) : new Scenario();
+        var scriptArg = args.Length > 0 && !args[0].StartsWith('-') ? args[0] : scenario.Script;
+        if (string.IsNullOrWhiteSpace(scriptArg))
         {
-            Console.Error.WriteLine("Error: missing script path. Usage: skuasim run <script.cs> [--scenario <file.json>] [--seed <int|random>] [--max-virtual-min <num>] [--max-real-sec <num>] [--max-no-progress-min <num>] [--start-date <utc|now>] [--ae-calendar] [--report <path.md>] [--trace <path.jsonl>] [--export-scenario <path.json>]");
+            Console.Error.WriteLine("Error: missing script path (give one, or set \"script\" in the scenario). " + usage);
             return 1;
         }
 
-        var scriptPath = ResolveScriptPath(args[0], installation);
-        var scenarioPath = GetOption(args, "--scenario") ?? GetOption(args, "-s");
-        var scenario = !string.IsNullOrEmpty(scenarioPath) ? Scenario.Load(scenarioPath) : new Scenario();
+        var scriptPath = ResolveScriptPath(scriptArg, installation);
 
         int? seedOverride = null;
         if (GetOption(args, "--seed") is { } seedStr)
@@ -391,12 +394,100 @@ internal static class CliEntry
             }
         }
 
+        return ExitCode(report);
+    }
+
+    /// <summary>
+    /// Exit code of a run. Without scenario asserts: 0 completed/stopped, 2 compile error or script exception, 3 stalled.
+    /// With asserts, they decide (the expected outcome is one of them): 0 all passed, 4 one failed; a compile error stays 2.
+    /// </summary>
+    private static int ExitCode(SimulationReport report)
+    {
+        if (report.Outcome == SimulationOutcome.CompileError)
+            return 2;
+        if (report.Assertions.Count > 0)
+            return report.AssertionsFailed == 0 ? 0 : 4;
         return report.Outcome switch
         {
-            SimulationOutcome.CompileError or SimulationOutcome.ScriptException => 2,
+            SimulationOutcome.ScriptException => 2,
             SimulationOutcome.Stalled => 3,
             _ => 0
         };
+    }
+
+    /// <summary>
+    /// Regression suite: runs every scenario (files or folders, *.json) that names its "script", checks its asserts and
+    /// prints one line per scenario. Exit code: 0 all passed, 4 a scenario failed, 1 nothing to run.
+    /// </summary>
+    private static int RunTestSuite(string[] args, SkuaInstallation installation)
+    {
+        var inputs = args.TakeWhile(a => !a.StartsWith("--", StringComparison.Ordinal)).ToList();
+        if (inputs.Count == 0)
+            inputs.Add("scenarios");
+        var files = new List<string>();
+        foreach (var input in inputs)
+        {
+            if (Directory.Exists(input))
+                files.AddRange(Directory.GetFiles(input, "*.json").OrderBy(f => f, StringComparer.OrdinalIgnoreCase));
+            else if (File.Exists(input))
+                files.Add(input);
+            else
+            {
+                Console.Error.WriteLine($"Not found: {input}");
+                return 1;
+            }
+        }
+
+        var gameDataPath = GetOption(args, "--gamedata");
+        var reportDir = GetOption(args, "--report-dir");
+        var runner = new SimulationRunner(installation);
+        var rows = new List<(string Scenario, string Status, SimulationReport? Report, string Detail)>();
+        foreach (var file in files)
+        {
+            Scenario scenario;
+            try { scenario = Scenario.Load(file); }
+            catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidDataException)
+            {
+                rows.Add((Path.GetFileName(file), "SKIP", null, "not a scenario: " + ex.Message));
+                continue;
+            }
+            if (string.IsNullOrWhiteSpace(scenario.Script) || scenario.Asserts.Count == 0)
+            {
+                rows.Add((Path.GetFileName(file), "SKIP", null, string.IsNullOrWhiteSpace(scenario.Script) ? "no \"script\"" : "no \"asserts\""));
+                continue;
+            }
+
+            Console.WriteLine($"Running {Path.GetFileName(file)} ({scenario.Script})...");
+            var report = runner.Run(new SimulationRunOptions
+            {
+                ScriptPath = ResolveScriptPath(scenario.Script, installation),
+                Scenario = scenario,
+                GameDataPath = gameDataPath
+            });
+            var passed = ExitCode(report) == 0;
+            var failed = report.Assertions.Where(a => !a.Passed).Select(a => $"#{a.Index} {a.Description}: {a.Actual}").ToList();
+            var detail = $"{report.Outcome}, {report.VirtualDuration:hh\\:mm\\:ss} virtual, {report.Assertions.Count - report.AssertionsFailed}/{report.Assertions.Count} asserts"
+                         + (failed.Count > 0 ? " — " + string.Join("; ", failed) : "");
+            rows.Add((Path.GetFileName(file), passed ? "PASS" : "FAIL", report, detail));
+            Console.WriteLine($"  {(passed ? "PASS" : "FAIL")}  {detail}");
+
+            if (!string.IsNullOrEmpty(reportDir))
+            {
+                Directory.CreateDirectory(reportDir);
+                File.WriteAllText(Path.Combine(reportDir, Path.GetFileNameWithoutExtension(file) + ".md"), report.ToMarkdown());
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("=== SkuaSim scenario tests ===");
+        foreach (var (name, status, _, detail) in rows)
+            Console.WriteLine($"{status,-4}  {name}: {detail}");
+        var ran = rows.Count(r => r.Status != "SKIP");
+        var failedCount = rows.Count(r => r.Status == "FAIL");
+        Console.WriteLine($"{ran - failedCount}/{ran} passed, {rows.Count - ran} skipped.");
+        if (!string.IsNullOrEmpty(reportDir))
+            Console.WriteLine($"Reports saved to: {Path.GetFullPath(reportDir)}");
+        return ran == 0 ? 1 : failedCount == 0 ? 0 : 4;
     }
 
     private static string ResolveScriptPath(string input, SkuaInstallation installation)
@@ -450,7 +541,9 @@ internal static class CliEntry
         Console.WriteLine("Usage:");
         Console.WriteLine("  skuasim db-stats [--gamedata <path>]");
         Console.WriteLine("  skuasim compile <script.cs>");
-        Console.WriteLine("  skuasim run <script.cs> [options]");
+        Console.WriteLine("  skuasim run [<script.cs>] [options]       The script can come from the scenario's \"script\"");
+        Console.WriteLine("  skuasim test [<scenario.json|folder> ...] [--gamedata <path>] [--report-dir <dir>]   Run every scenario with");
+        Console.WriteLine("                                 \"script\" + \"asserts\" (default folder: scenarios) as a regression suite");
         Console.WriteLine("  skuasim calendar-update [--calendar <path>]   Download the AE calendar (artix.com/calendar) locally");
         Console.WriteLine("  skuasim calendar-show [--calendar <path>] [--date <utc>]");
         Console.WriteLine("  skuasim whatif <script.cs> --add \"Item\" [--add ...] [--scenario <file.json>] [--max-virtual-min <num>]   Compare a run with and without items (quest pets...)");
@@ -471,6 +564,8 @@ internal static class CliEntry
         Console.WriteLine("  --trace <file.jsonl>           Stream full API trace to JSONL file");
         Console.WriteLine("  --export-scenario <file.json>  Save the character at the end of the run as a new scenario (chain runs)");
         Console.WriteLine();
-        Console.WriteLine("Exit codes (run): 0 = completed/stopped, 2 = compile error or script exception, 3 = stalled");
+        Console.WriteLine("Exit codes (run): 0 = completed/stopped, 2 = compile error or script exception, 3 = stalled;");
+        Console.WriteLine("  with scenario \"asserts\" they decide: 0 = all passed, 4 = an assert failed (compile error stays 2)");
+        Console.WriteLine("Exit codes (test): 0 = all passed, 4 = a scenario failed, 1 = nothing to run");
     }
 }

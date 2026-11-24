@@ -101,6 +101,16 @@ Runs silently inside Skua or VibeSkua on a non-blocking background `Channel<Acti
 - **Server Warnings & Fault Injection:**
   - Actions the AQW server refuses are refused in the simulator too, and the script receives the server's real message (texts captured by the collector) through `Bot.Events.ExtensionPacketReceived`, so listeners such as CoreBots' `MapIsMemberLocked` run: member-only / unavailable / event-locked joins, purchases without gold, AC or bag space, pickups of items in the bank or at a full stack. Scenario `world.memberOnlyMaps`, `world.unavailableMaps`, `world.eventLockedMaps`; the report lists every message sent.
   - Scenario `faults`: deterministic server faults to test a script's recovery — `buyDesync`, `questDesync`, `slowDown`, `tooSoonAfterCombat`, `disconnect`, `joinFail`, `dropDrought` — triggered by the Nth occurrence of an action (`buy`, `sell`, `turnIn`, `accept`, `join`, `pickup`, `loadShop`, `kill`, `any`), optionally on one `target` and after a virtual minute. Example: [`scenarios/joinlegion_faults_lv100.json`](scenarios/joinlegion_faults_lv100.json).
+  - Scenario `asserts`: expected results checked when the run ends, so a bug scenario becomes a regression test. Checks: `outcome`, `item` (`in`: any/inventory/bank/temp/house), `questTurnIns`, `questCompleted`, `level`, `gold`, `coins`, `classRank`, `factionRank`, `kills`, `drops`, `deaths`, `virtualMinutes`, `map`, `mapVisited`, `serverMessage`, `scriptLog`, `warning`, `injectedFaults`, `synthesized`, `synthesizedMaps`, `unimplemented`; numbers use `min` / `max` / `exactly` (`gained: true` compares the change since the start). Without bounds, problem counts (deaths, synthesized, unimplemented) mean "none" and other counts "at least one"; an invalid assert fails, so a typo never passes. Results go to the report ("Scenario Assertions"), the UI status bar and Errors & Diagnostics, and the CLI exit code. Assert behavior, not values that change with the live `gamedata.json` (virtual time, kill counts on maps still being collected). Examples: [`scenarios/sandsea_rep_lv100.json`](scenarios/sandsea_rep_lv100.json), [`scenarios/shaman_rankup_lv100.json`](scenarios/shaman_rankup_lv100.json), [`scenarios/joinlegion_faults_lv100.json`](scenarios/joinlegion_faults_lv100.json):
+    ```json
+    "script": "Farm/REP/SandseaREP.cs",
+    "asserts": [
+      { "check": "outcome", "is": ["Completed"] },
+      { "check": "factionRank", "name": "Sandsea", "exactly": 10 },
+      { "check": "questTurnIns", "exactly": 303 },
+      { "check": "deaths" }
+    ]
+    ```
 - **Simulation Limits & Control:**
   - Virtual time limit from minutes to weeks, or **Unlimited (`0`)**, with multi-day clock formatting (`Xd hh:mm:ss.fff`).
   - Wall-clock limit defaults to **Infinite (`0`)** and excludes cold Roslyn compile time; a real-time stall guard stops pure-CPU loops that never call the API.
@@ -123,7 +133,7 @@ Runs silently inside Skua or VibeSkua on a non-blocking background `Channel<Acti
   - Export full execution reports as **Markdown (`.md`)** or **JSON (`.json`)**.
 
 ### 4. `SkuaSim.Cli` — Headless Command-Line Runner
-Terminal interface for scripting and automated regression runs: `db-stats`, `compile`, `run`, `calendar-update` (downloads the public AE calendar into `data\ae_calendar.json`; only this command uses the network) and `calendar-show [--date <utc>]`.
+Terminal interface for scripting and automated regression runs: `db-stats`, `compile`, `run`, `test` (scenario regression suite), `calendar-update` (downloads the public AE calendar into `data\ae_calendar.json`; only this command uses the network) and `calendar-show [--date <utc>]`.
 
 | `run` option | Meaning |
 |---|---|
@@ -144,7 +154,11 @@ Terminal interface for scripting and automated regression runs: `db-stats`, `com
 
 `import-data <share.zip> [...]` stores other testers' shared data in `data\contrib\` (the newest export per contributor; own exports and files without a contributor ID are refused). Every simulation merges those files into `gamedata.json` in memory (`gamedata.json` is never changed); the trace and `db-stats` list them.
 
-Exit codes: `0` completed/stopped, `2` compile error or script exception, `3` stalled.
+`run` takes the script from the scenario's `"script"` field when none is given.
+
+`test [<scenario.json|folder> ...] [--gamedata <path>] [--report-dir <dir>]` is the regression suite: it runs every scenario (default folder `scenarios\`) that has both `"script"` and `"asserts"`, prints PASS/FAIL per scenario and skips the others.
+
+Exit codes (`run`): `0` completed/stopped, `2` compile error or script exception, `3` stalled. When the scenario has `asserts`, they decide instead (the expected outcome is one of them): `0` all passed, `4` an assert failed; a compile error stays `2`. `test`: `0` all passed, `4` a scenario failed, `1` nothing to run.
 
 ---
 
@@ -235,6 +249,11 @@ dotnet run --project tests\SkuaSim.Collector.Tests\SkuaSim.Collector.Tests.cspro
 dotnet run --project tests\SkuaSim.Core.Tests\SkuaSim.Core.Tests.csproj
 ```
 The tests are console runners that need a local VibeSkua/Skua install; the Core suite takes a few minutes because it compiles real scripts.
+
+Scenario regression suite (real scripts with `asserts`):
+```powershell
+dotnet run --project src\SkuaSim.Cli -- test scenarios --report-dir data\test_reports
+```
 
 ---
 

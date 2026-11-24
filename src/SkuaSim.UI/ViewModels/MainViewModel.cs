@@ -664,7 +664,11 @@ public partial class MainViewModel : ViewModelBase
         PauseResumeLabel = "Pause";
 
         StatusText = FormatOutcomeStatus(report);
-        if (report.Outcome is SimulationOutcome.CompileError or SimulationOutcome.ScriptException or SimulationOutcome.Stalled)
+        if (report.Assertions.Count > 0)
+            StatusText += report.AssertionsFailed == 0
+                ? $" · Assertions passed ({report.Assertions.Count}/{report.Assertions.Count})"
+                : $" · {report.AssertionsFailed} assertion(s) FAILED (see Errors & Diagnostics)";
+        if (report.Outcome is SimulationOutcome.CompileError or SimulationOutcome.ScriptException or SimulationOutcome.Stalled || report.AssertionsFailed > 0)
             Diagnostics.SelectedTabIndex = 1;
 
         RefreshCommandStates();

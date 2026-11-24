@@ -176,6 +176,13 @@ public sealed class SimulationRunner
 
     private SimulationReport ExecuteSession(SimulationRunOptions options, string scriptFullPath, int seed, SimulationSession session)
     {
+        var report = ExecuteSessionCore(options, scriptFullPath, seed, session);
+        report.Assertions.AddRange(ScenarioAssertions.Evaluate(options.Scenario.Asserts, report));
+        return report;
+    }
+
+    private SimulationReport ExecuteSessionCore(SimulationRunOptions options, string scriptFullPath, int seed, SimulationSession session)
+    {
         var scenario = options.Scenario;
         var compileResult = Compile(scriptFullPath, options.IncludeRoots);
         if (!compileResult.Success || compileResult.Main == null)

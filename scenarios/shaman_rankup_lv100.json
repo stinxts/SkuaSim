@@ -13,5 +13,13 @@
   "Inventory": [
     { "Name": "Shaman", "Category": "Class", "Equipped": true, "EnhancementPatternID": 7, "EnhancementLevel": 100 }
   ],
-  "Limits": { "MaxVirtualMinutes": 720, "MaxNoProgressMinutes": 60 }
+  "Limits": { "MaxVirtualMinutes": 720, "MaxNoProgressMinutes": 60 },
+  "Script": "Tools/RankUpEquippedClass.cs",
+  "Asserts": [
+    { "check": "outcome", "is": ["Completed"] },
+    { "check": "classRank", "exactly": 10 },
+    { "check": "kills", "name": "Frost Spirit", "exactly": 740, "description": "740 Frost Spirit kills for rank 1 -> 10 (CP = 230 + 25 x rank, validated 2026-11-22)" },
+    { "check": "deaths" },
+    { "check": "synthesizedMaps" }
+  ]
 }

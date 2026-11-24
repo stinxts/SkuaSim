@@ -21,7 +21,9 @@ dotnet run --project src\SkuaSim.UI
   absolute numbers in test output (DPS, etc.) can drift between runs. Assert on behavior, not on such values.
 - Script paths given to the CLI are relative to the VibeSkua `Scripts\` folder
   (`%APPDATA%\VibeSkua\Scripts`) or absolute. Env overrides: `SKUASIM_SKUA_ASSEMBLIES`, `SKUASIM_SKUA_DATA`.
-- CLI `run` exit codes: 0 completed/stopped, 2 compile error or script exception, 3 stalled.
+- CLI `run` exit codes: 0 completed/stopped, 2 compile error or script exception, 3 stalled; with scenario `asserts`
+  they decide (0 all passed, 4 one failed; compile error stays 2). `skuasim test scenarios` runs every scenario with
+  `script` + `asserts` as a regression suite (`Runtime/ScenarioAssertions.cs`, Core test 22).
 
 ## Layout
 
