@@ -2213,6 +2213,7 @@ public sealed partial class SimWorld
                         }
                     }
                     Trace.Synthesize($"shop:{shopId}", $"Shop {shopId} has no captured data: synthesized {items.Count} item(s){(Rules.LenientShops ? " (free, no merge requirements checked)" : "")}.");
+                    _synthesizedShopIds.Add(shopId);
                 }
                 cached = new ShopInfo(shopId, name, items);
                 ShopCache.Add(cached);
@@ -2221,6 +2222,23 @@ public sealed partial class SimWorld
             Trace.World($"Loaded shop {shopId} ({cached.Name}, {cached.Items.Count} items).");
             return cached;
         }
+    }
+
+    private readonly HashSet<int> _synthesizedShopIds = new();
+
+    /// <summary>
+    /// A purchase from a shop the collector never captured has no price: it is free here. Flags what that hides: an AC
+    /// item (a real account needs the ACs, and CoreBots' "costs X AC" confirmation never shows at cost 0), or an item
+    /// whose currency is unknown because the collector never saw it.
+    /// </summary>
+    private void NoteUnknownPrice(ItemInfo info, int shopId)
+    {
+        if (info.Coins)
+            Trace.Synthesize($"accost:{info.Name.ToLowerInvariant()}",
+                $"AC cost unknown: '{info.Name}' is an AC item bought from shop {shopId}, which was never captured, so it cost 0 AC here and the AC confirmation prompt never appeared. A real account needs the ACs; open this shop once with the collector to get its price.");
+        else if (info.Source == DataSource.Synthesized)
+            Trace.Synthesize($"currency:{info.Name.ToLowerInvariant()}",
+                $"Price unknown: '{info.Name}' was never seen by the collector and shop {shopId} was never captured, so whether it costs gold or AC is unknown; it was free here.");
     }
 
     public bool Buy(string? name, int? itemId, int shopItemId, int quantity)
@@ -2253,6 +2271,7 @@ public sealed partial class SimWorld
                 }
                 var info = ResolveItem(name, itemId);
                 Trace.Synthesize($"buy:{shop.ID}:{info.Name.ToLowerInvariant()}", $"Bought '{info.Name}' from shop {shop.ID} without captured shop data (free, no requirements checked).");
+                NoteUnknownPrice(info, shop.ID);
                 AddToInventory(info, qty, $"bought from shop {shop.ID}");
                 charItemId = Inventory.FirstOrDefault(i => i.ID == info.ID)?.CharItemID ?? 0;
                 boughtId = info.ID;
@@ -2260,6 +2279,8 @@ public sealed partial class SimWorld
             }
             else
             {
+                if (_synthesizedShopIds.Contains(shop!.ID))
+                    NoteUnknownPrice(_ctx.Catalog.FindItem(item.ID) ?? InfoOf(item), shop.ID);
                 string? reason = null;
                 var totalCost = (long)item.Cost * qty;
                 var needsNewSlot = !item.Temp && !Inventory.Any(i => i.ID == item.ID);

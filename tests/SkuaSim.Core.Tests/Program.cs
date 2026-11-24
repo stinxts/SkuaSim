@@ -1251,6 +1251,7 @@ internal static class CoreTests
             { "ShopItemID": 1, "ID": 990601, "Name": "Pricey Sword", "Category": "Sword", "Cost": 5000, "Coins": false },
             { "ShopItemID": 2, "ID": 990602, "Name": "AC Helm", "Category": "Helm", "Cost": 500, "Coins": true },
             { "ShopItemID": 3, "ID": 990603, "Name": "Cheap Gem", "Category": "Item", "Cost": 1, "Coins": false, "MaxStack": 10 } ] } },
+          "Items": { "990651": { "ID": 990651, "Name": "Mystery Helm", "Category": "Helm", "Coins": true, "MaxStack": 1 } },
           "ServerMessages": { "warning|\"<Q>\" is an Membership-Only Map.": { "Kind": "warning", "Text": "\"<Q>\" is an Membership-Only Map.", "Count": 1,
             "PrecededBy": { "cmd:tfer": 1 }, "TargetMaps": { "zzmembermap": 1 } } }
         }
@@ -1294,6 +1295,10 @@ internal static class CoreTests
                 bot.Shops.BuyItem("AC Helm");
                 bot.Shops.BuyItem("Cheap Gem");
                 bot.Log("bought=" + bot.Inventory.Contains("Pricey Sword") + bot.Inventory.Contains("AC Helm") + bot.Inventory.Contains("Cheap Gem"));
+                bot.Shops.Load(9999); // never captured
+                bot.Sleep(1000);
+                bot.Shops.BuyItem("Mystery Helm");
+                bot.Shops.BuyItem("Never Seen Relic");
                 bot.Log("seen=" + string.Join(" || ", seen));
             }
         }
@@ -1335,6 +1340,8 @@ internal static class CoreTests
         Assert(report.ServerMessages.GetValueOrDefault("Item is not buyable. Not enough Gold") == 1 &&
                report.ToMarkdown().Contains("## Server Warnings & Messages"),
             "The report must list the server messages sent");
+        Assert(report.SynthesizedData.Any(s => s.Key == "accost:mystery helm") && report.SynthesizedData.Any(s => s.Key == "currency:never seen relic"),
+            "Buying an AC item or an unknown item from an uncaptured shop must flag the unknown price");
         Console.WriteLine($"   OK: {report.ServerMessages.Values.Sum()} server messages (member/seasonal joins, gold/AC/bag purchases, bank/full-stack pickups)");
     }
 
