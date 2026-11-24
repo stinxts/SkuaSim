@@ -1203,6 +1203,38 @@ try
     Assert(pvpDb.Pvp["bludrutbrawl"].Events["team0:kill:Restorer"] == 2 && pvpDb.Pvp["bludrutbrawl"].FinalScores.Count == 4,
         "Merged PvP stats must add up");
 
+    // (g3) One record per match with the items received in it (to work out the Combat Trophy rule): items during a
+    // match go to it; after leaving the map they still count for CapturedPvpMatch.GraceSeconds, then no longer.
+    // dropItem/addItems shapes from the real samples (Chaos War Medal dropItem, addItems with iQtyNow).
+    var pvpNow = new DateTime(2026, 11, 24, 2, 0, 0, DateTimeKind.Utc);
+    var matchEng = new PacketCollectorEngine { PvpClockUtc = () => pvpNow };
+    static string TrophyDrop(int dQty) => PvpPacket("{\"cmd\":\"dropItem\",\"items\":{\"4889\":{\"iLvl\":1,\"iStk\":5000,\"ItemID\":4889,\"dID\":4889,\"bCoins\":true,\"iQty\":40,\"dQty\":" + dQty + ",\"sName\":\"Combat Trophy\",\"bTemp\":false,\"sType\":\"Item\",\"sReqQuests\":\"\"}}}");
+    matchEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"moveToArea","strMapName":"bludrutbrawl-100001","strMapFileName":"bludrutbrawl.swf"}"""));
+    matchEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"PVPE","team":0,"typ":"kill","unm":"SomePlayer","val":"Captain"}"""));
+    matchEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"PVPS","pvpScore":[{"k":10,"m":3,"r":4,"v":1250},{"k":0,"m":0,"r":0,"v":0}]}"""));
+    matchEng.ProcessExtensionPacketJson(TrophyDrop(3));
+    matchEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"PVPS","pvpScore":[{"k":0,"m":0,"r":0,"v":0},{"k":0,"m":0,"r":0,"v":10}]}""")); // next match
+    matchEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"addItems","items":{"4889":{"CharItemID":123,"iQty":2,"bBank":false,"iQtyNow":45}}}"""));
+    matchEng.ProcessExtensionPacketJson(PvpPacket("""{"cmd":"moveToArea","strMapName":"battleon-1","strMapFileName":"battleon.swf"}"""));
+    pvpNow = pvpNow.AddSeconds(5);
+    matchEng.ProcessExtensionPacketJson(TrophyDrop(1)); // within the grace window: still the second match
+    var midDelta = matchEng.TakeDeltaSnapshot();
+    Assert(midDelta.Pvp["bludrutbrawl"].Matches.Count == 1, "A match must stay open for late items until its grace window ends");
+    pvpNow = pvpNow.AddSeconds(CapturedPvpMatch.GraceSeconds + 1);
+    matchEng.ProcessExtensionPacketJson(TrophyDrop(7)); // too late: not credited
+    var matchDb = new GameDatabase();
+    GameDatabaseStore.MergeInto(matchDb, midDelta);
+    GameDatabaseStore.MergeInto(matchDb, matchEng.TakeDeltaSnapshot());
+    var matches = matchDb.Pvp["bludrutbrawl"].Matches;
+    Assert(matches.Count == 2, $"Expected 2 matches: {Newtonsoft.Json.JsonConvert.SerializeObject(matches)}");
+    Assert(matches[0].FinalScore == "10,3,4,1250|0,0,0,0" && matches[0].Events.GetValueOrDefault("team0:kill:Captain") == 1
+        && matches[0].ItemsDropped.GetValueOrDefault("4889:Combat Trophy") == 3 && matches[0].ItemsAdded.Count == 0 && !matches[0].EndedByLeaving,
+        $"First match mismatch: {Newtonsoft.Json.JsonConvert.SerializeObject(matches[0])}");
+    Assert(matches[1].ItemsAdded.GetValueOrDefault("4889:Combat Trophy") == 2 && matches[1].ItemsDropped.GetValueOrDefault("4889:Combat Trophy") == 1
+        && matches[1].EndedByLeaving,
+        $"Second match mismatch (late item within the grace window counts, later ones not): {Newtonsoft.Json.JsonConvert.SerializeObject(matches[1])}");
+    Assert(!Newtonsoft.Json.JsonConvert.SerializeObject(matchDb).Contains("SomePlayer"), "PvP match data must not contain player names");
+
     // (h) Drop size: in dropItem, "dQty" is the amount that dropped; "iQty" can be the stack already owned (real samples
     // carry both keys; the legacy sum of iQty gave ~1,400 Undead Energy per drop). Shape from the real Chaos War Medal
     // dropItem sample, with an owned stack of 1,400 and 2 dropped.

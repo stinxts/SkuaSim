@@ -84,6 +84,7 @@ public sealed partial class PacketCollectorEngine
     {
         lock (_sync)
         {
+            CommitEndedPvpMatchIfDueLocked();
             var snapshot = _delta;
             _delta = new GameDatabase();
             snapshot.CollectorVersions[CollectorInfo.Version] = 1; // one flush by this build
@@ -95,6 +96,7 @@ public sealed partial class PacketCollectorEngine
     {
         lock (_sync)
         {
+            CommitEndedPvpMatchIfDueLocked();
             return _delta.Maps.Count > 0
                 || _delta.Monsters.Count > 0
                 || _delta.Items.Count > 0
@@ -197,6 +199,7 @@ public sealed partial class PacketCollectorEngine
             SessionPacketsProcessed++;
             SchemaSampler.CountCommand(cmd);
             SchemaSampler.CountKeySet(cmd, dataObj);
+            CommitEndedPvpMatchIfDueLocked();
             var sampleMap = cmd == "moveToArea"
                 ? GameDatabase.NormalizeMapName(dataObj["strMapName"]?.ToString())
                 : _currentMapName;
@@ -981,6 +984,7 @@ public sealed partial class PacketCollectorEngine
             // "dQty" is the amount that dropped (verified in real samples next to "iQty"); "iQty" can be the stack the
             // character already owns, so it is never used as the drop size.
             int? dropped = itemToken["dQty"] != null ? ParseInt(itemToken["dQty"], 0) : null;
+            RecordPvpItemLocked(fromDrop: true, item.ID, item.Name, dropped ?? qty);
             _recentDropItemTimes[item.ID] = now;
             AttributeDropToMonster(item.ID, item.Name, item.Temp, qty, dropped);
         }
@@ -1061,6 +1065,8 @@ public sealed partial class PacketCollectorEngine
             var item = UpsertItemFromJson(itemToken, prop.Name);
             if (item == null)
                 continue;
+
+            RecordPvpItemLocked(fromDrop: false, item.ID, item.Name, Math.Max(1, ParseInt(itemToken["iQty"], 1)));
 
             if (isRecentMapItemPickup)
             {

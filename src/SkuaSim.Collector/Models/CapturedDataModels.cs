@@ -793,6 +793,32 @@ public sealed class CapturedQuest
 /// (score update; the meaning of k/m/r/v is still being worked out, hence the ordered sequence). Numbers only, no
 /// names and no times.
 /// </summary>
+public sealed class CapturedPvpMatch
+{
+    /// <summary>Items received up to this long after the match ended (leaving the map or the next match) still count.</summary>
+    public const int GraceSeconds = 20;
+
+    /// <summary>Last score of the match, <c>k,m,r,v|k,m,r,v</c> (team 0 | team 1); empty if no score arrived.</summary>
+    public string FinalScore { get; set; } = string.Empty;
+
+    public int ScoreUpdates { get; set; }
+
+    /// <summary>Events of this match keyed <c>team{n}:{typ}:{val}</c>.</summary>
+    public Dictionary<string, long> Events { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>Amounts announced by "dropItem" (<c>dQty</c>, else <c>iQty</c>), keyed <c>{ItemID}:{name}</c>.</summary>
+    public Dictionary<string, long> ItemsDropped { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Amounts added by "addItems" (<c>iQty</c>), keyed <c>{ItemID}:{name}</c>. Kept apart from <see cref="ItemsDropped"/>
+    /// because a picked-up drop may show up in both.
+    /// </summary>
+    public Dictionary<string, long> ItemsAdded { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>True when the match ended because the character left the map (false: the next match began).</summary>
+    public bool EndedByLeaving { get; set; }
+}
+
 public sealed class CapturedPvpStats
 {
     public const int MaxSequence = 2000;
@@ -815,6 +841,12 @@ public sealed class CapturedPvpStats
     /// </summary>
     public List<string> Sequence { get; set; } = new();
 
+    /// <summary>
+    /// One record per match (additive, collector 1.2.0): final score, events and the items the character received during
+    /// the match or within <see cref="CapturedPvpMatch.GraceSeconds"/> after it ended, to work out the trophy rule.
+    /// </summary>
+    public List<CapturedPvpMatch> Matches { get; set; } = new();
+
     public void Merge(CapturedPvpStats? o)
     {
         if (o == null)
@@ -825,6 +857,9 @@ public sealed class CapturedPvpStats
         foreach (var s in o.FinalScores)
             if (FinalScores.Count < MaxFinalScores)
                 FinalScores.Add(s);
+        foreach (var m in o.Matches ?? new())
+            if (Matches.Count < MaxFinalScores)
+                Matches.Add(m);
         if (o.Sequence.Count > 0 && Sequence.Count < MaxSequence)
         {
             if (Sequence.Count > 0)
