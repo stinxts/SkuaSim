@@ -57,6 +57,7 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
   - `%LOCALAPPDATA%\VibeSkua\current\plugins\SkuaSim.Collector.dll`
   - `%APPDATA%\Skua\plugins\SkuaSim.Collector.dll`
   - `dist\plugins\SkuaSim.Collector.dll`
+  - `dist\SkuaSim_Collector_<version>.zip` (the tester package: `README.md` = `docs/COLLECTOR_TESTERS.md` + the DLL; rebuilt with every deploy, last 1.3.1)
 - **Collected Data Locations:**
   - Primary: `%APPDATA%\VibeSkua\SkuaSim\gamedata.json` (+ `packet_schemas.json`)
   - Automatic mirror in workspace: `data\gamedata.json` (+ `data\packet_schemas.json`)
