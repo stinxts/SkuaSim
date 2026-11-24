@@ -824,6 +824,12 @@ public sealed class CapturedServerMessage
     /// <summary>Map the character was in.</summary>
     public Dictionary<string, long> Maps { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// For a message right after a join request (<c>cmd:tfer</c>, collector 1.3.1): the requested map, e.g. the
+    /// member-only or locked seasonal map the warning is about.
+    /// </summary>
+    public Dictionary<string, long> TargetMaps { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     public void Merge(CapturedServerMessage o)
     {
         if (string.IsNullOrEmpty(Kind))
@@ -833,6 +839,7 @@ public sealed class CapturedServerMessage
         Count += o.Count;
         AddCounts(PrecededBy, o.PrecededBy);
         AddCounts(Maps, o.Maps);
+        AddCounts(TargetMaps, o.TargetMaps);
     }
 
     internal static void AddCount(Dictionary<string, long> counts, string key, long amount = 1)

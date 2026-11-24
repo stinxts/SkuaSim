@@ -209,6 +209,15 @@ public sealed class WorldSetup
     public string MessageBoxAnswer { get; set; } = "no";
     /// <summary>Generic HP for monsters without captured data: Level * this value (minimum 1000).</summary>
     public int GenericMonsterHpPerLevel { get; set; } = 400;
+    /// <summary>
+    /// Extra member-only maps (a non-member join is refused with the server's warning). Maps the collector saw refusing
+    /// a non-member join are member-only already.
+    /// </summary>
+    public List<string> MemberOnlyMaps { get; set; } = new();
+    /// <summary>Seasonal maps closed at the scenario's date: a join gets the server's "is not available." warning.</summary>
+    public List<string> UnavailableMaps { get; set; } = new();
+    /// <summary>Maps locked until their event begins unless the house item (value) is owned, e.g. "lowe".</summary>
+    public Dictionary<string, string> EventLockedMaps { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 public sealed class LimitsSetup

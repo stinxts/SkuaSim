@@ -43,6 +43,8 @@ public sealed class SimulationReport
     public List<string> SynthesizedMaps { get; init; } = new();
     public Dictionary<string, int> KillsByMonster { get; init; } = new();
     public Dictionary<string, int> DropsByItem { get; init; } = new();
+    /// <summary>Server warnings/messages sent to the script (real texts): text → count.</summary>
+    public Dictionary<string, int> ServerMessages { get; init; } = new();
     public Dictionary<int, int> QuestTurnIns { get; init; } = new();
     public WorldSnapshot InitialState { get; init; } = new();
     public WorldSnapshot FinalState { get; init; } = new();
@@ -175,6 +177,14 @@ public sealed class SimulationReport
             sb.AppendLine("## Monster Kills");
             foreach (var (mon, count) in KillsByMonster.OrderByDescending(kv => kv.Value))
                 sb.AppendLine($"- `{mon}`: {count:N0}");
+            sb.AppendLine();
+        }
+
+        if (ServerMessages.Count > 0)
+        {
+            sb.AppendLine("## Server Warnings & Messages");
+            foreach (var (text, count) in ServerMessages.OrderByDescending(kv => kv.Value))
+                sb.AppendLine($"- `{text}`: {count:N0}");
             sb.AppendLine();
         }
 

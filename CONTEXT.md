@@ -73,7 +73,7 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
   - `src/SkuaSim.Core/World/`: `SimWorld.cs`, `SimWorld.StatsAndCombat.cs`, `StatEngine.cs`
   - `src/SkuaSim.Core/Api/`: `BotApi.cs`, `PlayerMapApis.cs`, `CombatKillHuntApis.cs`, `InventoryBankDropsApis.cs`, `QuestsShopsWaitApis.cs`, `SystemSupportApis.cs` (including `BoostsApi` and `ConfigApi`)
   - `src/SkuaSim.Cli/`: `Program.cs` (`skuasim db-stats`, `skuasim compile`, `skuasim run`)
-- **Automated Tests:** `tests/SkuaSim.Core.Tests/` (**19/19 passing**; includes the PvP match test (19), the cross-process determinism test, the Stalled detector, schema v2 drop rules and real-data/calendar consumption)
+- **Automated Tests:** `tests/SkuaSim.Core.Tests/` (**20/20 passing**; includes the PvP match test (19), the server warnings test (20), the cross-process determinism test, the Stalled detector, schema v2 drop rules and real-data/calendar consumption)
 - **Sample Scenarios:** `scenarios/farmerjoe_lv1_mage.json`, `scenarios/leveling_lv10.json`, `scenarios/eldersblood_done.json`, `scenarios/swagtokena_example.json`, `scenarios/VHL_farm_max lvl.json`, `scenarios/UnlockForgeEnhancements_scenario.json` (all defaulted to `maxRealSeconds: 0` = infinite).
 
 ### Stage 3 — Visual Desktop Dashboard (`SkuaSim.UI`) & Documentation ✅ Completed & Verified

@@ -77,6 +77,11 @@ public sealed class BotApi : ApiBase
 
     public Task StopAsync(bool runScriptStoppingEvent)
     {
+        if (Ctx.EventDispatchDepth > 0)
+        {
+            Ctx.RequestStop("the script called Bot.Stop()");
+            return Task.CompletedTask;
+        }
         Stop(runScriptStoppingEvent);
         return Task.CompletedTask;
     }

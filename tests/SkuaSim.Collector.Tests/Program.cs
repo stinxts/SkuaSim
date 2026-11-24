@@ -1267,7 +1267,8 @@ try
     var msgDelta = msgEng.TakeDeltaSnapshot();
     var msgs = msgDelta.ServerMessages;
     string MsgDump() => Newtonsoft.Json.JsonConvert.SerializeObject(msgs.Values.Select(m => $"{m.Kind}|{m.Text}|{string.Join(",", m.PrecededBy.Select(p => p.Key + "=" + p.Value))}"));
-    Assert(msgs.TryGetValue("warning|\"<Q>\" is an Membership-Only Map.", out var memberMsg) && memberMsg.Count == 2 && memberMsg.PrecededBy.GetValueOrDefault("cmd:tfer") == 2,
+    Assert(msgs.TryGetValue("warning|\"<Q>\" is an Membership-Only Map.", out var memberMsg) && memberMsg.Count == 2 && memberMsg.PrecededBy.GetValueOrDefault("cmd:tfer") == 2
+        && memberMsg.TargetMaps.GetValueOrDefault("lair") == 2,
         $"The member-map warning must be stored once with count 2 after cmd:tfer: {MsgDump()}");
     Assert(msgs.TryGetValue("json:buyItem|Item is not buyable. Item Inventory full. Re-login to syncronize your real bag slot amount.", out var buyMsg) && buyMsg.PrecededBy.ContainsKey("buyItem"),
         $"A JSON strMessage must be stored with its command and the preceding client command: {MsgDump()}");

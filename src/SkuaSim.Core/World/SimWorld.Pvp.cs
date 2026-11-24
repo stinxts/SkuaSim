@@ -50,6 +50,7 @@ public sealed partial class SimWorld
         var reward = Math.Min(rule.MaxReward, rule.WinBonus + _pvpPoints);
         var kills = _pvpKills.Count == 0 ? "captain only" : string.Join(", ", _pvpKills.Select(k => $"{k.Value}x {k.Key}"));
         Trace.World($"PvP match won on {MapName} ({kills}; {_pvpPoints} points): {reward}x {rule.RewardItem}.");
+        SendServerString("server", ServerMessageTexts.PvpTeamAVictory);
         // The server adds the reward straight to the inventory ("addItems"), it is not a drop to pick up.
         if (AddToInventory(ResolveItem(rule.RewardItem, rule.RewardItemId), reward, "PvP win"))
             PvpRewardsGiven += reward;

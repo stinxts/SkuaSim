@@ -803,6 +803,19 @@ public sealed partial class SimWorld
                     JumpInternal(cell, pad, raiseEvents);
                 return;
             }
+        }
+
+        if (JoinRefusal(name) is { } refusal)
+        {
+            // The server refuses the join: the character stays where it is and the client gets the warning.
+            if (delay && Rules.JoinDelayMs > 0)
+                _ctx.Clock.Sleep(Rules.JoinDelayMs);
+            SendServerString("warning", refusal);
+            return;
+        }
+
+        lock (Sync)
+        {
             MapLoaded = false;
             Target = null;
         }
@@ -1696,6 +1709,18 @@ public sealed partial class SimWorld
             var drop = DropStack.FirstOrDefault(d => Matches(d, name, id));
             if (drop == null)
                 return false;
+            // The server refuses a drop the character keeps in the bank or already holds a full stack of (the drop
+            // stays in the list).
+            if (Bank.Any(b => b.ID == drop.ID))
+            {
+                SendServerString("warning", ServerMessageTexts.PickupInBank);
+                return false;
+            }
+            if (Inventory.FirstOrDefault(i => i.ID == drop.ID) is { } owned && owned.Quantity >= owned.MaxStack)
+            {
+                SendServerString("warning", ServerMessageTexts.PickupFullStack);
+                return false;
+            }
             if (!AddToInventory(InfoOf(drop), drop.Quantity, "pickup"))
                 return false;
             DropStack.Remove(drop);
@@ -1959,6 +1984,7 @@ public sealed partial class SimWorld
             Trace.World($"Accepted quest {id} ({q.Name}).");
             EnsureQuestTicker();
         }
+        SendAcceptQuestResult(id);
         _ctx.RaiseEvent("QuestAccepted", id);
         return true;
     }
@@ -2176,6 +2202,9 @@ public sealed partial class SimWorld
     public bool Buy(string? name, int? itemId, int shopItemId, int quantity)
     {
         int charItemId;
+        int boughtId;
+        int boughtQty;
+        string? serverRefusal = null;
         lock (Sync)
         {
             var shop = CurrentShop;
@@ -2198,15 +2227,26 @@ public sealed partial class SimWorld
                 Trace.Synthesize($"buy:{shop.ID}:{info.Name.ToLowerInvariant()}", $"Bought '{info.Name}' from shop {shop.ID} without captured shop data (free, no requirements checked).");
                 AddToInventory(info, qty, $"bought from shop {shop.ID}");
                 charItemId = Inventory.FirstOrDefault(i => i.ID == info.ID)?.CharItemID ?? 0;
+                boughtId = info.ID;
+                boughtQty = qty;
             }
             else
             {
                 string? reason = null;
                 var totalCost = (long)item.Cost * qty;
+                var needsNewSlot = !item.Temp && !Inventory.Any(i => i.ID == item.ID);
                 if (item.Upgrade && !IsMember)
                     reason = "member-only item";
                 else if (item.Coins ? Coins < totalCost : Gold < totalCost)
+                {
                     reason = $"not enough {(item.Coins ? "AC" : "gold")} ({totalCost} needed)";
+                    serverRefusal = item.Coins ? ServerMessageTexts.BuyNotEnoughCoins : ServerMessageTexts.BuyNotEnoughGold;
+                }
+                else if (needsNewSlot && Inventory.Count >= _ctx.Scenario.Player.InventorySlots)
+                {
+                    reason = $"inventory full ({Inventory.Count}/{_ctx.Scenario.Player.InventorySlots})";
+                    serverRefusal = ServerMessageTexts.BuyInventoryFull;
+                }
                 else
                 {
                     var missing = item.Requirements?.FirstOrDefault(r => Quantity(r.Temp ? TempInventory : Inventory, r.Name, r.ID) < Math.Max(1, r.Quantity) * qty);
@@ -2217,8 +2257,12 @@ public sealed partial class SimWorld
                 if (reason != null)
                 {
                     Trace.World($"Buy '{item.Name}' failed: {reason}.");
+                    if (serverRefusal != null)
+                        SendBuyResult(item.ID, qty, 0, serverRefusal);
                     return false;
                 }
+                boughtId = item.ID;
+                boughtQty = qty;
 
                 foreach (var req in item.Requirements ?? new List<ItemBase>())
                     RemoveItem(req.Name, req.ID, Math.Max(1, req.Quantity) * qty, req.Temp, $"merge for {item.Name}");
@@ -2233,6 +2277,7 @@ public sealed partial class SimWorld
                 charItemId = Inventory.FirstOrDefault(i => i.ID == item.ID)?.CharItemID ?? 0;
             }
         }
+        SendBuyResult(boughtId, boughtQty, charItemId, failure: null);
         _ctx.RaiseEvent("ItemBought", charItemId);
         return true;
     }

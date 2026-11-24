@@ -415,6 +415,7 @@ public sealed class SimulationRunner
             SynthesizedMaps = ctx.World.SynthesizedMapsVisited.OrderBy(m => m).ToList(),
             KillsByMonster = new Dictionary<string, int>(ctx.World.KillsByMonster),
             DropsByItem = new Dictionary<string, int>(ctx.World.DropsByItem),
+            ServerMessages = new Dictionary<string, int>(ctx.World.ServerMessagesSent),
             QuestTurnIns = new Dictionary<int, int>(ctx.World.QuestTurnIns),
             InitialState = initialSnapshot,
             FinalState = ctx.World.Snapshot(),

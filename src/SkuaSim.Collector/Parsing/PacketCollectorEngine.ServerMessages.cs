@@ -26,6 +26,7 @@ public sealed partial class PacketCollectorEngine
 
     // RAM only, never persisted: the last client command and the names of players seen in rooms (used to mask names).
     private string _lastClientCommand = string.Empty;
+    private string _lastJoinTargetMap = string.Empty;
     private DateTime _lastClientCommandUtc = DateTime.MinValue;
     private readonly HashSet<string> _knownPlayerNames = new(StringComparer.OrdinalIgnoreCase);
 
@@ -38,6 +39,10 @@ public sealed partial class PacketCollectorEngine
         var cmd = parts[2];
         if (string.Equals(cmd, "cmd", StringComparison.Ordinal) && parts.Length >= 5 && IsCommandWord(parts[4]))
             cmd = "cmd:" + parts[4];
+        // Join request: %xt%zm%cmd%room%tfer%<own name>%<map-room>%<cell>%<pad>% — only the map name is kept.
+        _lastJoinTargetMap = string.Equals(cmd, "cmd:tfer", StringComparison.OrdinalIgnoreCase) && parts.Length >= 7
+            ? GameDatabase.NormalizeMapName(parts[6]) ?? string.Empty
+            : string.Empty;
         _lastClientCommand = cmd;
         _lastClientCommandUtc = DateTime.UtcNow;
     }
@@ -107,6 +112,8 @@ public sealed partial class PacketCollectorEngine
         CapturedServerMessage.AddCount(msg.PrecededBy, preceding);
         if (!string.IsNullOrEmpty(_currentMapName))
             CapturedServerMessage.AddCount(msg.Maps, _currentMapName);
+        if (preceding == "cmd:tfer" && _lastJoinTargetMap.Length > 0)
+            CapturedServerMessage.AddCount(msg.TargetMaps, _lastJoinTargetMap);
         SessionServerMessagesCaptured++;
     }
 

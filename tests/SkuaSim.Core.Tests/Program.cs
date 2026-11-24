@@ -52,6 +52,7 @@ internal static class CoreTests
             TestQuestPetsAndUnlockItems(runner, tempDir);
             TestClassProfilesAndSharedData(tempDir);
             TestPvpMatchMtcidAndTrophies(runner, tempDir);
+            TestServerWarnings(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -1224,6 +1225,116 @@ internal static class CoreTests
         Assert(Logs(noAds).Contains("coins=1234") && Logs(noAds).Contains("afterSell=2"),
             $"Flash intCoins must return the ACs and the sellItem packet must sell: {Logs(noAds)}");
         Console.WriteLine($"   OK: no ads 3 trophies, with 2 Restorers 5 trophies, mtcid moves, unknown number warns, intCoins + sellItem packet");
+    }
+
+    /// <summary>
+    /// Server warnings (texts from the collector's ServerMessages, 2026-11-24): refused joins (member-only from the
+    /// scenario and from collected TargetMaps, seasonal "not available"), refused purchases (gold, AC, full bag) and
+    /// refused pickups (item in the bank, full stack) reach the script through ExtensionPacketReceived with the real
+    /// packet shapes, the refused action does not happen, and the report lists the messages.
+    /// </summary>
+    private static void TestServerWarnings(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("20. Testing server warnings (refused joins / purchases / pickups -> ExtensionPacketReceived)...");
+        var gameDataPath = Path.Combine(tempDir, "gamedata_warnings_test.json");
+        File.WriteAllText(gameDataPath, """
+        {
+          "SchemaVersion": 3,
+          "Maps": { "zzgemmap": { "Name": "zzgemmap", "Cells": { "Enter": ["Spawn"] },
+            "Monsters": { "1": { "MapID": 1, "MonsterID": 990401, "Name": "Gem Beast", "Cell": "Enter", "Level": 5, "MaxHP": 300 } } } },
+          "Monsters": { "id:990401": { "Key": "id:990401", "ID": 990401, "Name": "Gem Beast", "Level": 5, "MaxHP": 300, "KillCount": 10,
+            "Drops": {
+              "990501": { "ItemID": 990501, "ItemName": "Banked Token", "DropEvents": 10, "TrackedDropEvents": 10, "EligibleKills": 10, "RateBasis": "all_kills" },
+              "990502": { "ItemID": 990502, "ItemName": "Full Gem", "DropEvents": 10, "TrackedDropEvents": 10, "EligibleKills": 10, "RateBasis": "all_kills" } } } },
+          "Shops": { "9101": { "ID": 9101, "Name": "Warning Shop", "Items": [
+            { "ShopItemID": 1, "ID": 990601, "Name": "Pricey Sword", "Category": "Sword", "Cost": 5000, "Coins": false },
+            { "ShopItemID": 2, "ID": 990602, "Name": "AC Helm", "Category": "Helm", "Cost": 500, "Coins": true },
+            { "ShopItemID": 3, "ID": 990603, "Name": "Cheap Gem", "Category": "Item", "Cost": 1, "Coins": false, "MaxStack": 10 } ] } },
+          "ServerMessages": { "warning|\"<Q>\" is an Membership-Only Map.": { "Kind": "warning", "Text": "\"<Q>\" is an Membership-Only Map.", "Count": 1,
+            "PrecededBy": { "cmd:tfer": 1 }, "TargetMaps": { "zzmembermap": 1 } } }
+        }
+        """);
+
+        var script = Path.Combine(tempDir, "WarningBot.cs");
+        File.WriteAllText(script, """
+        using System.Collections.Generic;
+        using Skua.Core.Interfaces;
+
+        public class WarningBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                var seen = new List<string>();
+                bot.Events.ExtensionPacketReceived += packet =>
+                {
+                    string type = packet["params"].type;
+                    dynamic data = packet["params"].dataObj;
+                    if (type == "str")
+                        seen.Add((string)data[0] + ":" + (string)data[2]);
+                    else if ((string)data.cmd == "buyItem")
+                        seen.Add("json:buyItem:" + (int)data.bitSuccess + ":" + (string)(data.strMessage ?? ""));
+                };
+
+                bot.Map.Join("lowe");
+                bot.Map.Join("zzmembermap");
+                bot.Map.Join("walpurgisnacht");
+                bot.Log("mapAfterRefusals=" + bot.Map.Name);
+
+                bot.Map.Join("zzgemmap");
+                bot.Kill.Monster("Gem Beast");
+                bot.Sleep(1000);
+                bot.Drops.Pickup("Banked Token");
+                bot.Drops.Pickup("Full Gem");
+                bot.Log("bankedTokenInInventory=" + bot.Inventory.Contains("Banked Token") + " fullGem=" + bot.Inventory.GetQuantity("Full Gem"));
+
+                bot.Shops.Load(9101);
+                bot.Sleep(1000);
+                bot.Shops.BuyItem("Pricey Sword");
+                bot.Shops.BuyItem("AC Helm");
+                bot.Shops.BuyItem("Cheap Gem");
+                bot.Log("bought=" + bot.Inventory.Contains("Pricey Sword") + bot.Inventory.Contains("AC Helm") + bot.Inventory.Contains("Cheap Gem"));
+                bot.Log("seen=" + string.Join(" || ", seen));
+            }
+        }
+        """);
+
+        var report = runner.Run(new SimulationRunOptions
+        {
+            ScriptPath = script,
+            GameDataPath = gameDataPath,
+            Scenario = new Scenario
+            {
+                Name = "Server warnings",
+                Player = new PlayerSetup { Username = "Tester", Level = 50, Gold = 100, Coins = 0, IsMember = false, InventorySlots = 1,
+                    CompleteEquipment = false, MaxHealth = 10_000, DamagePerSecond = 5_000 },
+                Inventory = new List<ItemSetup> { new() { Name = "Full Gem", Id = 990502, Quantity = 10, MaxStack = 10 } },
+                Bank = new List<ItemSetup> { new() { Name = "Banked Token", Id = 990501, Quantity = 5, MaxStack = 100 } },
+                World = new WorldSetup { MemberOnlyMaps = new List<string> { "lowe" }, UnavailableMaps = new List<string> { "walpurgisnacht" } },
+                Limits = new LimitsSetup { MaxVirtualMinutes = 10 }
+            }
+        });
+
+        var logs = string.Join(" | ", report.ScriptLogs.Select(l => l.Text));
+        Assert(report.Outcome == SimulationOutcome.Completed, $"Run must complete ({report.Outcome}: {report.StopReason}) {logs}");
+        Assert(logs.Contains("mapAfterRefusals=battleon"), $"Refused joins must leave the character where it was: {logs}");
+        foreach (var expected in new[]
+        {
+            "warning:\"lowe\" is an Membership-Only Map.",
+            "warning:\"zzmembermap\" is an Membership-Only Map.",
+            "warning:\"walpurgisnacht\" is not available.",
+            "warning:Item already in your Bank.",
+            "warning:Already have a full stack of that item.",
+            "json:buyItem:0:Item is not buyable. Not enough Gold",
+            "json:buyItem:0:Item is not buyable. Not enough Adventure Coins",
+            "json:buyItem:0:Item is not buyable. Bag Item Inventory full",
+        })
+            Assert(logs.Contains(expected), $"Missing server message '{expected}': {logs}");
+        Assert(logs.Contains("bankedTokenInInventory=False fullGem=10") && logs.Contains("bought=FalseFalseFalse"),
+            $"Refused pickups/purchases must not change the inventory: {logs}");
+        Assert(report.ServerMessages.GetValueOrDefault("Item is not buyable. Not enough Gold") == 1 &&
+               report.ToMarkdown().Contains("## Server Warnings & Messages"),
+            "The report must list the server messages sent");
+        Console.WriteLine($"   OK: {report.ServerMessages.Values.Sum()} server messages (member/seasonal joins, gold/AC/bag purchases, bank/full-stack pickups)");
     }
 
     private static void TestBackgroundTaskDeterminism(SimulationRunner runner, string tempDir)

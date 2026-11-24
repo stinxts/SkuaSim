@@ -162,24 +162,38 @@ public sealed class SimContext
             return results;
 
         Trace.Info($"Event {eventName}({ArgFormatter.FormatArgs(args)}) -> {del.GetInvocationList().Length} handler(s)");
-        foreach (var handler in del.GetInvocationList())
+        EventDispatchDepth++;
+        try
         {
-            try
+            foreach (var handler in del.GetInvocationList())
             {
-                results.Add(handler.DynamicInvoke(args));
+                try
+                {
+                    results.Add(handler.DynamicInvoke(args));
+                }
+                catch (TargetInvocationException tie) when (tie.InnerException is SimulationStopException)
+                {
+                    throw tie.InnerException;
+                }
+                catch (TargetInvocationException tie)
+                {
+                    var inner = tie.InnerException ?? tie;
+                    Trace.Warn($"Event handler for {eventName} threw {inner.GetType().Name}: {inner.Message}");
+                }
             }
-            catch (TargetInvocationException tie) when (tie.InnerException is SimulationStopException)
-            {
-                throw tie.InnerException;
-            }
-            catch (TargetInvocationException tie)
-            {
-                var inner = tie.InnerException ?? tie;
-                Trace.Warn($"Event handler for {eventName} threw {inner.GetType().Name}: {inner.Message}");
-            }
+        }
+        finally
+        {
+            EventDispatchDepth--;
         }
         return results;
     }
+
+    /// <summary>
+    /// &gt; 0 while script event handlers run. Bot.StopAsync from a handler only requests the stop (as in Skua, where
+    /// handlers often wrap their body in try/catch); the script stops at its next API call or wait.
+    /// </summary>
+    public int EventDispatchDepth { get; private set; }
 
     /// <summary>Reads a Bot.Options value (scenario override or simulator default).</summary>
     public T GetBotOption<T>(string name, T fallback)
