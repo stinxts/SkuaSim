@@ -265,7 +265,7 @@ public sealed partial class SimWorld
         }
 
         if (LoggedIn)
-            Join(s.Location.Map, s.Location.Cell, s.Location.Pad, ignoreCheck: true, raiseEvents: false, delay: false);
+            Join(s.Location.Map, s.Location.Cell, s.Location.Pad, ignoreCheck: true, raiseEvents: false, delay: false, scriptAction: false);
     }
 
     // ================================================================ Server resets
@@ -787,7 +787,7 @@ public sealed partial class SimWorld
         return (name, null);
     }
 
-    public void Join(string mapRequest, string? cell, string? pad, bool ignoreCheck, bool raiseEvents = true, bool delay = true)
+    public void Join(string mapRequest, string? cell, string? pad, bool ignoreCheck, bool raiseEvents = true, bool delay = true, bool scriptAction = true)
     {
         var (name, room) = ParseMapRequest(mapRequest);
         if (string.IsNullOrEmpty(name))
@@ -805,7 +805,15 @@ public sealed partial class SimWorld
             }
         }
 
-        if (JoinRefusal(name) is { } refusal)
+        // Faults and server refusals apply to the script's joins, not to the start position or the relogin join.
+        if (scriptAction && FaultRefuses("join", name))
+        {
+            if (delay && Rules.JoinDelayMs > 0)
+                _ctx.Clock.Sleep(Rules.JoinDelayMs);
+            return;
+        }
+
+        if (scriptAction && JoinRefusal(name) is { } refusal)
         {
             // The server refuses the join: the character stays where it is and the client gets the warning.
             if (delay && Rules.JoinDelayMs > 0)
@@ -1373,7 +1381,12 @@ public sealed partial class SimWorld
 
         _ctx.RaiseEvent("MonsterKilled", monster.MapID);
         OnPvpMonsterDeathLocked(monster);
-        RollDrops(monster);
+        if (NextFault("kill", monster.Name) is { } killFault)
+            ApplyRefusingFault(killFault);
+        if (InDropDrought())
+            Trace.World($"Drop drought: {monster.Name} dropped nothing ({_dropDroughtKillsLeft} kill(s) left).");
+        else
+            RollDrops(monster);
     }
 
     private void OnPlayerDeath(SimMonster killer)
@@ -1709,6 +1722,8 @@ public sealed partial class SimWorld
             var drop = DropStack.FirstOrDefault(d => Matches(d, name, id));
             if (drop == null)
                 return false;
+            if (FaultRefuses("pickup", drop.Name))
+                return false;
             // The server refuses a drop the character keeps in the bank or already holds a full stack of (the drop
             // stays in the list).
             if (Bank.Any(b => b.ID == drop.ID))
@@ -1941,6 +1956,9 @@ public sealed partial class SimWorld
             if (ActiveQuests.Contains(id))
                 return true;
 
+            if (FaultRefuses("accept", id.ToString()))
+                return false;
+
             string? reason = null;
             if (!LoggedIn)
                 reason = "not logged in";
@@ -2041,6 +2059,10 @@ public sealed partial class SimWorld
                 return false;
             }
 
+            // Injected fault: the server refuses a turn-in that would have succeeded (items are kept).
+            if (FaultRefuses("turnIn", id.ToString(), () => SendQuestDesync(id)))
+                return false;
+
             foreach (var req in q.Requirements)
                 RemoveItem(req.Name, req.ID, Math.Max(1, req.Quantity), req.Temp, $"quest {id} turn-in");
 
@@ -2128,6 +2150,8 @@ public sealed partial class SimWorld
 
     public ShopInfo LoadShop(int shopId)
     {
+        if (FaultRefuses("loadShop", shopId.ToString()))
+            return CurrentShop ?? new ShopInfo(shopId, "", new List<ShopItem>());
         lock (Sync)
         {
             var cached = ShopCache.FirstOrDefault(s => s.ID == shopId);
@@ -2205,6 +2229,10 @@ public sealed partial class SimWorld
         int boughtId;
         int boughtQty;
         string? serverRefusal = null;
+        var faultShopItem = CurrentShop?.Items.FirstOrDefault(i => shopItemId > 0 ? i.ShopItemID == shopItemId : Matches(i, name, itemId));
+        if (FaultRefuses("buy", faultShopItem?.Name ?? name ?? itemId?.ToString(),
+                () => SendBuyResult(faultShopItem?.ID ?? itemId ?? 0, Math.Max(1, quantity), 0, BuyDesyncText)))
+            return false;
         lock (Sync)
         {
             var shop = CurrentShop;
@@ -2357,6 +2385,8 @@ public sealed partial class SimWorld
     {
         InventoryItem? item;
         int sold;
+        if (FaultRefuses("sell", name ?? Inventory.FirstOrDefault(i => i.ID == id)?.Name ?? id?.ToString()))
+            return false;
         lock (Sync)
         {
             item = Inventory.FirstOrDefault(i => Matches(i, name, id));
@@ -2396,7 +2426,7 @@ public sealed partial class SimWorld
             Relogins++;
             Trace.World("Logged back in.");
         }
-        Join("battleon", "Enter", "Spawn", ignoreCheck: true, raiseEvents: true, delay: false);
+        Join("battleon", "Enter", "Spawn", ignoreCheck: true, raiseEvents: true, delay: false, scriptAction: false);
         return true;
     }
 

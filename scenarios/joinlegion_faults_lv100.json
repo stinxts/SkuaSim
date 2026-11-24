@@ -1,0 +1,23 @@
+{
+  "Name": "Join the Legion with server faults (level 100)",
+  "Description": "Fault-injection example for Legion/JoinLegion.cs: the Undead Warrior purchase hits AE's inventory de-sync (CoreBots relogs and buys again) and the first join to greenguardwest disconnects (AutoRelogin). Answers Yes to the AC purchase and sell-back prompts.",
+  "Player": {
+    "Username": "SimLegion",
+    "Level": 100,
+    "Gold": 1000000,
+    "Coins": 2000,
+    "IsMember": true,
+    "Class": "Void Highlord",
+    "ClassRank": 10
+  },
+  "Location": { "Map": "battleon", "Cell": "Enter", "Pad": "Spawn" },
+  "Inventory": [
+    { "Name": "Void Highlord", "Category": "Class", "Equipped": true, "EnhancementPatternID": 9, "EnhancementLevel": 100 }
+  ],
+  "World": { "MessageBoxAnswer": "yes" },
+  "Faults": [
+    { "Kind": "buyDesync", "Target": "Undead Warrior" },
+    { "Kind": "disconnect", "Action": "join", "Target": "greenguardwest" }
+  ],
+  "Limits": { "MaxVirtualMinutes": 300, "MaxNoProgressMinutes": 30 }
+}

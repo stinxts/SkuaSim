@@ -45,6 +45,8 @@ public sealed class SimulationReport
     public Dictionary<string, int> DropsByItem { get; init; } = new();
     /// <summary>Server warnings/messages sent to the script (real texts): text → count.</summary>
     public Dictionary<string, int> ServerMessages { get; init; } = new();
+    /// <summary>Scenario faults that fired, in order ("[time] kind on action #n (target)").</summary>
+    public List<string> InjectedFaults { get; init; } = new();
     public Dictionary<int, int> QuestTurnIns { get; init; } = new();
     public WorldSnapshot InitialState { get; init; } = new();
     public WorldSnapshot FinalState { get; init; } = new();
@@ -177,6 +179,14 @@ public sealed class SimulationReport
             sb.AppendLine("## Monster Kills");
             foreach (var (mon, count) in KillsByMonster.OrderByDescending(kv => kv.Value))
                 sb.AppendLine($"- `{mon}`: {count:N0}");
+            sb.AppendLine();
+        }
+
+        if (InjectedFaults.Count > 0)
+        {
+            sb.AppendLine("## Injected Faults");
+            foreach (var line in InjectedFaults)
+                sb.AppendLine($"- {line}");
             sb.AppendLine();
         }
 

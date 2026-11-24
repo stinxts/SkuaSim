@@ -53,6 +53,7 @@ internal static class CoreTests
             TestClassProfilesAndSharedData(tempDir);
             TestPvpMatchMtcidAndTrophies(runner, tempDir);
             TestServerWarnings(runner, tempDir);
+            TestInjectedFaults(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -1335,6 +1336,125 @@ internal static class CoreTests
                report.ToMarkdown().Contains("## Server Warnings & Messages"),
             "The report must list the server messages sent");
         Console.WriteLine($"   OK: {report.ServerMessages.Values.Sum()} server messages (member/seasonal joins, gold/AC/bag purchases, bank/full-stack pickups)");
+    }
+
+    /// <summary>
+    /// Scenario fault injection: each kind fires on the configured occurrence, refuses the action (or swallows drops),
+    /// sends its message, and the same scenario gives the same faults on a second run.
+    /// </summary>
+    private static void TestInjectedFaults(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("21. Testing scenario fault injection (joinFail, dropDrought, tooSoonAfterCombat, buyDesync, slowDown, disconnect)...");
+        var gameDataPath = Path.Combine(tempDir, "gamedata_faults_test.json");
+        File.WriteAllText(gameDataPath, """
+        {
+          "SchemaVersion": 3,
+          "Maps": { "zzgemmap": { "Name": "zzgemmap", "Cells": { "Enter": ["Spawn"] },
+            "Monsters": { "1": { "MapID": 1, "MonsterID": 990701, "Name": "Shard Beast", "Cell": "Enter", "Level": 5, "MaxHP": 300 } } } },
+          "Monsters": { "id:990701": { "Key": "id:990701", "ID": 990701, "Name": "Shard Beast", "Level": 5, "MaxHP": 300, "KillCount": 10,
+            "Drops": { "990801": { "ItemID": 990801, "ItemName": "Gem Shard", "Temp": true, "DropEvents": 10, "TrackedDropEvents": 10, "EligibleKills": 10, "RateBasis": "all_kills" } } } },
+          "Shops": { "9201": { "ID": 9201, "Name": "Fault Shop", "Items": [
+            { "ShopItemID": 1, "ID": 990901, "Name": "Cheap Gem", "Category": "Item", "Cost": 1, "Coins": false, "MaxStack": 10 } ] } }
+        }
+        """);
+
+        var script = Path.Combine(tempDir, "FaultBot.cs");
+        File.WriteAllText(script, """
+        using System.Collections.Generic;
+        using Skua.Core.Interfaces;
+
+        public class FaultBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                var seen = new List<string>();
+                bot.Events.ExtensionPacketReceived += packet =>
+                {
+                    string type = packet["params"].type;
+                    dynamic data = packet["params"].dataObj;
+                    if (type == "str")
+                        seen.Add((string)data[2]);
+                    else if (data.strMessage != null)
+                        seen.Add((string)data.strMessage);
+                };
+
+                bot.Map.Join("zzgemmap");
+                bot.Log("join1=" + bot.Map.Name);
+                bot.Map.Join("zzgemmap");
+                bot.Log("join2=" + bot.Map.Name);
+
+                for (var i = 0; i < 3; i++)
+                {
+                    bot.Kill.Monster("Shard Beast");
+                    bot.Sleep(6000);
+                }
+                bot.Log("shards=" + bot.TempInv.GetQuantity("Gem Shard"));
+
+                bot.Shops.Load(9201);
+                bot.Shops.BuyItem("Cheap Gem");
+                bot.Log("afterRefusedLoad=" + bot.Inventory.GetQuantity("Cheap Gem"));
+                bot.Shops.Load(9201);
+                bot.Shops.BuyItem("Cheap Gem");
+                bot.Log("afterDesync=" + bot.Inventory.GetQuantity("Cheap Gem"));
+                bot.Shops.BuyItem("Cheap Gem");
+                bot.Log("afterBuy=" + bot.Inventory.GetQuantity("Cheap Gem"));
+
+                bot.Shops.SellItem("Cheap Gem");
+                bot.Log("afterSlowSell=" + bot.Inventory.GetQuantity("Cheap Gem"));
+                bot.Shops.SellItem("Cheap Gem");
+                bot.Log("afterSell=" + bot.Inventory.GetQuantity("Cheap Gem"));
+
+                bot.Map.Join("battleon");
+                bot.Log("loggedInRightAfter=" + bot.Player.LoggedIn);
+                bot.Sleep(10_000);
+                bot.Log("loggedInLater=" + bot.Player.LoggedIn + " map=" + bot.Map.Name);
+                bot.Log("seen=" + string.Join(" || ", seen));
+            }
+        }
+        """);
+
+        SimulationReport Run() => runner.Run(new SimulationRunOptions
+        {
+            ScriptPath = script,
+            GameDataPath = gameDataPath,
+            Scenario = new Scenario
+            {
+                Name = "Faults",
+                Player = new PlayerSetup { Username = "Tester", Level = 50, Gold = 1000, CompleteEquipment = false, MaxHealth = 10_000, DamagePerSecond = 5_000 },
+                BotOptions = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["AutoRelogin"] = System.Text.Json.JsonDocument.Parse("true").RootElement
+                },
+                Faults = new List<FaultSetup>
+                {
+                    new() { Kind = "joinFail", Nth = new List<int> { 1 } },
+                    new() { Kind = "dropDrought", Nth = new List<int> { 1 }, Kills = 2 },
+                    new() { Kind = "tooSoonAfterCombat", Action = "loadShop" },
+                    new() { Kind = "buyDesync", Target = "Cheap Gem", Nth = new List<int> { 2 } }, // #1 = the buy without a loaded shop
+                    new() { Kind = "slowDown", Action = "sell" },
+                    new() { Kind = "disconnect", Action = "join", Nth = new List<int> { 3 } },
+                    new() { Kind = "noSuchFault" },
+                },
+                Limits = new LimitsSetup { MaxVirtualMinutes = 10 }
+            }
+        });
+
+        var report = Run();
+        var logs = string.Join(" | ", report.ScriptLogs.Select(l => l.Text));
+        Assert(report.Outcome == SimulationOutcome.Completed, $"Run must complete ({report.Outcome}: {report.StopReason}) {logs}");
+        foreach (var expected in new[]
+        {
+            "join1=battleon", "join2=zzgemmap", "shards=1", "afterRefusedLoad=0", "afterDesync=0", "afterBuy=1",
+            "afterSlowSell=1", "afterSell=0", "loggedInRightAfter=False", "loggedInLater=True map=battleon",
+            "You cannot do that too soon after combat.", "Item is not buyable. Item Inventory full. Re-login to syncronize your real bag slot amount.",
+            "Please slow down. Last action was too soon!",
+        })
+            Assert(logs.Contains(expected), $"Missing '{expected}': {logs}");
+        Assert(report.InjectedFaults.Count == 6 && report.Warnings.Any(w => w.Text.Contains("noSuchFault")),
+            $"6 faults must fire and the unknown kind must be reported: {string.Join(" / ", report.InjectedFaults)}");
+        var again = Run();
+        Assert(again.InjectedFaults.SequenceEqual(report.InjectedFaults), "The same scenario must inject the same faults at the same times");
+        Console.WriteLine($"   OK: {report.InjectedFaults.Count} faults fired, script effects as expected, identical on a second run");
     }
 
     private static void TestBackgroundTaskDeterminism(SimulationRunner runner, string tempDir)

@@ -65,6 +65,12 @@ public sealed class Scenario
     public WorldSetup World { get; set; } = new();
     public LimitsSetup Limits { get; set; } = new();
 
+    /// <summary>
+    /// Server faults injected on purpose (deterministic: by occurrence of an action and/or virtual time), to test how a
+    /// script recovers, e.g. CoreBots relogging after an inventory de-sync while buying.
+    /// </summary>
+    public List<FaultSetup> Faults { get; set; } = new();
+
     [JsonIgnore]
     public string? SourcePath { get; set; }
 
@@ -188,6 +194,44 @@ public sealed class MonsterSetup
     public int? Level { get; set; }
     /// <summary>Item name -> drop chance (0..1).</summary>
     public Dictionary<string, double> Drops { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
+/// <summary>
+/// One injected server fault. <see cref="Kind"/>: <c>buyDesync</c> (purchase refused with AE's inventory de-sync
+/// message, CoreBots relogs), <c>questDesync</c> (turn-in refused with "Quest Complete Failed: Missing Required Item"),
+/// <c>slowDown</c> ("Please slow down. Last action was too soon!"), <c>tooSoonAfterCombat</c> ("You cannot do that too
+/// soon after combat."), <c>disconnect</c> (logged out before the action; relogs when AutoRelogin is on),
+/// <c>joinFail</c> (a join that silently does nothing), <c>dropDrought</c> (the next <see cref="Kills"/> kills drop
+/// nothing). The refused action does not happen.
+/// </summary>
+public sealed class FaultSetup
+{
+    public string Kind { get; set; } = "";
+
+    /// <summary>
+    /// Action that triggers it: <c>buy</c>, <c>sell</c>, <c>turnIn</c>, <c>accept</c>, <c>join</c>, <c>pickup</c>,
+    /// <c>loadShop</c>, <c>kill</c> or <c>any</c>. Default per kind (buyDesync → buy, questDesync → turnIn, joinFail → join,
+    /// dropDrought → kill, tooSoonAfterCombat → loadShop, slowDown → accept, disconnect → any).
+    /// </summary>
+    public string? Action { get; set; }
+
+    /// <summary>Only actions on this item / map / monster name or quest ID (case-insensitive). Null = any.</summary>
+    public string? Target { get; set; }
+
+    /// <summary>Fire on these occurrences of the action (1-based, counted per fault after <see cref="AfterMinutes"/>).</summary>
+    public List<int> Nth { get; set; } = new();
+
+    /// <summary>Fire on every Nth occurrence.</summary>
+    public int? Every { get; set; }
+
+    /// <summary>Only count actions from this virtual minute on.</summary>
+    public double? AfterMinutes { get; set; }
+
+    /// <summary>Maximum times it fires (default: unlimited with <see cref="Every"/>, else the number of <see cref="Nth"/> entries, or 1).</summary>
+    public int? Times { get; set; }
+
+    /// <summary>dropDrought: kills without drops (default 10).</summary>
+    public int? Kills { get; set; }
 }
 
 public sealed class WorldSetup

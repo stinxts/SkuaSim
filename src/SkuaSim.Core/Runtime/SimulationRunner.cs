@@ -416,6 +416,7 @@ public sealed class SimulationRunner
             KillsByMonster = new Dictionary<string, int>(ctx.World.KillsByMonster),
             DropsByItem = new Dictionary<string, int>(ctx.World.DropsByItem),
             ServerMessages = new Dictionary<string, int>(ctx.World.ServerMessagesSent),
+            InjectedFaults = new List<string>(ctx.World.InjectedFaults),
             QuestTurnIns = new Dictionary<int, int>(ctx.World.QuestTurnIns),
             InitialState = initialSnapshot,
             FinalState = ctx.World.Snapshot(),
