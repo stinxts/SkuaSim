@@ -27,7 +27,7 @@ An **offline, reproducible test environment** for **any Skua/VibeSkua script**, 
 3.5. **Collector Corrections & Schema v2/v3**: protocol verification sampling, monster level/race/wDPS fix, drop attribution fix, schema v2 (migration + backup, quest-gated rates, passive official drops, map-item quests, reward types), schema v3 (real XP/gold/rep per kill, respawn times, quest-set kill counting, room occupancy, quest base rewards, faction names) (**🔄 Steps 1–4 done; Step 5 next**)
 3.6. **Simulator Consumes Real Data + AE Calendar**: measured respawn/XP/gold/rep, reputation ranks, house-item accept requirements, quest-gated map items, wDPS damage estimate, scenario `startDate`, daily/weekly/monthly resets (00:00 US Eastern), AE calendar server boosts (`calendar-update`) (**✅ Done 2026-11-21**)
 4. **Multi-Client (Army), Live Loadouts, Potions & Aura/Boss Combat**: up to 20 concurrent clients sharing rooms/monsters/party, Army sync coordination, `Solo`/`Farm`/`Dodge`/`Boss` role classes + live class/enhancement swaps, Potions/Elixirs/Tonics/Scrolls (`UltrasLW`), and active aura/buff & Ultra boss simulation (**🔜 After 3.5; architecture to be discussed first**)
-5. **Fault Injection, Assertions & Templates**: lag/disconnect/drop failure injection, stall/infinite-loop detector, scenario assertions, diagnostic generator & bug report template (**🔄 In progress — faults and asserts + `skuasim test` done 2026-11-24**)
+5. **Fault Injection, Assertions & Templates**: lag/disconnect/drop failure injection, stall/infinite-loop detector, scenario assertions, diagnostic generator & bug report template (**🔄 In progress — faults and asserts + `skuasim test` + frozen data snapshots done 2026-11-24**)
 6. **Replay & Public Release**: real session log replay + external developer distribution packaging (CLI flags, official Skua parity, starter DB, license, release archive) (**🔜 Planned**)
 
 Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** ✅ → **Visual UI (`SkuaSim.UI`) & Polish** ✅ → **Simulator Robustness (3.4)** ✅ → **Collector Corrections & Schema v2/v3 (3.5)** 🔄 → **Simulator Real Data & AE Calendar (3.6)** ✅ → **Multi-Client (Army) & Aura/Boss Combat** 🔜 → **Fault Injection & Assertions** → **Replay & Release Packaging**.
@@ -63,6 +63,7 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
   - Automatic mirror in workspace: `data\gamedata.json` (+ `data\packet_schemas.json`)
   - Schema v2 since 2026-11-20 (migrated from v1: 52 impossible drop records removed, 369 temporary quest-required drops marked quest-gated). Backups: `SkuaSim\gamedata.v1-backup-20261120-203127.json` and `SkuaSim\backups\gamedata.pre-v2-manual-20261120-173107.json`. Schema v3 since 2026-11-21 (v2 backup `gamedata.v2-backup-20261121-010501.json`, nothing deleted). Schema v4 (collector 1.4.0, deployed 2026-11-24): credited kills; the v3 counters stay as frozen legacy data — all clients writing the same file must be updated together, since a 1.3.x collector rewriting a v4 file silently drops the v4 fields (1.4.0+ refuses to write a newer schema).
   - AE calendar snapshot: `data\ae_calendar.json` (from `skuasim calendar-update`; public artix.com data, read offline by the simulator).
+  - AQW server list: `data\servers.json` (from `skuasim servers-update`; public game.aq.com data, read offline by `Bot.Servers`).
 
 ### Stage 2 — Simulator Core & CLI (`SkuaSim.Core` + `SkuaSim.Cli`) ✅ Completed & Verified
 - **Source Code:**
@@ -74,7 +75,7 @@ Execution order: **Collector (Plugin)** ✅ → **Simulator MVP & Data World** �
   - `src/SkuaSim.Core/World/`: `SimWorld.cs`, `SimWorld.StatsAndCombat.cs`, `StatEngine.cs`
   - `src/SkuaSim.Core/Api/`: `BotApi.cs`, `PlayerMapApis.cs`, `CombatKillHuntApis.cs`, `InventoryBankDropsApis.cs`, `QuestsShopsWaitApis.cs`, `SystemSupportApis.cs` (including `BoostsApi` and `ConfigApi`)
   - `src/SkuaSim.Cli/`: `Program.cs` (`skuasim db-stats`, `skuasim compile`, `skuasim run`)
-- **Automated Tests:** `tests/SkuaSim.Core.Tests/` (**21/21 passing**; includes the PvP match test (19), the server warnings test (20), fault injection (21), the cross-process determinism test, the Stalled detector, schema v2 drop rules and real-data/calendar consumption)
+- **Automated Tests:** `tests/SkuaSim.Core.Tests/` (**24/24 passing**; includes the server list (24), the PvP match test (19), the server warnings test (20), fault injection (21), scenario asserts (22), frozen data snapshots (23), the cross-process determinism test, the Stalled detector, schema v2 drop rules and real-data/calendar consumption)
 - **Sample Scenarios:** `scenarios/farmerjoe_lv1_mage.json`, `scenarios/leveling_lv10.json`, `scenarios/eldersblood_done.json`, `scenarios/swagtokena_example.json`, `scenarios/VHL_farm_max lvl.json`, `scenarios/UnlockForgeEnhancements_scenario.json` (all defaulted to `maxRealSeconds: 0` = infinite).
 
 ### Stage 3 — Visual Desktop Dashboard (`SkuaSim.UI`) & Documentation ✅ Completed & Verified

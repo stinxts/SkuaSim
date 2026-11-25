@@ -21,6 +21,13 @@ public sealed class SimulationRunOptions
     public string? QuestDataPath { get; init; }
     /// <summary>Local AE calendar snapshot (default: next to gamedata.json). Only read when the scenario opts in.</summary>
     public string? CalendarPath { get; init; }
+    /// <summary>Local AQW server list (default: servers.json next to gamedata.json). A scenario "servers" list wins.</summary>
+    public string? ServersPath { get; init; }
+    /// <summary>
+    /// Frozen data snapshot (name under data\snapshots\ or folder path); overrides the scenario's <c>dataSnapshot</c>
+    /// and every data path above.
+    /// </summary>
+    public string? DataSnapshot { get; init; }
     public string? TraceOutputPath { get; init; }
     public IReadOnlyList<string> IncludeRoots { get; init; } = Array.Empty<string>();
 }
@@ -214,14 +221,45 @@ public sealed class SimulationRunner
             };
         }
 
+        // A frozen data snapshot (CLI --data, else the scenario's "dataSnapshot") replaces the live data files. A missing
+        // snapshot fails the run: falling back to live data would silently give drifting results.
+        DataSnapshot? snapshot = null;
+        var snapshotRef = options.DataSnapshot ?? scenario.DataSnapshot;
+        if (!string.IsNullOrWhiteSpace(snapshotRef))
+        {
+            var liveGameData = FindDefaultGameDataPath();
+            var snapshotDir = DataSnapshot.ResolveDirectory(snapshotRef,
+                liveGameData != null ? DataSnapshot.FolderFor(liveGameData) : Path.Combine(Directory.GetCurrentDirectory(), "data", DataSnapshot.FolderName));
+            if (snapshotDir == null)
+            {
+                return new SimulationReport
+                {
+                    ScriptPath = scriptFullPath,
+                    ScenarioName = scenario.Name,
+                    Seed = seed,
+                    Outcome = SimulationOutcome.ScriptException,
+                    StopReason = $"data snapshot '{snapshotRef}' not found",
+                    ExceptionText = $"Data snapshot '{snapshotRef}' not found (looked in data\\{DataSnapshot.FolderName}\\ and as a folder path). " +
+                                    "Create it with 'skuasim snapshot create <name>' or remove \"dataSnapshot\" to use live data.",
+                    CompileDuration = compileResult.Elapsed,
+                    RealDuration = session.CurrentActiveRealDuration(null),
+                    DataInfo = $"snapshot {snapshotRef} (not found)"
+                };
+            }
+            snapshot = DataSnapshot.Load(snapshotDir);
+        }
+
         // Load compiled assemblies into an isolated per-run AssemblyLoadContext so static singletons
         // (such as CoreBots.Instance) start completely fresh on every simulation run.
         var loadContext = new SimScriptLoadContext();
         var mainAssembly = LoadUnitsIntoContext(compileResult.Units, compileResult.Main, loadContext);
 
-        var gameDataPath = options.GameDataPath ?? FindDefaultGameDataPath();
-        var questDataPath = options.QuestDataPath ?? _installation.QuestDataFile;
-        var catalog = GameDataCatalog.Load(gameDataPath, questDataPath);
+        var gameDataPath = snapshot?.GameDataPath ?? options.GameDataPath ?? FindDefaultGameDataPath();
+        var questDataPath = snapshot?.QuestDataPath ?? options.QuestDataPath ?? _installation.QuestDataFile;
+        var catalog = GameDataCatalog.Load(gameDataPath, questDataPath, includeContributions: snapshot == null);
+        var dataInfo = snapshot != null
+            ? $"snapshot {snapshot.Describe()}"
+            : $"live {catalog.CapturedPath ?? "(no gamedata.json)"}" + (catalog.Contributions.Count(c => c.Status == "merged") is var n and > 0 ? $" + {n} shared file(s)" : "");
 
         // The only wall-clock read that can shape a run: the opt-in "start at the PC's current time". It happens once,
         // before the run, and the resolved start is reported so the run stays reproducible with an explicit startDate.
@@ -235,6 +273,10 @@ public sealed class SimulationRunner
         using var trace = new SimulationTrace(options.TraceOutputPath, () => clock.NowMs, ms => clock.Format(ms));
         SimServiceProvider.Attach(trace);
         trace.Info($"Seed {seed}.");
+        trace.Info($"Game data: {dataInfo}.");
+        if (snapshot != null)
+            foreach (var problem in snapshot.Verify())
+                trace.Warn($"Data snapshot {snapshot.Name}: {problem} — results may differ from runs made with the original snapshot.");
         foreach (var c in catalog.Contributions)
             trace.Info($"Shared data {c.FileName}: {c.Status}" + (c.Status == "merged" ? $" ({c.Kills:N0} kills, {c.Maps:N0} maps, exported {c.ExportedUtc:yyyy-MM-dd})." : "."));
 
@@ -244,11 +286,31 @@ public sealed class SimulationRunner
         };
         if (scenario.Boosts.AeCalendarServerBoosts)
         {
-            var calendarPath = options.CalendarPath ?? FindDefaultCalendarPath();
+            var calendarPath = snapshot?.CalendarPath ?? options.CalendarPath ?? FindDefaultCalendarPath();
             ctx.Calendar = AeCalendar.TryLoad(calendarPath);
             ctx.CalendarPath = calendarPath;
             if (ctx.Calendar == null)
                 trace.Warn($"AE calendar server boosts are enabled but no calendar was found at '{calendarPath}'. Run 'skuasim calendar-update' first; no calendar boosts are applied.");
+        }
+
+        // Server list: the scenario's, else the snapshot's copy (never the live file), else data\servers.json.
+        if (scenario.Servers is { Count: > 0 } scenarioServers)
+        {
+            ctx.Servers = scenarioServers;
+            ctx.ServersInfo = $"scenario ({scenarioServers.Count} servers)";
+            ctx.ServersSynthesized = false;
+        }
+        else
+        {
+            var serversPath = snapshot?.ServersPath ?? options.ServersPath ?? FindDefaultServersPath();
+            if (AqwServerList.TryLoad(serversPath) is { } serverList)
+            {
+                ctx.Servers = serverList.Servers;
+                ctx.ServersInfo = $"{serversPath} (fetched {serverList.FetchedUtc:yyyy-MM-dd}, {serverList.Servers.Count} servers, fingerprint {serverList.Fingerprint()})";
+                ctx.ServersSynthesized = false;
+            }
+            else
+                ctx.ServersInfo = $"synthesized (no server list at '{serversPath}'; run 'skuasim servers-update')";
         }
 
         foreach (var hint in compileResult.Units.SelectMany(u => u.MonsterHints))
@@ -436,6 +498,7 @@ public sealed class SimulationRunner
             Warnings = trace.Warnings.ToList(),
             RecentTimeline = trace.RecentTimeline.ToList(),
             TraceFilePath = options.TraceOutputPath,
+            DataInfo = dataInfo,
             StartUtc = clock.Epoch,
             StartFromPcClock = scenario.StartAtCurrentTime,
             ServerResets = ctx.World.ServerResetsApplied,
@@ -444,7 +507,8 @@ public sealed class SimulationRunner
                     ? $"{ctx.CalendarPath} (fetched {cal.FetchedUtc:yyyy-MM-dd}, fingerprint {cal.Fingerprint()})"
                     : $"enabled but not found ({ctx.CalendarPath})"
                 : null,
-            CalendarBoosts = ctx.World.CalendarBoostLog.ToList()
+            CalendarBoosts = ctx.World.CalendarBoostLog.ToList(),
+            ServersInfo = ctx.ServersUsed ? ctx.ServersInfo : null
         };
     }
 
@@ -766,6 +830,10 @@ public sealed class SimulationRunner
         var dir = gameData != null ? Path.GetDirectoryName(gameData)! : Path.Combine(Directory.GetCurrentDirectory(), "data");
         return Path.Combine(dir, AeCalendar.DefaultFileName);
     }
+
+    /// <summary>Where the local AQW server list lives: next to the AE calendar (normally the workspace "data\" folder).</summary>
+    public string FindDefaultServersPath() =>
+        Path.Combine(Path.GetDirectoryName(FindDefaultCalendarPath())!, AqwServerList.DefaultFileName);
 
     private sealed class SimScriptLoadContext : AssemblyLoadContext
     {

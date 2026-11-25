@@ -133,7 +133,7 @@ Runs silently inside Skua or VibeSkua on a non-blocking background `Channel<Acti
   - Export full execution reports as **Markdown (`.md`)** or **JSON (`.json`)**.
 
 ### 4. `SkuaSim.Cli` — Headless Command-Line Runner
-Terminal interface for scripting and automated regression runs: `db-stats`, `compile`, `run`, `test` (scenario regression suite), `calendar-update` (downloads the public AE calendar into `data\ae_calendar.json`; only this command uses the network) and `calendar-show [--date <utc>]`.
+Terminal interface for scripting and automated regression runs: `db-stats`, `compile`, `run`, `test` (scenario regression suite), `calendar-update` (downloads the public AE calendar into `data\ae_calendar.json`), `calendar-show [--date <utc>]`, `servers-update` (downloads AQW's public server list into `data\servers.json`, served by `Bot.Servers`; a login that names an unknown or offline server, or a member-only or full one as a non-member, is refused; a scenario `servers` list replaces the file) and `servers-show`. Only the two `*-update` commands use the network.
 
 | `run` option | Meaning |
 |---|---|
@@ -156,7 +156,9 @@ Terminal interface for scripting and automated regression runs: `db-stats`, `com
 
 `run` takes the script from the scenario's `"script"` field when none is given.
 
-`test [<scenario.json|folder> ...] [--gamedata <path>] [--report-dir <dir>]` is the regression suite: it runs every scenario (default folder `scenarios\`) that has both `"script"` and `"asserts"`, prints PASS/FAIL per scenario and skips the others.
+`test [<scenario.json|folder> ...] [--data <snapshot>] [--gamedata <path>] [--report-dir <dir>]` is the regression suite: it runs every scenario (default folder `scenarios\`) that has both `"script"` and `"asserts"`, prints PASS/FAIL per scenario (and which data it read) and skips the others.
+
+`snapshot create [<name>] [--note <text>]` freezes the data a run reads now — `gamedata.json` with the shared data merged and migrated, Skua's `QuestData.json` and the AE calendar — into `data\snapshots\<name>\` (default name: today's UTC date) with a `snapshot.json` manifest (sources, counts, SHA-256 of each file). A scenario with `"dataSnapshot": "<name>"`, or `run`/`test`/`whatif --data <name|folder>`, reads only those files, so its results stay the same while the collector keeps writing; the report shows `Game Data: snapshot …`, a changed snapshot file is warned about, and a missing snapshot fails the run instead of using live data. Snapshots are never overwritten. `snapshot list` shows them and checks their files.
 
 Exit codes (`run`): `0` completed/stopped, `2` compile error or script exception, `3` stalled. When the scenario has `asserts`, they decide instead (the expected outcome is one of them): `0` all passed, `4` an assert failed; a compile error stays `2`. `test`: `0` all passed, `4` a scenario failed, `1` nothing to run.
 
@@ -250,10 +252,11 @@ dotnet run --project tests\SkuaSim.Core.Tests\SkuaSim.Core.Tests.csproj
 ```
 The tests are console runners that need a local VibeSkua/Skua install; the Core suite takes a few minutes because it compiles real scripts.
 
-Scenario regression suite (real scripts with `asserts`):
+Scenario regression suite (real scripts with `asserts`, pinned to the frozen data snapshot named in each scenario):
 ```powershell
 dotnet run --project src\SkuaSim.Cli -- test scenarios --report-dir data\test_reports
 ```
+The suite scenarios name `"dataSnapshot": "2026-11-24"`; on another machine create a snapshot first (`skuasim snapshot create 2026-11-24`, from that machine's data) or run with `--data <name>`.
 
 ---
 

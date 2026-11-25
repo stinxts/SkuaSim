@@ -31,8 +31,11 @@ internal static class CliEntry
             "test" => RunTestSuite(rest, installation),
             "calendar-update" => RunCalendarUpdate(rest, installation),
             "calendar-show" => RunCalendarShow(rest, installation),
+            "servers-update" => RunServersUpdate(rest, installation),
+            "servers-show" => RunServersShow(rest, installation),
             "whatif" => RunWhatIf(rest, installation),
             "import-data" => RunImportData(rest, installation),
+            "snapshot" => RunSnapshot(rest, installation),
             _ => RunUnknown(cmd, installation)
         };
     }
@@ -62,7 +65,7 @@ internal static class CliEntry
         {
             scenario.Limits.MaxVirtualMinutes = minutes;
             Console.WriteLine($"Running {label}...");
-            return runner.Run(new SimulationRunOptions { ScriptPath = scriptPath, Scenario = scenario, SeedOverride = seed, GameDataPath = gameData });
+            return runner.Run(new SimulationRunOptions { ScriptPath = scriptPath, Scenario = scenario, SeedOverride = seed, GameDataPath = gameData, DataSnapshot = GetOption(args, "--data") });
         }
 
         var baseline = Run(LoadScenario(), "the scenario as it is");
@@ -175,6 +178,55 @@ internal static class CliEntry
                 Console.WriteLine($"  - [{e.Kind}] {e.Title} ({e.StartEastern:yyyy-MM-dd HH:mm} ET, {e.DurationHours:0.#} h, {e.DurationSource})");
         }
         return 0;
+    }
+
+    private static string ServersPathFor(string[] args, SkuaInstallation installation) =>
+        GetOption(args, "--servers") ?? new SimulationRunner(installation).FindDefaultServersPath();
+
+    /// <summary>Downloads AQW's public server list (game.aq.com/game/api/data/servers) into the local file Bot.Servers serves.</summary>
+    private static int RunServersUpdate(string[] args, SkuaInstallation installation)
+    {
+        var path = ServersPathFor(args, installation);
+        Console.WriteLine($"Downloading {AqwServerList.SourceUrl} ...");
+        try
+        {
+            var list = AqwServerList.DownloadAsync().GetAwaiter().GetResult();
+            if (list.Servers.Count == 0)
+            {
+                Console.Error.WriteLine("The server list came back empty (the API format may have changed). The local file was not changed.");
+                return 1;
+            }
+            list.Save(path);
+            PrintServers(list, path);
+            return 0;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException or System.Text.Json.JsonException or InvalidOperationException)
+        {
+            Console.Error.WriteLine($"Server list update failed: {ex.Message}");
+            return 1;
+        }
+    }
+
+    private static int RunServersShow(string[] args, SkuaInstallation installation)
+    {
+        var path = ServersPathFor(args, installation);
+        var list = AqwServerList.TryLoad(path);
+        if (list == null)
+        {
+            Console.Error.WriteLine($"No server list at '{path}'. Run 'skuasim servers-update' first.");
+            return 1;
+        }
+        PrintServers(list, path);
+        return 0;
+    }
+
+    private static void PrintServers(AqwServerList list, string path)
+    {
+        Console.WriteLine($"Server list   : {path}");
+        Console.WriteLine($"Fetched (UTC) : {list.FetchedUtc:u}  fingerprint {list.Fingerprint()}");
+        foreach (var s in list.Servers)
+            Console.WriteLine($"  {s.Name,-20} {s.Ip + ":" + s.Port,-26} {s.PlayerCount,5}/{s.MaxPlayers,-5} {(s.Online ? "online " : "OFFLINE")}" +
+                              $"{(s.MemberOnly ? " members-only" : "")}{(s.MaxPlayers > 0 && s.PlayerCount >= s.MaxPlayers ? " FULL" : "")} lang {s.Lang} chat {s.ChatLevel}");
     }
 
     private static void PrintCalendarSummary(AeCalendar calendar, string path)
@@ -360,6 +412,7 @@ internal static class CliEntry
             SeedOverride = seedOverride,
             GameDataPath = gameDataPath,
             CalendarPath = calendarPath,
+            DataSnapshot = GetOption(args, "--data"),
             TraceOutputPath = tracePath
         });
 
@@ -462,11 +515,12 @@ internal static class CliEntry
             {
                 ScriptPath = ResolveScriptPath(scenario.Script, installation),
                 Scenario = scenario,
-                GameDataPath = gameDataPath
+                GameDataPath = gameDataPath,
+                DataSnapshot = GetOption(args, "--data")
             });
             var passed = ExitCode(report) == 0;
             var failed = report.Assertions.Where(a => !a.Passed).Select(a => $"#{a.Index} {a.Description}: {a.Actual}").ToList();
-            var detail = $"{report.Outcome}, {report.VirtualDuration:hh\\:mm\\:ss} virtual, {report.Assertions.Count - report.AssertionsFailed}/{report.Assertions.Count} asserts"
+            var detail = $"{report.Outcome}, {report.VirtualDuration:hh\\:mm\\:ss} virtual, {DataLabel(report)}, {report.Assertions.Count - report.AssertionsFailed}/{report.Assertions.Count} asserts"
                          + (failed.Count > 0 ? " — " + string.Join("; ", failed) : "");
             rows.Add((Path.GetFileName(file), passed ? "PASS" : "FAIL", report, detail));
             Console.WriteLine($"  {(passed ? "PASS" : "FAIL")}  {detail}");
@@ -488,6 +542,88 @@ internal static class CliEntry
         if (!string.IsNullOrEmpty(reportDir))
             Console.WriteLine($"Reports saved to: {Path.GetFullPath(reportDir)}");
         return ran == 0 ? 1 : failedCount == 0 ? 0 : 4;
+    }
+
+    /// <summary>"snapshot 2026-11-24" or "live data" for the one-line test summary.</summary>
+    private static string DataLabel(SimulationReport report) =>
+        report.DataInfo is { } info && info.StartsWith("snapshot ", StringComparison.Ordinal)
+            ? info.Split(" (", 2)[0]
+            : "live data";
+
+    /// <summary>
+    /// skuasim snapshot create|list: frozen copies of the data a run reads (Data/DataSnapshot.cs), so scenario tests do
+    /// not drift while the collector keeps writing gamedata.json.
+    /// </summary>
+    private static int RunSnapshot(string[] args, SkuaInstallation installation)
+    {
+        const string usage = "Usage: skuasim snapshot create [<name>] [--note <text>] [--gamedata <path>] [--questdata <path>] [--calendar <path>] [--servers <path>]\n" +
+                             "       skuasim snapshot list [--gamedata <path>]";
+        var sub = args.Length > 0 ? args[0].ToLowerInvariant() : "";
+        var runner = new SimulationRunner(installation);
+        var gameDataPath = GetOption(args, "--gamedata") ?? runner.FindDefaultGameDataPath();
+        if (gameDataPath == null)
+        {
+            Console.Error.WriteLine("Error: no gamedata.json found (use --gamedata <path>).");
+            return 1;
+        }
+        var root = DataSnapshot.FolderFor(gameDataPath);
+
+        if (sub == "list")
+        {
+            var dirs = Directory.Exists(root)
+                ? Directory.GetDirectories(root).Where(d => File.Exists(Path.Combine(d, DataSnapshot.ManifestFileName)))
+                    .OrderBy(d => d, StringComparer.OrdinalIgnoreCase).ToList()
+                : new List<string>();
+            Console.WriteLine($"Snapshots in {root}:");
+            if (dirs.Count == 0)
+                Console.WriteLine("  (none; create one with 'skuasim snapshot create')");
+            foreach (var dir in dirs)
+            {
+                var s = DataSnapshot.Load(dir);
+                var problems = s.Verify();
+                var m = s.Manifest;
+                Console.WriteLine($"  {s.Describe()}: {m.Monsters:N0} monsters, {m.Maps:N0} maps, {m.Quests:N0} quests, " +
+                                  $"{m.CreditedKills:N0} credited / {m.LegacyKills:N0} legacy kills" +
+                                  (problems.Count == 0 ? ", intact" : " — " + string.Join("; ", problems)));
+                if (!string.IsNullOrEmpty(m.Note))
+                    Console.WriteLine($"    {m.Note}");
+            }
+            return 0;
+        }
+
+        if (sub != "create")
+        {
+            Console.Error.WriteLine(usage);
+            return 1;
+        }
+
+        var name = args.Length > 1 && !args[1].StartsWith('-') ? args[1] : DateTime.UtcNow.ToString("yyyy-MM-dd");
+        var questDataPath = GetOption(args, "--questdata") ?? installation.QuestDataFile;
+        var calendarPath = GetOption(args, "--calendar") ?? runner.FindDefaultCalendarPath();
+        var serversPath = GetOption(args, "--servers") ?? runner.FindDefaultServersPath();
+        try
+        {
+            var snapshot = DataSnapshot.Create(name, gameDataPath, questDataPath, calendarPath, root, DateTime.UtcNow, GetOption(args, "--note"), serversPath);
+            var m = snapshot.Manifest;
+            Console.WriteLine($"Snapshot {snapshot.Describe()} saved to {snapshot.Directory}");
+            foreach (var f in m.Files)
+                Console.WriteLine($"  {f.Name,-18} {f.Bytes,12:N0} bytes  {f.Sha256[..12]}");
+            if (m.Contributions.Count > 0)
+                Console.WriteLine($"  Shared data merged: {string.Join(", ", m.Contributions)}");
+            if (!m.Files.Any(f => f.Name == DataSnapshot.QuestDataFileName))
+                Console.WriteLine("  Warning: no QuestData.json found; runs with this snapshot have no Skua quest data.");
+            if (!m.Files.Any(f => f.Name == AeCalendar.DefaultFileName))
+                Console.WriteLine("  Note: no AE calendar (run 'skuasim calendar-update' first if scenarios use calendar boosts).");
+            if (!m.Files.Any(f => f.Name == AqwServerList.DefaultFileName))
+                Console.WriteLine("  Note: no server list (run 'skuasim servers-update' first; scripts that use Bot.Servers then get a synthesized list).");
+            Console.WriteLine($"Use it with \"dataSnapshot\": \"{snapshot.Name}\" in a scenario, or --data {snapshot.Name}.");
+            return 0;
+        }
+        catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine("Error: " + ex.Message);
+            return 1;
+        }
     }
 
     private static string ResolveScriptPath(string input, SkuaInstallation installation)
@@ -542,12 +678,17 @@ internal static class CliEntry
         Console.WriteLine("  skuasim db-stats [--gamedata <path>]");
         Console.WriteLine("  skuasim compile <script.cs>");
         Console.WriteLine("  skuasim run [<script.cs>] [options]       The script can come from the scenario's \"script\"");
-        Console.WriteLine("  skuasim test [<scenario.json|folder> ...] [--gamedata <path>] [--report-dir <dir>]   Run every scenario with");
+        Console.WriteLine("  skuasim test [<scenario.json|folder> ...] [--data <snapshot>] [--gamedata <path>] [--report-dir <dir>]   Run every scenario with");
         Console.WriteLine("                                 \"script\" + \"asserts\" (default folder: scenarios) as a regression suite");
         Console.WriteLine("  skuasim calendar-update [--calendar <path>]   Download the AE calendar (artix.com/calendar) locally");
         Console.WriteLine("  skuasim calendar-show [--calendar <path>] [--date <utc>]");
+        Console.WriteLine("  skuasim servers-update [--servers <path>]   Download AQW's public server list (game.aq.com) locally for Bot.Servers");
+        Console.WriteLine("  skuasim servers-show [--servers <path>]");
         Console.WriteLine("  skuasim whatif <script.cs> --add \"Item\" [--add ...] [--scenario <file.json>] [--max-virtual-min <num>]   Compare a run with and without items (quest pets...)");
         Console.WriteLine("  skuasim import-data <share.zip|gamedata.json> [...] [--gamedata <path>]   Add testers' shared data (data\\contrib\\, merged when simulating)");
+        Console.WriteLine("  skuasim snapshot create [<name>] [--note <text>] [--gamedata <path>]   Freeze the current data (gamedata.json + shared");
+        Console.WriteLine("                                 data, QuestData.json, AE calendar, server list) in data\\snapshots\\<name> (default name: today's UTC date)");
+        Console.WriteLine("  skuasim snapshot list [--gamedata <path>]   List snapshots and check their files");
         Console.WriteLine();
         Console.WriteLine("Run Options:");
         Console.WriteLine("  --scenario, -s <file.json>     Scenario JSON file describing player/world state");
@@ -560,6 +701,8 @@ internal static class CliEntry
         Console.WriteLine("                                 drives day of week and daily/weekly resets (00:00 US Eastern, weekly on Friday)");
         Console.WriteLine("  --ae-calendar                  Apply the AE calendar's server boosts for the virtual date");
         Console.WriteLine("  --calendar <path>              Calendar file (default: data\\ae_calendar.json next to gamedata.json)");
+        Console.WriteLine("  --data <snapshot>              Read a frozen data snapshot (name or folder) instead of the live data; overrides the");
+        Console.WriteLine("                                 scenario's \"dataSnapshot\" (also for test and whatif)");
         Console.WriteLine("  --report, -o <file.md|.json>   Save the execution report to disk");
         Console.WriteLine("  --trace <file.jsonl>           Stream full API trace to JSONL file");
         Console.WriteLine("  --export-scenario <file.json>  Save the character at the end of the run as a new scenario (chain runs)");

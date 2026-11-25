@@ -55,6 +55,8 @@ internal static class CoreTests
             TestServerWarnings(runner, tempDir);
             TestInjectedFaults(runner, tempDir);
             TestScenarioAssertions(runner, tempDir);
+            TestFrozenDataSnapshots(runner, tempDir);
+            TestServerList(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -1129,6 +1131,112 @@ internal static class CoreTests
     }
 
     /// <summary>
+    /// Frozen data snapshots: "skuasim snapshot create" copies what a run reads; a run with the snapshot gives the same
+    /// result as the live data it was made from and keeps giving it after the live file changes; snapshots are never
+    /// overwritten, a changed file is reported, and a missing snapshot fails the run instead of using live data.
+    /// </summary>
+    private static void TestFrozenDataSnapshots(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("23. Testing frozen data snapshots (create, run, live drift, tamper warning, missing snapshot)...");
+        var liveDir = Path.Combine(tempDir, "snapshot_live");
+        Directory.CreateDirectory(liveDir);
+        var gameDataPath = Path.Combine(liveDir, "gamedata.json");
+        string GameData(int pelts) => $$"""
+        {
+          "SchemaVersion": 4,
+          "Maps": { "zzsnapmap": { "Name": "zzsnapmap", "Cells": { "Enter": ["Spawn"], "r1": ["Left"] },
+            "Monsters": { "1": { "MapID": 1, "MonsterID": 990201, "Name": "Snap Beast", "Cell": "r1", "Level": 5, "MaxHP": 300 } } } },
+          "Monsters": { "id:990201": { "Key": "id:990201", "ID": 990201, "Name": "Snap Beast", "Level": 5, "MaxHP": 300, "CreditedKills": 100,
+            "Drops": { "990202": { "ItemID": 990202, "ItemName": "Snap Pelt", "CreditedDropEvents": {{pelts}} } } } }
+        }
+        """;
+        File.WriteAllText(gameDataPath, GameData(50));
+
+        var script = Path.Combine(tempDir, "SnapshotBot.cs");
+        File.WriteAllText(script, """
+        using Skua.Core.Interfaces;
+
+        public class SnapshotBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Map.Join("zzsnapmap");
+                for (var i = 0; i < 20; i++)
+                {
+                    bot.Hunt.Monster("Snap Beast");
+                    bot.Sleep(13_000);
+                }
+            }
+        }
+        """);
+        var scenario = new Scenario
+        {
+            Name = "Snapshot",
+            Player = new PlayerSetup { Username = "Tester", Level = 100, MaxHealth = 10_000, DamagePerSecond = 8_000 },
+            Limits = new LimitsSetup { MaxVirtualMinutes = 30 }
+        };
+        var noQuests = Path.Combine(liveDir, "no_QuestData.json");
+        SimulationReport Run(string? snapshot) => runner.Run(new SimulationRunOptions
+        {
+            ScriptPath = script, Scenario = scenario, SeedOverride = 5, GameDataPath = gameDataPath, QuestDataPath = noQuests, DataSnapshot = snapshot
+        });
+
+        var root = DataSnapshot.FolderFor(gameDataPath);
+        var snap = DataSnapshot.Create("t1", gameDataPath, null, null, root, new DateTime(2026, 11, 24, 0, 0, 0, DateTimeKind.Utc), "test");
+        Assert(snap.Directory == Path.Combine(liveDir, "snapshots", "t1") && File.Exists(snap.GameDataPath) &&
+               File.Exists(Path.Combine(snap.Directory, DataSnapshot.ManifestFileName)), "The snapshot folder must hold gamedata.json and snapshot.json");
+        Assert(snap.Manifest.Monsters == 1 && snap.Manifest.CreditedKills == 100 && snap.Manifest.Files.Count == 1 && snap.Verify().Count == 0,
+            $"Manifest must describe the frozen data (monsters={snap.Manifest.Monsters}, files={snap.Manifest.Files.Count}, problems={snap.Verify().Count})");
+        Assert(DataSnapshot.ResolveDirectory("t1", root) == snap.Directory && DataSnapshot.ResolveDirectory("nope", root) == null,
+            "A snapshot must resolve by name under the snapshots folder");
+
+        var live = Run(null);
+        var frozen = Run(snap.Directory);
+        Assert(live.Outcome == SimulationOutcome.Completed && frozen.Outcome == SimulationOutcome.Completed,
+            $"Both runs must complete ({live.Outcome}: {live.StopReason}; {frozen.Outcome}: {frozen.StopReason})");
+        var livePelts = live.DropsByItem.GetValueOrDefault("Snap Pelt");
+        Assert(livePelts > 0 && frozen.DropsByItem.GetValueOrDefault("Snap Pelt") == livePelts && frozen.Kills == live.Kills,
+            $"The snapshot must give the same run as the live data it froze (live {live.Kills} kills/{livePelts} pelts, snapshot {frozen.Kills}/{frozen.DropsByItem.GetValueOrDefault("Snap Pelt")})");
+        Assert(frozen.DataInfo?.StartsWith("snapshot t1 (") == true && live.DataInfo?.StartsWith("live ") == true &&
+               frozen.ToMarkdown().Contains("**Game Data:** `snapshot t1"), $"The report must name the data used (got '{frozen.DataInfo}' / '{live.DataInfo}')");
+
+        // The collector keeps writing: the live rate changes, the snapshot run does not.
+        File.WriteAllText(gameDataPath, GameData(100));
+        var liveAfter = Run(null);
+        var frozenAfter = Run(snap.Directory);
+        Assert(liveAfter.DropsByItem.GetValueOrDefault("Snap Pelt") > livePelts,
+            $"The changed live data (100 % rate) must change the live run (got {liveAfter.DropsByItem.GetValueOrDefault("Snap Pelt")} vs {livePelts})");
+        Assert(frozenAfter.DropsByItem.GetValueOrDefault("Snap Pelt") == livePelts && frozenAfter.Warnings.Count == frozen.Warnings.Count,
+            "The snapshot run must not change when the live data changes");
+
+        // The scenario can name the snapshot too.
+        var viaScenario = runner.Run(new SimulationRunOptions
+        {
+            ScriptPath = script, SeedOverride = 5, GameDataPath = gameDataPath, QuestDataPath = noQuests,
+            Scenario = new Scenario { Name = scenario.Name, Player = scenario.Player, Limits = scenario.Limits, DataSnapshot = snap.Directory }
+        });
+        Assert(viaScenario.DropsByItem.GetValueOrDefault("Snap Pelt") == livePelts && viaScenario.DataInfo?.StartsWith("snapshot t1") == true,
+            "\"dataSnapshot\" in the scenario must select the snapshot");
+
+        var overwriteRefused = false;
+        try { DataSnapshot.Create("t1", gameDataPath, null, null, root, DateTime.UtcNow); }
+        catch (IOException) { overwriteRefused = true; }
+        Assert(overwriteRefused, "An existing snapshot must never be overwritten");
+        Assert(!DataSnapshot.IsValidName("..\\x") && !DataSnapshot.IsValidName("a/b") && DataSnapshot.IsValidName("2026-11-24"),
+            "Snapshot names must not be paths");
+
+        File.AppendAllText(snap.GameDataPath, " ");
+        var tampered = Run(snap.Directory);
+        Assert(tampered.Warnings.Any(w => w.Text.Contains("gamedata.json was changed after the snapshot was made")),
+            "A snapshot file changed after creation must be reported");
+
+        var missing = Run(Path.Combine(liveDir, "snapshots", "does-not-exist"));
+        Assert(missing.Outcome == SimulationOutcome.ScriptException && missing.StopReason?.Contains("not found") == true && missing.Kills == 0,
+            $"A missing snapshot must fail the run, never fall back to live data (got {missing.Outcome}: {missing.StopReason})");
+        Console.WriteLine($"   OK: live = snapshot ({live.Kills} kills, {livePelts} pelts); live drift {liveAfter.DropsByItem.GetValueOrDefault("Snap Pelt")} pelts, snapshot unchanged; tamper warned; missing fails");
+    }
+
+    /// <summary>
     /// Script background work (Task.Run + await Task.Delay with a token, new Random(), Task.WaitAll — the CoreBots
     /// registered-quest pattern) runs one thread at a time in virtual-time order, so the same seed repeats the run
     /// exactly, including the interleaving of main and background log lines.
@@ -1236,6 +1344,93 @@ internal static class CoreTests
     /// refused pickups (item in the bank, full stack) reach the script through ExtensionPacketReceived with the real
     /// packet shapes, the refused action does not happen, and the report lists the messages.
     /// </summary>
+    /// <summary>
+    /// AQW server list: parsed from a real response of the public API, served by Bot.Servers, named relogins checked
+    /// against it (member-only / full for non-members, offline, unknown), the scenario list wins, and the invented
+    /// stand-in is reported as synthesized only when a script uses it.
+    /// </summary>
+    private static void TestServerList(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("24. Testing the AQW server list (servers.json, scenario servers, refused named relogins)...");
+        // Real response of https://game.aq.com/game/api/data/servers (2026-11-24, first entries; public data).
+        const string apiSample = """
+        [{"sName":"Twilly","sIP":"sock7.aq.com","iCount":948,"iMax":1000,"bOnline":1,"iChat":0,"bUpg":0,"sLang":"xx","iPort":5593,"iLevel":0,"accessLevel":0},
+         {"sName":"Twig","sIP":"sock8.aq.com","iCount":433,"iMax":1000,"bOnline":1,"iChat":0,"bUpg":0,"sLang":"xx","iPort":5589,"iLevel":0,"accessLevel":0},
+         {"sName":"Artix","sIP":"sock7.aq.com","iCount":1501,"iMax":1500,"bOnline":1,"iChat":2,"bUpg":0,"sLang":"it","iPort":5588,"iLevel":0,"accessLevel":0},
+         {"sName":"Sir Ver","sIP":"sock7.aq.com","iCount":88,"iMax":1200,"bOnline":1,"iChat":2,"bUpg":1,"sLang":"en","iPort":5589,"iLevel":0,"accessLevel":0},
+         {"sName":"Swordhaven (EU)","sIP":"euro.aqw.artix.com","iCount":13,"iMax":1000,"bOnline":1,"iChat":2,"bUpg":0,"sLang":"it","iPort":5588,"iLevel":0,"accessLevel":0}]
+        """;
+        var parsed = AqwServerList.ParseApi(apiSample, new DateTime(2026, 11, 24, 0, 0, 0, DateTimeKind.Utc));
+        Assert(parsed.Servers.Count == 5 && parsed.Servers[3] is { Name: "Sir Ver", MemberOnly: true, Port: 5589, PlayerCount: 88, MaxPlayers: 1200 },
+            "The API response must parse into the server list in order");
+        Assert(parsed.Servers[2].RefusalFor(isMember: false) != null && parsed.Servers[2].RefusalFor(isMember: true) == null,
+            "A full server refuses non-members only (the live list shows members above the cap)");
+        var serversPath = Path.Combine(tempDir, "servers_test.json");
+        parsed.Save(serversPath);
+        Assert(AqwServerList.TryLoad(serversPath)?.Fingerprint() == parsed.Fingerprint(), "servers.json must round-trip");
+
+        var script = Path.Combine(tempDir, "ServerBot.cs");
+        File.WriteAllText(script, """
+        using System.Linq;
+        using Skua.Core.Interfaces;
+
+        public class ServerBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Log("servers=" + string.Join(",", bot.Servers.CachedServers.Select(s => s.Name + (s.Upgrade ? "*" : ""))));
+                bot.Log("sirver=" + bot.Servers.Relogin("Sir Ver") + " loggedIn=" + bot.Player.LoggedIn);
+                bot.Log("artix=" + bot.Servers.Relogin("Artix"));
+                bot.Log("nowhere=" + bot.Servers.Relogin("Nowhere"));
+                bot.Log("twig=" + bot.Servers.Relogin("Twig") + " loggedIn=" + bot.Player.LoggedIn + " last=" + bot.Servers.LastName);
+            }
+        }
+        """);
+        var quietScript = Path.Combine(tempDir, "QuietServerBot.cs");
+        File.WriteAllText(quietScript, """
+        using Skua.Core.Interfaces;
+
+        public class QuietServerBot
+        {
+            public void ScriptMain(IScriptInterface bot) => bot.Log("level=" + bot.Player.Level);
+        }
+        """);
+
+        Scenario NonMember() => new() { Name = "Servers", Player = new PlayerSetup { IsMember = false }, Limits = new LimitsSetup { MaxVirtualMinutes = 5 } };
+
+        var report = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = NonMember(), ServersPath = serversPath });
+        var logs = string.Join(" | ", report.ScriptLogs.Select(l => l.Text));
+        Assert(report.Outcome == SimulationOutcome.Completed, $"Run must complete ({report.Outcome}: {report.StopReason}) {logs}");
+        Assert(logs.Contains("servers=Twilly,Twig,Artix,Sir Ver*,Swordhaven (EU)"), $"Bot.Servers must serve servers.json: {logs}");
+        Assert(logs.Contains("sirver=False loggedIn=False") && logs.Contains("artix=False") && logs.Contains("nowhere=False"),
+            $"Member-only, full and unknown servers must refuse a non-member and leave them logged out: {logs}");
+        Assert(logs.Contains("twig=True loggedIn=True last=Twig"), $"An open server must accept the login: {logs}");
+        Assert(!report.SynthesizedData.Any(s => s.Key == "servers") && report.ServersInfo?.Contains("servers_test.json") == true,
+            $"A server list from file is not synthesized and the report names it ({report.ServersInfo})");
+
+        var memberScenario = NonMember();
+        memberScenario.Player.IsMember = true;
+        memberScenario.Servers = new List<ServerSetup>
+        {
+            new() { Name = "Sir Ver", Ip = "sock7.aq.com", MemberOnly = true, PlayerCount = 10, MaxPlayers = 1200 },
+            new() { Name = "Artix", Ip = "sock7.aq.com", PlayerCount = 1501, MaxPlayers = 1500 },
+            new() { Name = "Twig", Ip = "sock8.aq.com", Online = false }
+        };
+        report = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = memberScenario, ServersPath = serversPath });
+        logs = string.Join(" | ", report.ScriptLogs.Select(l => l.Text));
+        Assert(logs.Contains("servers=Sir Ver*,Artix,Twig") && logs.Contains("sirver=True") && logs.Contains("artix=True") && logs.Contains("twig=False"),
+            $"The scenario list must win; members enter member-only and full servers, nobody enters an offline one: {logs}");
+        Assert(report.ServersInfo?.StartsWith("scenario") == true, $"Report must name the scenario list ({report.ServersInfo})");
+
+        var missing = Path.Combine(tempDir, "no_servers_here.json");
+        report = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = NonMember(), ServersPath = missing });
+        Assert(report.SynthesizedData.Any(s => s.Key == "servers"), "Without a server list the stand-in must be reported as synthesized");
+        report = runner.Run(new SimulationRunOptions { ScriptPath = quietScript, Scenario = NonMember(), ServersPath = missing });
+        Assert(!report.SynthesizedData.Any(s => s.Key == "servers") && report.ServersInfo == null,
+            "A script that never uses Bot.Servers must not get a synthesized server list in its report");
+        Console.WriteLine("   OK: server list parsed from the API, served, refusals (member-only/full/offline/unknown), scenario override, lazy synthesis");
+    }
+
     private static void TestServerWarnings(SimulationRunner runner, string tempDir)
     {
         Console.WriteLine("20. Testing server warnings (refused joins / purchases / pickups -> ExtensionPacketReceived)...");

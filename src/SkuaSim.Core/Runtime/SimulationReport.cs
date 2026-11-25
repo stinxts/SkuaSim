@@ -74,11 +74,17 @@ public sealed class SimulationReport
     /// <summary>Daily (and weekly/monthly) server resets crossed during the run (00:00 US Eastern).</summary>
     public int ServerResets { get; init; }
 
+    /// <summary>Game data the run read: "snapshot &lt;name&gt; (…)" or "live &lt;gamedata.json path&gt;".</summary>
+    public string? DataInfo { get; init; }
+
     /// <summary>AE calendar file used for server boosts (null when the scenario does not use it).</summary>
     public string? CalendarInfo { get; init; }
 
     /// <summary>Calendar server-boost states observed during the run.</summary>
     public List<string> CalendarBoosts { get; init; } = new();
+
+    /// <summary>Source of the AQW server list (null when the script never used Bot.Servers' list or named a server).</summary>
+    public string? ServersInfo { get; init; }
 
     public string ToJson() => JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
 
@@ -104,12 +110,16 @@ public sealed class SimulationReport
             if (StartFromPcClock)
                 sb.AppendLine($"  - Taken from the PC clock; reproduce with `--start-date {StartUtc:yyyy-MM-ddTHH:mm:ssZ}` (or `\"startDate\"` in the scenario) and the same seed.");
         }
+        if (!string.IsNullOrEmpty(DataInfo))
+            sb.AppendLine($"- **Game Data:** `{DataInfo}`");
         if (!string.IsNullOrEmpty(CalendarInfo))
         {
             sb.AppendLine($"- **AE Calendar:** `{CalendarInfo}`");
             foreach (var b in CalendarBoosts)
                 sb.AppendLine($"  - Server boosts {b}");
         }
+        if (!string.IsNullOrEmpty(ServersInfo))
+            sb.AppendLine($"- **Server List:** `{ServersInfo}`");
         sb.AppendLine($"- **Total API Calls:** `{TotalApiCalls:N0}`");
         if (!string.IsNullOrEmpty(TraceFilePath))
             sb.AppendLine($"- **Full Trace File:** `{TraceFilePath}`");

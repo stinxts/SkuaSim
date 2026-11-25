@@ -43,6 +43,25 @@ public sealed class SimContext
     public AeCalendar? Calendar { get; set; }
     public string? CalendarPath { get; set; }
 
+    /// <summary>AQW server list served by Bot.Servers (scenario "servers", else servers.json, else a synthesized stand-in).</summary>
+    public List<ServerSetup> Servers { get; set; } = AqwServerList.SynthesizedFallback();
+    /// <summary>Where <see cref="Servers"/> came from, for the report.</summary>
+    public string ServersInfo { get; set; } = "synthesized";
+    /// <summary>True when <see cref="Servers"/> is the invented stand-in (reported as synthesized when a script uses it).</summary>
+    public bool ServersSynthesized { get; set; } = true;
+    /// <summary>Set once the script read the server list or named a server (the report shows the list's source then).</summary>
+    public bool ServersUsed { get; private set; }
+
+    /// <summary>Marks the server list as used by the script; reports the stand-in as synthesized the first time.</summary>
+    public void NoteServersUsed()
+    {
+        if (ServersUsed)
+            return;
+        ServersUsed = true;
+        if (ServersSynthesized)
+            Trace.Synthesize("servers", "Bot.Servers served an invented AQW server list (no servers.json; run 'skuasim servers-update', or set \"servers\" in the scenario).");
+    }
+
     /// <summary>The root IScriptInterface proxy handed to the script.</summary>
     public object? Bot { get; set; }
     public ProxyState? EventsState { get; set; }

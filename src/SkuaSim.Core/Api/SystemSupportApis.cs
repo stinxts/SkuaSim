@@ -9,6 +9,7 @@ using Skua.Core.Models.Auras;
 using Skua.Core.Models.Servers;
 using SkuaSim.Core.Proxies;
 using SkuaSim.Core.Runtime;
+using SkuaSim.Core.Scenarios;
 using SkuaSim.Core.World;
 
 namespace SkuaSim.Core.Api;
@@ -210,42 +211,92 @@ public sealed class EventsApi : ApiBase, IProxyAware
     public void ClearHandlers() => _state?.Events.Clear();
 }
 
+/// <summary>
+/// Bot.Servers over the run's AQW server list (<see cref="SimContext.Servers"/>: scenario "servers", else the local
+/// servers.json from <c>skuasim servers-update</c>, else a stand-in reported as synthesized). Logins that name a server
+/// are checked against it: unknown, offline, member-only (for non-members) and full (for non-members) servers refuse
+/// the login and leave the player logged out. Logins without a server go back to the current one.
+/// </summary>
 public sealed class ServersApi : ApiBase
 {
-    private readonly List<Server> _servers = new()
+    private List<Server>? _servers;
+
+    public ServersApi(SimContext ctx) : base(ctx)
     {
-        new Server { Name = "Twilly", IP = "twig.aq.com", Online = true, PlayerCount = 400, MaxPlayers = 1500, Port = 5588, Lang = "en" },
-        new Server { Name = "Artix", IP = "artix.aq.com", Online = true, PlayerCount = 900, MaxPlayers = 1500, Port = 5588, Lang = "en" },
-        new Server { Name = "Gravelyn", IP = "gravelyn.aq.com", Online = true, PlayerCount = 300, MaxPlayers = 1500, Port = 5588, Lang = "en" }
-    };
+        var first = ctx.Servers.FirstOrDefault(s => s.Online) ?? ctx.Servers.FirstOrDefault();
+        LastName = first?.Name ?? "Twilly";
+        LastIP = first?.Ip ?? "";
+    }
 
-    public ServersApi(SimContext ctx) : base(ctx) { }
-
-    public string LastIP { get; set; } = "twig.aq.com";
+    public string LastIP { get; set; }
     public string CachedUsername => World.Username;
-    public string LastName { get; set; } = "Twilly";
+    public string LastName { get; set; }
     public bool IsIntentionalLogout { get; set; }
     public bool IsReloginInProgress => false;
     public bool IsLogoutInProgress => false;
-    public List<Server> ServerList => _servers;
-    public List<Server> CachedServers => _servers;
+    public List<Server> ServerList => Servers();
+    public List<Server> CachedServers => Servers();
     public bool IsConnected => World.LoggedIn;
 
+    private List<Server> Servers()
+    {
+        Ctx.NoteServersUsed();
+        return _servers ??= Ctx.Servers.Select(s => new Server
+        {
+            Name = s.Name,
+            IP = s.Ip,
+            Port = s.Port,
+            Online = s.Online,
+            PlayerCount = s.PlayerCount,
+            MaxPlayers = s.MaxPlayers,
+            Upgrade = s.MemberOnly,
+            ChatLevel = s.ChatLevel,
+            Lang = s.Lang,
+            Level = s.Level
+        }).ToList();
+    }
+
+    private ServerSetup? Find(string? name) =>
+        string.IsNullOrWhiteSpace(name) ? null : Ctx.Servers.FirstOrDefault(s => string.Equals(s.Name, name.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    private ServerSetup? FindIp(string? ip, int? port = null) =>
+        string.IsNullOrWhiteSpace(ip) ? null
+            : Ctx.Servers.FirstOrDefault(s => string.Equals(s.Ip, ip.Trim(), StringComparison.OrdinalIgnoreCase) && (port == null || s.Port == port));
+
+    /// <summary>Logs in to a named server, or refuses (player logged out) when the list says the login would fail.</summary>
+    private bool LoginTo(ServerSetup? server, string requested)
+    {
+        Ctx.NoteServersUsed();
+        var refusal = server == null ? $"no server '{requested}' in the server list" : server.RefusalFor(World.IsMember);
+        if (refusal != null)
+        {
+            Ctx.Trace.World($"Login to {server?.Name ?? requested} refused: {refusal}.");
+            if (World.LoggedIn)
+                World.Logout(autoRelogin: false, reloginDelayMs: 0);
+            return false;
+        }
+        LastName = server!.Name;
+        LastIP = server.Ip;
+        return World.Relogin();
+    }
+
     public void SetLoginInfo(string username, string password) { }
-    public ValueTask<List<Server>> GetServers(bool forceUpdate) => new(_servers);
-    public bool ConnectIP(string serverIp) => World.Relogin();
-    public bool ConnectIP(string serverIp, int port) => World.Relogin();
+    public ValueTask<List<Server>> GetServers(bool forceUpdate) => new(Servers());
+    public bool Connect(Server server) => LoginTo(Find(server?.Name), server?.Name ?? "");
+    public bool Connect(string serverName) => LoginTo(Find(serverName), serverName);
+    public bool ConnectIP(string serverIp) => LoginTo(FindIp(serverIp), serverIp);
+    public bool ConnectIP(string serverIp, int port) => LoginTo(FindIp(serverIp, port), $"{serverIp}:{port}");
     public void Login(string username, string password) => World.Relogin();
     public void Login() => World.Relogin();
     public void Logout() => World.Logout(Ctx.GetBotOption("AutoRelogin", true), Ctx.GetBotOption("ReloginTryDelay", 3000));
-    public bool Reconnect(string serverName, int loginDelay) => World.Relogin();
-    public bool Reconnect(Server server, int loginDelay) => World.Relogin();
-    public bool Relogin(Server? server) => World.Relogin();
-    public bool Relogin(string serverName) => World.Relogin();
-    public bool ReloginIP(string ip) => World.Relogin();
-    public bool EnsureRelogin(string serverName) => World.Relogin();
+    public bool Reconnect(string serverName, int loginDelay) => LoginTo(Find(serverName), serverName);
+    public bool Reconnect(Server server, int loginDelay) => LoginTo(Find(server?.Name), server?.Name ?? "");
+    public bool Relogin(Server? server) => server is null ? World.Relogin() : LoginTo(Find(server.Name), server.Name);
+    public bool Relogin(string serverName) => LoginTo(Find(serverName), serverName);
+    public bool ReloginIP(string ip) => LoginTo(FindIp(ip), ip);
+    public bool EnsureRelogin(string serverName) => LoginTo(Find(serverName), serverName);
     public Task<bool> EnsureRelogin(CancellationToken token) => Task.FromResult(World.Relogin());
-    public Task<bool> EnsureRelogin(string serverName, CancellationToken token) => Task.FromResult(World.Relogin());
+    public Task<bool> EnsureRelogin(string serverName, CancellationToken token) => Task.FromResult(LoginTo(Find(serverName), serverName));
 }
 
 public sealed class SendApi : ApiBase

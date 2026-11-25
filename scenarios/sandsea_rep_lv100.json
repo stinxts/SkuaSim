@@ -15,6 +15,7 @@
   ],
   "Limits": { "MaxVirtualMinutes": 720, "MaxNoProgressMinutes": 60 },
   "Script": "Farm/REP/SandseaREP.cs",
+  "DataSnapshot": "2026-11-24",
   "Asserts": [
     { "check": "outcome", "is": ["Completed"] },
     { "check": "factionRank", "name": "Sandsea", "exactly": 10 },

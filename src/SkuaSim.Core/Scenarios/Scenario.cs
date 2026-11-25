@@ -72,6 +72,13 @@ public sealed class Scenario
     public List<FaultSetup> Faults { get; set; } = new();
 
     /// <summary>
+    /// AQW server list served by Bot.Servers, replacing the local <c>servers.json</c> (made by
+    /// <c>skuasim servers-update</c>), e.g. to test a script against a full, offline or member-only server.
+    /// Null = the local file (or the data snapshot's copy).
+    /// </summary>
+    public List<ServerSetup>? Servers { get; set; }
+
+    /// <summary>
     /// Expected results checked when the run ends (report section "Scenario Assertions", CLI exit code 4 when one fails),
     /// so a bug scenario becomes a regression test: e.g. the run completes, the item was bought, a quest was turned in
     /// N times, nothing was synthesized.
@@ -83,6 +90,13 @@ public sealed class Scenario
     /// <c>skuasim test</c>, and by <c>skuasim run</c> when no script is given.
     /// </summary>
     public string? Script { get; set; }
+
+    /// <summary>
+    /// Frozen data snapshot this scenario runs against (a name under <c>data\snapshots\</c>, or a folder path made by
+    /// <c>skuasim snapshot</c>) instead of the live gamedata.json, QuestData.json and AE calendar, so its results do
+    /// not drift while the collector keeps writing. Null = live data. CLI <c>--data</c> overrides it.
+    /// </summary>
+    public string? DataSnapshot { get; set; }
 
     [JsonIgnore]
     public string? SourcePath { get; set; }
@@ -108,6 +122,37 @@ public sealed class Scenario
     }
 
     public string ToJson() => JsonSerializer.Serialize(this, JsonOptions);
+}
+
+/// <summary>One AQW server (fields of the public server API: sName, sIP, iPort, bOnline, iCount, iMax, bUpg, iChat, sLang, iLevel, accessLevel).</summary>
+public sealed class ServerSetup
+{
+    public string Name { get; set; } = "";
+    public string Ip { get; set; } = "";
+    public int Port { get; set; } = 5588;
+    public bool Online { get; set; } = true;
+    public int PlayerCount { get; set; }
+    public int MaxPlayers { get; set; } = 1000;
+    /// <summary>Upgrade (member) only server (bUpg).</summary>
+    public bool MemberOnly { get; set; }
+    public int ChatLevel { get; set; }
+    public string Lang { get; set; } = "xx";
+    /// <summary>iLevel and accessLevel: kept and served, not enforced (their meaning is not confirmed).</summary>
+    public int Level { get; set; }
+    public int AccessLevel { get; set; }
+
+    /// <summary>Why the server refuses this player, or null when the login is accepted.</summary>
+    public string? RefusalFor(bool isMember)
+    {
+        if (!Online)
+            return "the server is offline";
+        if (MemberOnly && !isMember)
+            return "the server is for members (Upgrade) only";
+        // The live list shows member-heavy servers above their cap (Artix 1501/1500), so only non-members are kept out.
+        if (MaxPlayers > 0 && PlayerCount >= MaxPlayers && !isMember)
+            return $"the server is full ({PlayerCount}/{MaxPlayers})";
+        return null;
+    }
 }
 
 public sealed class PlayerSetup

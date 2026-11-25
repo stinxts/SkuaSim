@@ -21,6 +21,7 @@
   ],
   "Limits": { "MaxVirtualMinutes": 300, "MaxNoProgressMinutes": 30 },
   "Script": "Legion/JoinLegion.cs",
+  "DataSnapshot": "2026-11-24",
   "Asserts": [
     { "check": "outcome", "is": ["Completed"] },
     { "check": "injectedFaults", "exactly": 2 },

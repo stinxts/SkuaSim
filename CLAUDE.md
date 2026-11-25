@@ -19,6 +19,9 @@ dotnet run --project src\SkuaSim.UI
   `Scripts\CoreBots.cs`, `QuestData.json`), so they cannot run in CI.
 - The runner loads the **live** `data\gamedata.json` that the Collector plugin may be writing right now, so
   absolute numbers in test output (DPS, etc.) can drift between runs. Assert on behavior, not on such values.
+  The scenario suite instead pins a frozen data snapshot (`"dataSnapshot"`, `data\snapshots\<name>\`, made by
+  `skuasim snapshot create`; `Data/DataSnapshot.cs`, Core test 23): never edit or overwrite a snapshot, make a new one
+  and repoint the scenarios when the suite should take in newer data. A missing snapshot fails the run (no live fallback).
 - Script paths given to the CLI are relative to the VibeSkua `Scripts\` folder
   (`%APPDATA%\VibeSkua\Scripts`) or absolute. Env overrides: `SKUASIM_SKUA_ASSEMBLIES`, `SKUASIM_SKUA_DATA`.
 - CLI `run` exit codes: 0 completed/stopped, 2 compile error or script exception, 3 stalled; with scenario `asserts`
@@ -60,8 +63,8 @@ dotnet run --project src\SkuaSim.UI
   clock coordinator and per-account RNG — discuss before changing this.
 - **Time & calendar:** the virtual start is `scenario.startDate` (default 2026-01-01 12:00 UTC), or the PC clock when `startAtCurrentTime` (CLI `--start-date now`) is set — the only wall-clock read allowed to shape a run, done once in `Scenario.ResolveStartUtc` and printed in the report so the run can be reproduced. AQW server time is US
   Eastern (`AeCalendar.ToEastern`): dailies reset at 00:00, weeklies Friday 00:00, monthlies on the 1st. The AE calendar
-  (`data\ae_calendar.json`) is only downloaded by `skuasim calendar-update`; simulations read the local file and
-  never touch the network.
+  (`data\ae_calendar.json`) is only downloaded by `skuasim calendar-update`, and the AQW server list (`data\servers.json`,
+  `Data/AqwServerList.cs`) only by `skuasim servers-update`; simulations read the local files and never touch the network.
 - **Data tiers:** scenario > collected data (`gamedata.json` + other testers' exports in `data\contrib\`, merged in
   memory in file-name order by `GameDataContributions`; `gamedata.json` is never rewritten by SkuaSim, + `QuestData.json`) > synthesized fallback.
   Anything invented must be reported with `Trace.Synthesize(key, description)` (shown in Violet in the UI).

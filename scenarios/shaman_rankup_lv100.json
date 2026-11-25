@@ -15,6 +15,7 @@
   ],
   "Limits": { "MaxVirtualMinutes": 720, "MaxNoProgressMinutes": 60 },
   "Script": "Tools/RankUpEquippedClass.cs",
+  "DataSnapshot": "2026-11-24",
   "Asserts": [
     { "check": "outcome", "is": ["Completed"] },
     { "check": "classRank", "exactly": 10 },
