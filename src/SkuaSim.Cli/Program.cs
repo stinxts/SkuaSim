@@ -36,6 +36,7 @@ internal static class CliEntry
             "whatif" => RunWhatIf(rest, installation),
             "import-data" => RunImportData(rest, installation),
             "snapshot" => RunSnapshot(rest, installation),
+            "bug-report" => RunBugReport(rest, installation),
             _ => RunUnknown(cmd, installation)
         };
     }
@@ -451,6 +452,72 @@ internal static class CliEntry
     }
 
     /// <summary>
+    /// Bug report from a diagnostic file (a scenario saved in Skua by tools\skua\SkuaSim_Diagnostic.cs): runs the reported
+    /// script on that character and writes the filled bug report template (character, reproduction, data gaps, asserts
+    /// to start the regression test from). Default output: next to the diagnostic, &lt;name&gt;.bugreport.md.
+    /// </summary>
+    private static int RunBugReport(string[] args, SkuaInstallation installation)
+    {
+        const string usage = "Usage: skuasim bug-report <diagnostic.json> [<script.cs>] [--out <report.md>] [--report <full-report.md>] [--seed <int>] [--max-virtual-min <num>] [--data <snapshot>] [--gamedata <path>]";
+        if (args.Length == 0 || args[0].StartsWith('-'))
+        {
+            Console.Error.WriteLine(usage);
+            return 1;
+        }
+        var diagnosticPath = Path.GetFullPath(args[0]);
+        if (!File.Exists(diagnosticPath))
+        {
+            Console.Error.WriteLine($"Error: diagnostic file not found: {diagnosticPath}");
+            return 1;
+        }
+        Scenario diagnostic;
+        try
+        {
+            diagnostic = Scenario.Load(diagnosticPath);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: not a valid scenario/diagnostic file: {ex.Message}");
+            return 1;
+        }
+
+        var scriptArg = args.Length > 1 && !args[1].StartsWith('-') ? args[1] : diagnostic.Script;
+        if (string.IsNullOrWhiteSpace(scriptArg))
+        {
+            Console.Error.WriteLine("Error: the diagnostic does not name the reported script; give it after the file. " + usage);
+            return 1;
+        }
+
+        int? seed = GetOption(args, "--seed") is { } seedText && int.TryParse(seedText, out var s) ? s : null;
+        if (GetOption(args, "--max-virtual-min") is { } vText &&
+            double.TryParse(vText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var vMin))
+            diagnostic.Limits.MaxVirtualMinutes = vMin;
+
+        var report = new SimulationRunner(installation).Run(new SimulationRunOptions
+        {
+            ScriptPath = ResolveScriptPath(scriptArg, installation),
+            Scenario = diagnostic,
+            SeedOverride = seed,
+            GameDataPath = GetOption(args, "--gamedata"),
+            DataSnapshot = GetOption(args, "--data")
+        });
+
+        var outPath = Path.GetFullPath(GetOption(args, "--out") ?? GetOption(args, "-o")
+                                       ?? Path.ChangeExtension(diagnosticPath, null) + ".bugreport.md");
+        var outDir = Path.GetDirectoryName(outPath);
+        if (!string.IsNullOrEmpty(outDir))
+            Directory.CreateDirectory(outDir);
+        File.WriteAllText(outPath, BugReportWriter.ToMarkdown(diagnostic, report, diagnosticPath));
+        if (GetOption(args, "--report") is { } fullPath)
+            File.WriteAllText(Path.GetFullPath(fullPath), report.ToMarkdown());
+
+        Console.WriteLine($"Outcome: {report.Outcome}{(string.IsNullOrEmpty(report.StopReason) ? "" : $" ({report.StopReason})")}, " +
+                          $"virtual {report.VirtualDuration:hh\\:mm\\:ss}, {report.SynthesizedData.Count} synthesized record(s), {report.SynthesizedMaps.Count} synthesized map(s)");
+        Console.WriteLine($"Bug report saved to: {outPath}");
+        return ExitCode(report);
+    }
+
+    /// <summary>
     /// Exit code of a run. Without scenario asserts: 0 completed/stopped, 2 compile error or script exception, 3 stalled.
     /// With asserts, they decide (the expected outcome is one of them): 0 all passed, 4 one failed; a compile error stays 2.
     /// </summary>
@@ -689,6 +756,8 @@ internal static class CliEntry
         Console.WriteLine("  skuasim snapshot create [<name>] [--note <text>] [--gamedata <path>]   Freeze the current data (gamedata.json + shared");
         Console.WriteLine("                                 data, QuestData.json, AE calendar, server list) in data\\snapshots\\<name> (default name: today's UTC date)");
         Console.WriteLine("  skuasim snapshot list [--gamedata <path>]   List snapshots and check their files");
+        Console.WriteLine("  skuasim bug-report <diagnostic.json> [<script.cs>] [--out <file.md>] [--data <snapshot>]   Run a diagnostic made in Skua by");
+        Console.WriteLine("                                 tools\\skua\\SkuaSim_Diagnostic.cs and write the filled bug report (default: <diagnostic>.bugreport.md)");
         Console.WriteLine();
         Console.WriteLine("Run Options:");
         Console.WriteLine("  --scenario, -s <file.json>     Scenario JSON file describing player/world state");

@@ -320,6 +320,25 @@ public sealed partial class SimWorld
         : _ctx.Catalog.FindQuest(id)?.Field is { Length: > 0 } f ? f
         : _ctx.Catalog.FindCapturedQuest(id)?.Field ?? "";
 
+    private int QuestIndex(int id) =>
+        LoadedQuests.TryGetValue(id, out var q) && !string.IsNullOrWhiteSpace(q.Field) ? q.Index
+        : _ctx.Catalog.FindQuest(id) is { Field.Length: > 0 } data ? data.Index
+        : _ctx.Catalog.FindCapturedQuest(id)?.Index ?? -1;
+
+    /// <summary>
+    /// <c>world.getAchievement(field, index)</c> for the daily/weekly/monthly quest fields (<c>id#</c>, <c>iw#</c>,
+    /// <c>im#</c>; Skua's IsDailyComplete reads them): set while a quest with that field and index is done this period.
+    /// Null for any other field (account achievements such as <c>ia0</c> are not simulated).
+    /// </summary>
+    public bool? QuestPeriodAchievement(string? field, int index)
+    {
+        if (string.IsNullOrWhiteSpace(field) || field.Length < 3 || field[0] is not ('i' or 'I') ||
+            char.ToLowerInvariant(field[1]) is not ('d' or 'w' or 'm') || !field[2..].All(char.IsAsciiDigit))
+            return null;
+        lock (Sync)
+            return DailiesCompleted.Any(id => string.Equals(QuestField(id), field, StringComparison.OrdinalIgnoreCase) && QuestIndex(id) == index);
+    }
+
     /// <summary>
     /// Total reputation needed for a faction rank: (5·r·(r+1))² — 900, 3,600, 10,000, 22,500, ... 302,500 at rank 10
     /// (rank 10 = 302,500 is confirmed by QuestData "RequiredFactionRep" values, e.g. Ravenous).

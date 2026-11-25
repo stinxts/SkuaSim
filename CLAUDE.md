@@ -27,6 +27,10 @@ dotnet run --project src\SkuaSim.UI
 - CLI `run` exit codes: 0 completed/stopped, 2 compile error or script exception, 3 stalled; with scenario `asserts`
   they decide (0 all passed, 4 one failed; compile error stays 2). `skuasim test scenarios` runs every scenario with
   `script` + `asserts` as a regression suite (`Runtime/ScenarioAssertions.cs`, Core test 22).
+- `skuasim bug-report <diagnostic.json>` runs a diagnostic made in Skua by `tools\skua\SkuaSim_Diagnostic.cs` and writes the
+  filled `docs\BUG_REPORT_TEMPLATE.md` (`Runtime/BugReportWriter.cs`). Core test 26 runs that Skua script inside the
+  simulator, so a change to it must keep compiling against the real Skua DLLs and must never write the character name
+  or name-like script options.
 
 ## Layout
 
@@ -43,6 +47,7 @@ dotnet run --project src\SkuaSim.UI
   - `World/` — `SimWorld` (all game state and mechanics), `StatEngine` (AQW stat formulas).
   - `Scenarios/` — scenario JSON model + real AQW boost-gear and enhancement-unlock catalogs.
 - `src/SkuaSim.Cli`, `src/SkuaSim.UI` (Avalonia 12 + CommunityToolkit.Mvvm) — thin front-ends over Core.
+- `tools/skua/` — Skua scripts the user runs in Skua/VibeSkua (`SkuaSim_Diagnostic.cs`); `docs/` — bug report template, tester guide.
 - `scenarios/` — sample scenarios. `data/` — local collected DB and reports (git-ignored, not backed up by git).
 
 ## Invariants — do not break these

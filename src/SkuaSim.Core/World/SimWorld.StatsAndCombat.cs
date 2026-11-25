@@ -27,6 +27,12 @@ public sealed partial class SimWorld
     public bool ServerBoostActive { get; set; }
     public int ClassPoints { get; private set; }
 
+    /// <summary>Total class points of the equipped class as AQW shows them (<c>objData.iCP</c>): at least the rank's threshold.</summary>
+    public int TotalClassPoints
+    {
+        get { lock (Sync) return Math.Max(ClassPoints, ClassRankThresholds[Math.Clamp(ClassRank, 1, 10)]); }
+    }
+
     // Boosts add up (see RewardBoosts): highest gear bonus of the type + consumable +100 % + server +100 %.
     public double EffectiveXpMultiplier =>
         RewardBoosts.Combine(CombatProfile?.GearBoosts.XpMultiplier ?? 1.0, XpBoostActive, ServerBoostActive || CalendarBoosts.Xp);

@@ -58,6 +58,7 @@ internal static class CoreTests
             TestFrozenDataSnapshots(runner, tempDir);
             TestServerList(runner, tempDir);
             TestQuestGateNamesResolved(runner, tempDir);
+            TestDiagnosticGeneratorAndBugReport(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -1136,6 +1137,160 @@ internal static class CoreTests
     /// load time to every quest with that name, so its rate uses the quest-active kills and it only drops while one of
     /// those quests is active. Duplicate names keep every ID; unknown names are listed, never guessed.
     /// </summary>
+    private static string RepoFile(params string[] parts)
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
+            if (File.Exists(Path.Combine(dir.FullName, "SkuaSim.slnx")))
+                return Path.Combine(new[] { dir.FullName }.Concat(parts).ToArray());
+        throw new FileNotFoundException("SkuaSim.slnx not found above the test binaries.");
+    }
+
+    /// <summary>
+    /// The Skua diagnostic generator (tools/skua/SkuaSim_Diagnostic.cs), run inside the simulator: the scenario it writes
+    /// reproduces the character (stats, items, story slots, dailies via world.getAchievement, reputation, boosts, Forge
+    /// unlocks, client options, the script's saved options), never contains the character name or name-like options,
+    /// and running it again on its own output gives the same character. Then the bug report is filled from a run.
+    /// </summary>
+    private static void TestDiagnosticGeneratorAndBugReport(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("26. Testing the diagnostic generator round trip and the bug report...");
+        var diagScript = RepoFile("tools", "skua", "SkuaSim_Diagnostic.cs");
+        var dir = Path.Combine(tempDir, "diagnostic");
+        Directory.CreateDirectory(dir);
+        var cfg = Path.Combine(dir, "Reported.cfg");
+        File.WriteAllLines(cfg, new[]
+        {
+            "Options:player1=SecretAlt", "Options:Leader=SecretLeader", "Options:Mode=SecretName", "Options:RoomNumber=1234",
+            "Setup:PrivateRoomNumber=5", "Options:Select Dailies Set=All"
+        });
+
+        Dictionary<string, System.Text.Json.JsonElement> DiagOptions(string outDir) => new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["OutputFolder"] = System.Text.Json.JsonSerializer.SerializeToElement(outDir),
+            ["ScriptOptionsFile"] = System.Text.Json.JsonSerializer.SerializeToElement(cfg),
+            ["ReportedScript"] = System.Text.Json.JsonSerializer.SerializeToElement("Story/Example.cs")
+        };
+        var source = new Scenario
+        {
+            Name = "Diagnostic source",
+            StartDate = new DateTime(2026, 11, 20, 19, 0, 0, DateTimeKind.Utc),
+            Player = new PlayerSetup
+            {
+                Username = "SecretName", Level = 77, Xp = 1234, Gold = 4321, Coins = 55, IsMember = false, Class = "Rogue",
+                ClassRank = 6, ClassPoints = 70_000, InventorySlots = 120, CompleteEquipment = false
+            },
+            Location = new LocationSetup { Map = "greenguardwest", Cell = "West3", Pad = "Left" },
+            Inventory = new()
+            {
+                new() { Name = "Rogue", Category = "Class", Equipped = true, EnhancementPatternID = 1, EnhancementLevel = 70 },
+                new() { Name = "Zz Diag Blade", Category = "Sword", Equipped = true, EnhancementPatternID = 10, EnhancementLevel = 70, ProcID = 1 },
+                new() { Name = "Zz Diag Helm", Category = "Helm", Equipped = true, EnhancementPatternID = 1, EnhancementLevel = 70 },
+                new() { Name = "Zz Diag Cape", Category = "Cape", Equipped = true, EnhancementPatternID = 1, EnhancementLevel = 70 },
+                new() { Name = "Dragon Scale", Quantity = 7, MaxStack = 10 }
+            },
+            Bank = new() { new() { Name = "Ancient Relic", Quantity = 3 } },
+            Quests = new QuestSetup { Active = new() { 2 }, DailiesCompleted = new() { 187, 328 }, SlotProgress = new() { ["32"] = 5 } },
+            Factions = new() { new() { Name = "Good", Id = 2, Rank = 5, TotalRep = 25_000 } },
+            Boosts = new BoostsSetup { GoldBoost = true },
+            Enhancements = new EnhancementsSetup { UnlockedForge = new() { "Forge (Weapon)" } },
+            Options = DiagOptions(Path.Combine(dir, "out1")),
+            BotOptions = new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["PrivateRooms"] = System.Text.Json.JsonSerializer.SerializeToElement(false),
+                ["ActionDelay"] = System.Text.Json.JsonSerializer.SerializeToElement(900)
+            },
+            Limits = new LimitsSetup { MaxVirtualMinutes = 30 }
+        };
+
+        Scenario RunDiagnostic(Scenario input, string outDir)
+        {
+            var report = runner.Run(new SimulationRunOptions { ScriptPath = diagScript, Scenario = input });
+            Assert(report.Outcome == SimulationOutcome.Completed, $"The diagnostic must complete ({report.Outcome}: {report.StopReason} {report.ExceptionText})");
+            Assert(report.UnimplementedCalls.Count == 0, $"The diagnostic must only use simulated API members, touched: {string.Join(", ", report.UnimplementedCalls.Keys)}");
+            var files = Directory.GetFiles(outDir, "diagnostic_*.json");
+            Assert(files.Length == 1 && Path.GetFileName(files[0]) == "diagnostic_20261120-190000_Example.json",
+                $"Expected one diagnostic named after the virtual capture time and the script, got [{string.Join(", ", files.Select(Path.GetFileName))}]");
+            var text = File.ReadAllText(files[0]);
+            foreach (var secret in new[] { "SecretName", "SecretAlt", "SecretLeader" })
+                Assert(!text.Contains(secret, StringComparison.OrdinalIgnoreCase), $"The diagnostic must never contain '{secret}'");
+            var loaded = Scenario.Load(files[0]);
+            loaded.SourcePath = files[0];
+            return loaded;
+        }
+
+        var first = RunDiagnostic(source, Path.Combine(dir, "out1"));
+        var p = first.Player;
+        Assert(p.Username == "Reporter" && p.Level == 77 && p.Xp == 1234 && p.Gold == 4321 && p.Coins == 55 && !p.IsMember &&
+               p.Class == "Rogue" && p.ClassRank == 6 && p.ClassPoints == 70_000 && p.InventorySlots == 120 && !p.CompleteEquipment,
+            $"Player fields must be captured (got {System.Text.Json.JsonSerializer.Serialize(p)})");
+        Assert(first.Location.Map == "greenguardwest" && first.Location.Cell == "West3" && first.Location.Pad == "Left", "Location must be captured");
+        Assert(first.StartDate == source.StartDate, $"startDate must be the capture time, got {first.StartDate:o}");
+        Assert(first.Inventory.Any(i => i.Name == "Rogue" && i.Equipped && i.EnhancementLevel == 70 && i.EnhancementPatternID == 1) &&
+               first.Inventory.Any(i => i.Name == "Zz Diag Blade" && i.Equipped && i.EnhancementPatternID == 10 && i.ProcID == 1) &&
+               first.Inventory.Any(i => i.Name == "Dragon Scale" && i.Quantity == 7) && first.Inventory.Count == 5,
+            $"Inventory must be captured as it is, got [{string.Join(", ", first.Inventory.Select(i => i.Name))}]");
+        Assert(first.Bank.Count == 1 && first.Bank[0].Name == "Ancient Relic" && first.Bank[0].Quantity == 3, "Bank must be captured");
+        Assert(first.Quests.Active.SequenceEqual(new[] { 2 }), "Active quests must be captured");
+        // AQW keeps one flag per (field, index): every quest sharing the flag of 187 (id0/9) or 328 (id0/0) reads as done.
+        var questFlags = System.Text.Json.JsonDocument.Parse(File.ReadAllText(SkuaInstallation.Detect().QuestDataFile)).RootElement
+            .EnumerateArray()
+            .Where(q => q.TryGetProperty("Field", out var f) && f.ValueKind == System.Text.Json.JsonValueKind.String && f.GetString()!.Length > 0)
+            .ToDictionary(q => q.GetProperty("ID").GetInt32(), q => (q.GetProperty("Field").GetString(), q.GetProperty("Index").GetInt32()));
+        var expectedDailies = questFlags.Where(kv => kv.Value == questFlags[187] || kv.Value == questFlags[328]).Select(kv => kv.Key).Order().ToList();
+        Assert(first.Quests.DailiesCompleted.SequenceEqual(expectedDailies) && expectedDailies.Contains(187) && expectedDailies.Contains(328),
+            $"Dailies done must come from world.getAchievement: expected [{string.Join(",", expectedDailies)}], got [{string.Join(",", first.Quests.DailiesCompleted)}]");
+        Assert(first.Quests.SlotProgress.GetValueOrDefault("32") == 5 && first.Quests.SlotProgress.GetValueOrDefault("21") == 27,
+            $"Story slots must be captured (32 = 5, Forge unlock slot 21 = 27), got {System.Text.Json.JsonSerializer.Serialize(first.Quests.SlotProgress)}");
+        Assert(first.Enhancements.UnlockedForge.SequenceEqual(new[] { "Forge (Weapon)" }) && first.Enhancements.UnlockedAwe.Count == 0,
+            $"Forge unlocks must be derived from the slots, got [{string.Join(", ", first.Enhancements.UnlockedForge)}]");
+        Assert(first.Factions.Count == 1 && first.Factions[0].Name == "Good" && first.Factions[0].TotalRep == 25_000, "Reputation must be captured");
+        Assert(first.Boosts.GoldBoost && !first.Boosts.XpBoost, "Running boosts must be captured (Boosts.IsBoostActive)");
+        Assert(first.BotOptions.TryGetValue("PrivateRooms", out var pr) && pr.ValueKind == System.Text.Json.JsonValueKind.False &&
+               first.BotOptions.TryGetValue("ActionDelay", out var ad) && ad.GetInt32() == 900 && !first.BotOptions.ContainsKey("CustomName"),
+            "Client options must be captured (never CustomName)");
+        Assert(first.Options.Count == 3 && first.Options["RoomNumber"].GetString() == "1234" &&
+               first.Options["Setup:PrivateRoomNumber"].GetString() == "5" && first.Options["Select Dailies Set"].GetString() == "All",
+            $"Script options must be copied without name-like keys or the character name, got {System.Text.Json.JsonSerializer.Serialize(first.Options)}");
+        Assert(first.Script == "Story/Example.cs", "The reported script must be named in the scenario");
+
+        // Round trip: the diagnostic of the diagnostic's character is the same character.
+        var again = Scenario.Load(first.SourcePath!);
+        again.Options = DiagOptions(Path.Combine(dir, "out2"));
+        again.Player.Username = "SecretName"; // the same real character (its .cfg holds its own name)
+        var second = RunDiagnostic(again, Path.Combine(dir, "out2"));
+        string State(Scenario s) => System.Text.Json.JsonSerializer.Serialize(new
+        {
+            s.Player, s.Location, s.Inventory, s.Bank, s.House, s.TempInventory, s.Quests, s.Factions, s.Boosts, s.Enhancements, s.BotOptions, s.Options
+        }, Scenario.JsonOptions);
+        Assert(State(first) == State(second), "Running the diagnostic on its own output must give the same character");
+
+        // Bug report from a run of a (buggy) script on the diagnostic's character.
+        var buggy = Path.Combine(dir, "BuggyScript.cs");
+        File.WriteAllText(buggy, """
+        using Skua.Core.Interfaces;
+
+        public class BuggyScript
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Log("Checking the relic");
+                if (bot.Bank.Contains("Ancient Relic", 3))
+                    throw new System.InvalidOperationException("relic logic is wrong");
+            }
+        }
+        """);
+        var bugRun = runner.Run(new SimulationRunOptions { ScriptPath = buggy, Scenario = first });
+        Assert(bugRun.Outcome == SimulationOutcome.ScriptException, $"The buggy script must throw on this character, got {bugRun.Outcome}");
+        var md = BugReportWriter.ToMarkdown(first, bugRun, first.SourcePath);
+        foreach (var expected in new[] { "# Bug report — `Story/Example.cs`", "## What went wrong", "## Character (from the diagnostic)",
+                     "| Level / class | 77 / Rogue (rank 6) |", "| Client options changed from Skua's defaults | PrivateRooms=False, ActionDelay=900 |", "**ScriptException**", "relic logic is wrong", "Checking the relic",
+                     "## How much to trust this reproduction", "## Regression test (after the fix)", "skuasim run --scenario" })
+            Assert(md.Contains(expected, StringComparison.Ordinal), $"The bug report must contain '{expected}'");
+        Assert(!md.Contains("SecretName", StringComparison.OrdinalIgnoreCase), "The bug report must not contain the character name");
+        Console.WriteLine($"   OK: diagnostic round trip ({first.Inventory.Count} inv / {first.Bank.Count} bank, {first.Quests.SlotProgress.Count} slots, " +
+                          $"{first.Quests.DailiesCompleted.Count} dailies, {first.Options.Count} options, 3 private values left out), bug report filled");
+    }
+
     private static void TestQuestGateNamesResolved(SimulationRunner runner, string tempDir)
     {
         Console.WriteLine("25. Testing quest-gated drop names resolved to quest IDs...");

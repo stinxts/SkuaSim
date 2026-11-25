@@ -160,6 +160,8 @@ Terminal interface for scripting and automated regression runs: `db-stats`, `com
 
 `snapshot create [<name>] [--note <text>]` freezes the data a run reads now — `gamedata.json` with the shared data merged and migrated, Skua's `QuestData.json` and the AE calendar — into `data\snapshots\<name>\` (default name: today's UTC date) with a `snapshot.json` manifest (sources, counts, SHA-256 of each file). A scenario with `"dataSnapshot": "<name>"`, or `run`/`test`/`whatif --data <name|folder>`, reads only those files, so its results stay the same while the collector keeps writing; the report shows `Game Data: snapshot …`, a changed snapshot file is warned about, and a missing snapshot fails the run instead of using live data. Snapshots are never overwritten. `snapshot list` shows them and checks their files.
 
+`bug-report <diagnostic.json> [<script.cs>] [--out <file.md>] [--report <full.md>] [--data <snapshot>]` turns a bug report into a reproduction. The reporter runs `toolsskuaSkuaSim_Diagnostic.cs` in Skua on the character that hit the bug; it saves that character as a scenario (level, class/rank/CP, gold/ACs, location, inventory/bank/house/temp items with enhancements, story slots, dailies done, reputation, running boosts, Awe/Forge unlocks, client options and the reported script's saved options; never the character name, guild, password or server, and no option that may hold an account or player name). `bug-report` runs the reported script on it and writes the filled [bug report template](docs/BUG_REPORT_TEMPLATE.md) (`<diagnostic>.bugreport.md`): character, outcome, exception, script log, how much to trust the run (uncollected maps, invented data, unimplemented API members) and asserts to start the regression test from.
+
 Exit codes (`run`): `0` completed/stopped, `2` compile error or script exception, `3` stalled. When the scenario has `asserts`, they decide instead (the expected outcome is one of them): `0` all passed, `4` an assert failed; a compile error stays `2`. `test`: `0` all passed, `4` a scenario failed, `1` nothing to run.
 
 ---
@@ -190,7 +192,9 @@ SkuaSim/
 │   └── SkuaSim.Cli/                # Headless CLI executable (skuasim)
 ├── tests/
 │   ├── SkuaSim.Collector.Tests/    # Parsing (incl. real anonymized packets), privacy, merge, schema v2 (9 suites)
-│   └── SkuaSim.Core.Tests/         # Compilation, determinism (incl. cross-process), stats, boosts, stall detector, drops (14 suites)
+│   └── SkuaSim.Core.Tests/         # Compilation, determinism (incl. cross-process), stats, boosts, stall detector, drops (26 suites)
+├── tools/skua/                     # Skua scripts to run in Skua/VibeSkua (SkuaSim_Diagnostic.cs: bug-report diagnostic file)
+├── docs/                           # BUG_REPORT_TEMPLATE.md, COLLECTOR_TESTERS.md
 ├── scenarios/                      # Ready-to-use JSON scenarios (starter, leveling, dailies, VHL farm, Forge unlocks, ...)
 ├── data/                           # Local gamedata.json mirror, packet_schemas.json & sample reports (git-ignored)
 └── dist/plugins/                   # Release SkuaSim.Collector.dll for Skua/VibeSkua (git-ignored)
@@ -282,5 +286,5 @@ See [PLAN.md](PLAN.md) and [CONTEXT.md](CONTEXT.md) for the full design specific
 - [x] **Phase 3.4 — Simulator Robustness:** `KillQuest` hints and on-demand monsters, Stalled detector, cross-process determinism.
 - [ ] **Phase 3.5 — Collector Corrections & Schema v2/v3:** protocol verification ✅, monster level / drop attribution fixes ✅, schema v2 with quest-gated rates and passive official drops ✅, schema v3 with real XP/gold per kill, respawn times and room occupancy ✅; next: simulator consumption of the new data, class-stat modeling and quality items.
 - [ ] **Phase 4 — Multi-Client (Army) Simulation:** Up to 20 concurrent simulated players sharing rooms, monster HP pools, party sync, Army coordination files, CoreBots CBO options, live class/enhancement swaps and potions.
-- [ ] **Phase 5 — Fault Injection & Scenario Assertions:** Simulated lag/disconnects/drop failures, automated pass/fail assertions, and one-click bug-report diagnostic templates.
+- [x] **Phase 5 — Fault Injection & Scenario Assertions:** scenario faults (de-syncs, disconnects, refused joins, drop droughts), scenario `asserts` + `skuasim test`, frozen data snapshots, and the Skua diagnostic generator + `skuasim bug-report` template.
 - [ ] **Phase 6 — Session Replay & Public Release Packaging:** Real session log replay, OMNISCOPE integration and standalone distribution bundles.

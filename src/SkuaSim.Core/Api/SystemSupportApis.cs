@@ -6,6 +6,7 @@ using Newtonsoft.Json.Linq;
 using Skua.Core.Interfaces;
 using Skua.Core.Models;
 using Skua.Core.Models.Auras;
+using Skua.Core.Models.Items;
 using Skua.Core.Models.Servers;
 using SkuaSim.Core.Proxies;
 using SkuaSim.Core.Runtime;
@@ -70,6 +71,11 @@ public sealed class OptionsApi : ApiBase, IPropertyDefaults, IProxyAware
     };
 
     private ProxyState? _state;
+
+    /// <summary>Whether a scenario client option has Skua's default value (unknown options never do).</summary>
+    public static bool IsDefaultValue(string name, System.Text.Json.JsonElement value) =>
+        Defaults.TryGetValue(name, out var d) && d != null &&
+        string.Equals(d.ToString(), value.ValueKind == System.Text.Json.JsonValueKind.String ? value.GetString() : value.ToString(), StringComparison.OrdinalIgnoreCase);
 
     public OptionsApi(SimContext ctx) : base(ctx) { }
 
@@ -446,8 +452,18 @@ public sealed class FlashApi : ApiBase
         "world.myavatar.objdata.intcoins" => World.Coins,
         "world.myavatar.objdata.intgold" => World.Gold,
         "world.myavatar.objdata.intlevel" => World.Level,
+        "world.myavatar.objdata.intexp" => World.XP,
+        // Total CP of the equipped class (the updateClass packet's iCP, e.g. 302500 at rank 10).
+        "world.myavatar.objdata.icp" => World.TotalClassPoints,
         _ => null
     };
+
+    /// <summary>"world.getAchievement(field, index)" for daily/weekly/monthly quest fields, null for any other call.</summary>
+    private bool? QuestAchievement(string path, object[] args) =>
+        string.Equals(path, "world.getAchievement", StringComparison.OrdinalIgnoreCase) && args is { Length: >= 2 } &&
+        int.TryParse(args[1]?.ToString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var index)
+            ? World.QuestPeriodAchievement(args[0]?.ToString(), index)
+            : null;
 
     public string GetGameObject(string path)
     {
@@ -538,6 +554,9 @@ public sealed class FlashApi : ApiBase
         if (string.Equals(path, "world.getQuestValue", StringComparison.OrdinalIgnoreCase))
             return QuestSlotValue(args).ToString(System.Globalization.CultureInfo.InvariantCulture);
 
+        if (QuestAchievement(path, args) is { } achieved)
+            return achieved ? "1" : "0";
+
         if (string.Equals(path, "world.abandonQuest", StringComparison.OrdinalIgnoreCase) &&
             args is { Length: > 0 } && int.TryParse(args[0]?.ToString(), out var qid))
         {
@@ -572,6 +591,13 @@ public sealed class FlashApi : ApiBase
             if (typeof(T) == typeof(int)) return (T)(object)value;
             if (typeof(T) == typeof(long)) return (T)(object)(long)value;
             if (typeof(T) == typeof(string)) return (T)(object)value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        if (QuestAchievement(path, args) is { } achieved)
+        {
+            if (typeof(T) == typeof(bool)) return (T)(object)achieved;
+            if (typeof(T) == typeof(int)) return (T)(object)(achieved ? 1 : 0);
+            if (typeof(T) == typeof(long)) return (T)(object)(achieved ? 1L : 0L);
+            if (typeof(T) == typeof(string)) return (T)(object)(achieved ? "1" : "0");
         }
         return typeof(T) == typeof(bool) ? (T)(object)true : default!;
     }
@@ -793,6 +819,16 @@ public sealed class BoostsApi : ApiBase
     public Task StartAsync() { Enabled = true; return Task.CompletedTask; }
     public Task StopAsync() { Enabled = false; return Task.CompletedTask; }
     public void SetAllBoostsIDs() { }
+
+    /// <summary>Whether a consumable boost of this type is running (scenario <c>boosts</c>, or started by the script).</summary>
+    public bool IsBoostActive(BoostType type) => type switch
+    {
+        BoostType.Experience => World.XpBoostActive,
+        BoostType.Class => World.ClassBoostActive,
+        BoostType.Gold => World.GoldBoostActive,
+        BoostType.Reputation => World.RepBoostActive,
+        _ => false
+    };
 }
 
 /// <summary>
