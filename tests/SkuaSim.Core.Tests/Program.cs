@@ -57,6 +57,7 @@ internal static class CoreTests
             TestScenarioAssertions(runner, tempDir);
             TestFrozenDataSnapshots(runner, tempDir);
             TestServerList(runner, tempDir);
+            TestQuestGateNamesResolved(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -1128,6 +1129,82 @@ internal static class CoreTests
                inactive.SynthesizedData.Any(s => s.Key.StartsWith("droprate:gate beast:990102")),
             "An official drop with no measured rate must use a flagged synthesized chance instead of 0 %");
         Console.WriteLine($"   OK: Gated Fang inactive=0 / active={active.DropsByItem["Gated Fang"]}, Official Pelt synthesized={inactive.DropsByItem["Official Pelt"]}");
+    }
+
+    /// <summary>
+    /// A quest-gated drop known only by quest names (monsterDrops "questGated" with an empty "sReqQuests") is resolved at
+    /// load time to every quest with that name, so its rate uses the quest-active kills and it only drops while one of
+    /// those quests is active. Duplicate names keep every ID; unknown names are listed, never guessed.
+    /// </summary>
+    private static void TestQuestGateNamesResolved(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("25. Testing quest-gated drop names resolved to quest IDs...");
+        var dir = Path.Combine(tempDir, "gate_names");
+        Directory.CreateDirectory(dir);
+        var gameDataPath = Path.Combine(dir, "gamedata.json");
+        File.WriteAllText(gameDataPath, """
+        {
+          "SchemaVersion": 4,
+          "Maps": { "zzgatenames": { "Name": "zzgatenames", "Cells": { "Enter": ["Spawn"], "r1": ["Left"] },
+            "Monsters": { "1": { "MapID": 1, "MonsterID": 990301, "Name": "Name Beast", "Cell": "r1", "Level": 5, "MaxHP": 300 } } } },
+          "Monsters": { "id:990301": { "Key": "id:990301", "ID": 990301, "Name": "Name Beast", "Level": 5, "MaxHP": 300, "CreditedKills": 100,
+            "CreditedKillsByActiveQuestSet": { "": 50, "990311": 30, "990312": 20 },
+            "Drops": { "990321": { "ItemID": 990321, "ItemName": "Named Gate Horn", "IsOfficialDrop": true, "QuestGated": true,
+                                   "QuestGatedNames": ["Zz Twin Quest", "Zz Lost Quest"],
+                                   "CreditedDropEvents": 50, "CreditedTrackedDropEvents": 50 } } } }
+        }
+        """);
+        var questDataPath = Path.Combine(dir, "QuestData.json");
+        File.WriteAllText(questDataPath, """
+        [ { "ID": 990311, "Name": "Zz Twin Quest", "Requirements": [], "Rewards": [], "AcceptRequirements": [] },
+          { "ID": 990312, "Name": "Zz Twin Quest", "Requirements": [], "Rewards": [], "AcceptRequirements": [] },
+          { "ID": 990313, "Name": "Zz Other Quest", "Requirements": [], "Rewards": [], "AcceptRequirements": [] } ]
+        """);
+
+        var catalog = GameDataCatalog.Load(gameDataPath, questDataPath);
+        var drop = catalog.Captured.Monsters["id:990301"].Drops[990321];
+        Assert(drop.RequiredQuestIds.SetEquals(new[] { 990311, 990312 }),
+            $"Both quests named 'Zz Twin Quest' must be kept, got [{string.Join(",", drop.RequiredQuestIds.Order())}]");
+        Assert(drop.CreditedEligibleKills == 50 && drop.CreditedRateBasis == "quest_active_kills" && drop.EstimatedDropChance == 1.0,
+            $"The rate must use the 50 quest-active kills (got {drop.CreditedEligibleKills}, {drop.CreditedRateBasis}, {drop.EstimatedDropChance})");
+        Assert(catalog.QuestGateNames.ResolvedDrops == 1 && catalog.QuestGateNames.UnresolvedNames.SequenceEqual(new[] { "Zz Lost Quest" }),
+            $"Expected 1 resolved drop and 'Zz Lost Quest' unresolved, got {catalog.QuestGateNames}");
+        var onDisk = SkuaSim.Collector.Storage.GameDatabaseStore.ReadSharedFile(gameDataPath);
+        Assert(onDisk.Monsters["id:990301"].Drops[990321].RequiredQuestIds.Count == 0, "gamedata.json itself must never change");
+
+        var script = Path.Combine(tempDir, "GateNamesBot.cs");
+        File.WriteAllText(script, """
+        using Skua.Core.Interfaces;
+
+        public class GateNamesBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Map.Join("zzgatenames");
+                for (var i = 0; i < 4; i++)
+                {
+                    bot.Hunt.Monster("Name Beast");
+                    bot.Sleep(13_000);
+                }
+            }
+        }
+        """);
+        Scenario MakeScenario(List<int> active) => new()
+        {
+            Name = "Gate names",
+            Player = new PlayerSetup { Username = "Tester", Level = 100, MaxHealth = 10_000, DamagePerSecond = 8_000 },
+            Quests = new QuestSetup { Active = active },
+            Limits = new LimitsSetup { MaxVirtualMinutes = 30 }
+        };
+        var inactive = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = MakeScenario(new() { 990313 }), GameDataPath = gameDataPath, QuestDataPath = questDataPath });
+        var active = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = MakeScenario(new() { 990312 }), GameDataPath = gameDataPath, QuestDataPath = questDataPath });
+        Assert(inactive.Outcome == SimulationOutcome.Completed && active.Outcome == SimulationOutcome.Completed,
+            $"Both runs must complete ({inactive.Outcome}: {inactive.StopReason}; {active.Outcome}: {active.StopReason})");
+        Assert(inactive.DropsByItem.GetValueOrDefault("Named Gate Horn") == 0,
+            $"Without one of its quests active the drop must not drop (got {inactive.DropsByItem.GetValueOrDefault("Named Gate Horn")})");
+        Assert(active.DropsByItem.GetValueOrDefault("Named Gate Horn") >= 4,
+            $"With the second 'Zz Twin Quest' active the measured 100 % rate must apply (got {active.DropsByItem.GetValueOrDefault("Named Gate Horn")})");
+        Console.WriteLine($"   OK: names -> [990311, 990312], unresolved 'Zz Lost Quest', inactive=0 / active={active.DropsByItem["Named Gate Horn"]}");
     }
 
     /// <summary>

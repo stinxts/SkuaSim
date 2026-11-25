@@ -75,8 +75,6 @@ public sealed class GameDataCatalog
             // drop has its rate source (legacy vs credited kills); gamedata.json itself is never changed here.
             if (captured.SchemaVersion < GameDatabase.CurrentSchemaVersion)
                 SkuaSim.Collector.Storage.GameDatabaseMigrations.MigrateToCurrent(captured, null);
-            foreach (var monster in captured.Monsters.Values)
-                DropRates.Recompute(monster);
         }
 
         var quests = new Dictionary<int, QuestData>();
@@ -89,7 +87,67 @@ public sealed class GameDataCatalog
             usedQuests = Path.GetFullPath(questDataPath);
         }
 
-        return new GameDataCatalog(captured, usedCaptured, quests, usedQuests) { Contributions = contributions };
+        // Quest names must become IDs before the rates are recomputed: the quest-gated denominator needs the IDs.
+        var gateNames = ResolveQuestGateNames(captured, quests);
+        foreach (var monster in captured.Monsters.Values)
+            DropRates.Recompute(monster);
+
+        return new GameDataCatalog(captured, usedCaptured, quests, usedQuests) { Contributions = contributions, QuestGateNames = gateNames };
+    }
+
+    /// <summary>Outcome of <see cref="ResolveQuestGateNames"/> for the loaded data.</summary>
+    public sealed record QuestGateNameResolution(int ResolvedDrops, IReadOnlyList<string> UnresolvedNames);
+
+    /// <summary>Quest-gated drops whose quest names (monsterDrops "questGated") were turned into quest IDs at load time.</summary>
+    public QuestGateNameResolution QuestGateNames { get; private init; } = new(0, Array.Empty<string>());
+
+    /// <summary>
+    /// A quest-gated drop recorded from the server's monsterDrops list may carry only quest <b>names</b> ("questGated")
+    /// when the item's "sReqQuests" was empty. Such a drop is resolved in memory to every quest with that exact name
+    /// (QuestData.json, then quests captured by the collector), so it only drops while one of them is active. Names
+    /// are not unique (e.g. "Void Knight Sword Quest" = 5659 and 5662), and "sReqQuests" lists every one of them too
+    /// (checked on the live data, 2026-11-25), so all matches are kept. gamedata.json is never changed.
+    /// </summary>
+    internal static QuestGateNameResolution ResolveQuestGateNames(GameDatabase captured, IReadOnlyDictionary<int, QuestData> quests)
+    {
+        Dictionary<string, HashSet<int>>? byName = null;
+        var resolvedDrops = 0;
+        var unresolved = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var monster in captured.Monsters.Values)
+        {
+            foreach (var drop in monster.Drops.Values)
+            {
+                if (!drop.QuestGated || drop.RequiredQuestIds.Count > 0 || drop.QuestGatedNames.Count == 0)
+                    continue;
+                byName ??= BuildQuestNameIndex(captured, quests);
+                foreach (var name in drop.QuestGatedNames)
+                {
+                    if (byName.TryGetValue(name.Trim(), out var ids))
+                        drop.RequiredQuestIds.UnionWith(ids);
+                    else
+                        unresolved.Add(name.Trim());
+                }
+                if (drop.RequiredQuestIds.Count > 0)
+                    resolvedDrops++;
+            }
+        }
+        return new QuestGateNameResolution(resolvedDrops, unresolved.ToList());
+    }
+
+    private static Dictionary<string, HashSet<int>> BuildQuestNameIndex(GameDatabase captured, IReadOnlyDictionary<int, QuestData> quests)
+    {
+        var byName = new Dictionary<string, HashSet<int>>(StringComparer.OrdinalIgnoreCase);
+        void Add(int id, string? name)
+        {
+            if (id <= 0 || string.IsNullOrWhiteSpace(name))
+                return;
+            (byName.TryGetValue(name.Trim(), out var set) ? set : byName[name.Trim()] = new HashSet<int>()).Add(id);
+        }
+        foreach (var q in quests.Values)
+            Add(q.ID, q.Name);
+        foreach (var q in captured.Quests.Values)
+            Add(q.ID, q.Name);
+        return byName;
     }
 
     private void BuildIndexes()
