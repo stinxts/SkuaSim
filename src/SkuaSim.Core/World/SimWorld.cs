@@ -174,6 +174,9 @@ public sealed partial class SimWorld
     // ---------------------------------------------------------------- Quests
     public Dictionary<int, Quest> LoadedQuests { get; } = new();
     public HashSet<int> ActiveQuests { get; } = new();
+    /// <summary>Acceptance sequence of quests accepted during the run (scenario quests have none).</summary>
+    private readonly Dictionary<int, long> _questAcceptOrder = new();
+    private long _questAcceptCounter;
     public HashSet<int> CompletedQuests { get; } = new();
     public HashSet<int> DailiesCompleted { get; } = new();
     public Dictionary<int, int> SlotProgress { get; } = new();
@@ -580,8 +583,10 @@ public sealed partial class SimWorld
             var result = new List<WantedItem>();
             var addedIds = new HashSet<int>();
 
-            // 1. Active quest requirements are always primary farm targets.
-            foreach (var qid in ActiveQuests)
+            // 1. Active quest requirements are always primary farm targets. The quest the script accepted last comes
+            // first (it is what the script is working on); quests the character already had from the scenario follow,
+            // in ID order.
+            foreach (var qid in ActiveQuests.OrderByDescending(q => _questAcceptOrder.GetValueOrDefault(q)).ThenBy(q => q))
             {
                 if (!LoadedQuests.TryGetValue(qid, out var quest))
                     continue;
@@ -594,10 +599,9 @@ public sealed partial class SimWorld
                 }
             }
 
-            if (result.Count > 0)
-                return result;
-
-            // 2. When no active quest needs items, fall back to direct drop items queried on the current map.
+            // 2. Direct drop items the script is hunting right now (pickup-registered or temp queries). These are added
+            // even while active quests need other items: a quest the character carries from the real game (e.g. one
+            // needing "Dark Gem") must not hide the merge ingredient the script is farming.
             foreach (var (key, q) in _recentQueries)
             {
                 if (Now - q.Time > 8_000)
@@ -2055,6 +2059,7 @@ public sealed partial class SimWorld
             }
 
             ActiveQuests.Add(id);
+            _questAcceptOrder[id] = ++_questAcceptCounter;
             QuestsAcceptedCount++;
             Trace.World($"Accepted quest {id} ({q.Name}).");
             EnsureQuestTicker();

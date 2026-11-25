@@ -144,6 +144,11 @@ public static class BugReportWriter
         }
         if (r.SynthesizedMaps.Count > 0)
             sb.AppendLine($"- **Maps never collected** (monsters and cells invented; run the Collector there): {string.Join(", ", r.SynthesizedMaps.Select(m => $"`{m}`"))}");
+        // An uncollected shop is as decisive as an uncollected map: what it sells (merges, quest items) is unknown.
+        var shops = r.SynthesizedData.Where(s => s.Key.StartsWith("shop:", StringComparison.Ordinal)).ToList();
+        if (shops.Count > 0)
+            sb.AppendLine($"- **Shops never collected** (what they sell is unknown, so purchases and merges from them cannot happen as in game; " +
+                          $"open them in game with the Collector running): {string.Join(", ", shops.Select(s => $"`{s.Key["shop:".Length..]}`"))}");
         if (r.SynthesizedData.Count > 0)
         {
             sb.AppendLine($"- **Invented data** ({r.SynthesizedData.Count} record(s)); results that depend on it may differ from the real game:");

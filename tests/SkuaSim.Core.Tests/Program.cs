@@ -59,6 +59,7 @@ internal static class CoreTests
             TestServerList(runner, tempDir);
             TestQuestGateNamesResolved(runner, tempDir);
             TestDiagnosticGeneratorAndBugReport(runner, tempDir);
+            TestFarmTargetsWithCarriedOverQuests(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -1133,6 +1134,68 @@ internal static class CoreTests
     }
 
     /// <summary>
+    /// Farm targets with quests carried over from the real game (diagnostic scenarios keep the character's active quests):
+    /// an active quest needing some other item must not hide the item the script hunts (a merge ingredient, Grimgaol's
+    /// Champion's Seal), and an uncaptured map item gives what the quest the script accepted last needs, not what an
+    /// older scenario quest needs.
+    /// </summary>
+    private static void TestFarmTargetsWithCarriedOverQuests(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("27. Testing farm targets: carried-over quests do not hide hunted items or steal map items...");
+        var gameDataPath = Path.Combine(tempDir, "gamedata_farmtargets.json");
+        File.WriteAllText(gameDataPath, """
+        {
+          "SchemaVersion": 2,
+          "Maps": { "zzsealmap": { "Name": "zzsealmap", "Cells": { "Enter": ["Spawn"], "r1": ["Left"] },
+            "Monsters": { "1": { "MapID": 1, "MonsterID": 990011, "Name": "Seal Beast", "Cell": "r1", "Level": 5, "MaxHP": 300 } } } },
+          "Monsters": { "id:990011": { "Key": "id:990011", "ID": 990011, "Name": "Seal Beast", "Level": 5, "MaxHP": 300 } },
+          "Quests": {
+            "990501": { "ID": 990501, "Name": "Old Errand", "Requirements": [ { "ItemID": 990601, "ItemName": "Distant Relic", "Quantity": 1, "Temp": false } ] },
+            "990502": { "ID": 990502, "Name": "Strike the Rock", "Requirements": [ { "ItemID": 990602, "ItemName": "Rock Struck", "Quantity": 1, "Temp": false } ] }
+          }
+        }
+        """);
+
+        var script = Path.Combine(tempDir, "FarmTargetBot.cs");
+        File.WriteAllText(script, """
+        using Skua.Core.Interfaces;
+
+        public class FarmTargetBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Map.Join("zzsealmap");
+                bot.Drops.Add("Wanted Seal");
+                bot.Hunt.ForItem("Seal Beast", "Wanted Seal", 1);
+                bot.Quests.EnsureAccept(990502);
+                bot.Map.GetMapItem(777);
+                bot.Log(bot.Inventory.Contains("Rock Struck") ? "ROCK=yes" : "ROCK=no");
+            }
+        }
+        """);
+
+        var scenario = new Scenario
+        {
+            Name = "Carried-over quest",
+            Player = new PlayerSetup { Username = "Tester", Level = 100, MaxHealth = 10_000, DamagePerSecond = 8_000 },
+            Quests = new QuestSetup { Active = new List<int> { 990501 } },
+            Limits = new LimitsSetup { MaxVirtualMinutes = 30 }
+        };
+        var report = runner.Run(new SimulationRunOptions { ScriptPath = script, Scenario = scenario, GameDataPath = gameDataPath });
+
+        Assert(report.Outcome == SimulationOutcome.Completed,
+            $"The hunt for 'Wanted Seal' must finish although quest 990501 needs another item ({report.Outcome}: {report.StopReason})");
+        Assert(report.DropsByItem.GetValueOrDefault("Wanted Seal") >= 1, "'Wanted Seal' must drop (synthesized and flagged)");
+        Assert(report.SynthesizedData.Any(s => s.Key.StartsWith("drop:seal beast:") && s.Description.Contains("'Wanted Seal'")),
+            "The invented 'Wanted Seal' drop must be flagged");
+        var mapItem = report.SynthesizedData.FirstOrDefault(s => s.Key == "mapitem:zzsealmap:777");
+        Assert(mapItem != null && mapItem.Description.Contains("'Rock Struck'"),
+            $"Map item 777 must be assumed to give the last accepted quest's 'Rock Struck' (got: {mapItem?.Description ?? "no record"})");
+        Assert(report.ScriptLogs.Any(l => l.Text.Contains("ROCK=yes")), "The script must own 'Rock Struck' after GetMapItem");
+        Console.WriteLine("   OK: Wanted Seal dropped despite the carried-over quest; map item gave Rock Struck");
+    }
+
+    /// <summary>
     /// A quest-gated drop known only by quest names (monsterDrops "questGated" with an empty "sReqQuests") is resolved at
     /// load time to every quest with that name, so its rate uses the quest-active kills and it only drops while one of
     /// those quests is active. Duplicate names keep every ID; unknown names are listed, never guessed.
@@ -1183,7 +1246,7 @@ internal static class CoreTests
             Inventory = new()
             {
                 new() { Name = "Rogue", Category = "Class", Equipped = true, EnhancementPatternID = 1, EnhancementLevel = 70 },
-                new() { Name = "Zz Diag Blade", Category = "Sword", Equipped = true, EnhancementPatternID = 10, EnhancementLevel = 70, ProcID = 1, Meta = "gold:0.1" },
+                new() { Name = "Zz Diag Blade", Category = "Sword", Equipped = true, EnhancementPatternID = 10, EnhancementLevel = 70, ProcID = 1, Meta = "gold:1.30" },
                 new() { Name = "Zz Diag Helm", Category = "Helm", Equipped = true, EnhancementPatternID = 1, EnhancementLevel = 70 },
                 new() { Name = "Zz Diag Cape", Category = "Cape", Equipped = true, EnhancementPatternID = 1, EnhancementLevel = 70 },
                 new() { Name = "Dragon Scale", Quantity = 7, MaxStack = 10 }
@@ -1226,7 +1289,7 @@ internal static class CoreTests
         Assert(first.Location.Map == "greenguardwest" && first.Location.Cell == "West3" && first.Location.Pad == "Left", "Location must be captured");
         Assert(first.StartDate == source.StartDate, $"startDate must be the capture time, got {first.StartDate:o}");
         Assert(first.Inventory.Any(i => i.Name == "Rogue" && i.Equipped && i.EnhancementLevel == 70 && i.EnhancementPatternID == 1) &&
-               first.Inventory.Any(i => i.Name == "Zz Diag Blade" && i.Equipped && i.EnhancementPatternID == 10 && i.ProcID == 1 && i.Meta == "gold:0.1") &&
+               first.Inventory.Any(i => i.Name == "Zz Diag Blade" && i.Equipped && i.EnhancementPatternID == 10 && i.ProcID == 1 && i.Meta == "gold:1.30") &&
                first.Inventory.Any(i => i.Name == "Dragon Scale" && i.Quantity == 7) && first.Inventory.Count == 5,
             $"Inventory must be captured as it is, got [{string.Join(", ", first.Inventory.Select(i => i.Name))}]");
         Assert(first.Bank.Count == 1 && first.Bank[0].Name == "Ancient Relic" && first.Bank[0].Quantity == 3, "Bank must be captured");

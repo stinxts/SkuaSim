@@ -336,6 +336,12 @@ public sealed class SendApi : ApiBase
                     World.Sell(null, sellItemId, Math.Max(1, sellQty));
                 break;
 
+            case "house":
+                // %xt%zm%house%1%<player name>% — go to a house (CoreBots sends the character to its own after a relogin).
+                // One player per run: every house request joins the "house" map.
+                World.Join("house", null, null, ignoreCheck: false);
+                break;
+
             case "mtcid":
                 // %xt%zm%mtcid%<room>%<cell number>% — PvP door move (CoreBots.PvPMove).
                 if (parts.Length >= 5 && int.TryParse(parts[4], out var cellNumber))
