@@ -86,6 +86,7 @@ public sealed partial class SimWorld
         Member = i.Upgrade ? true : null,
         EnhancementLevel = i.EnhancementLevel > 0 ? i.EnhancementLevel : null,
         EnhancementPatternID = i.EnhancementPatternID > 0 ? i.EnhancementPatternID : null,
-        ProcID = i.ProcID > 0 ? i.ProcID : null
+        ProcID = i.ProcID > 0 ? i.ProcID : null,
+        Meta = string.IsNullOrWhiteSpace(i.Meta) ? null : i.Meta
     };
 }

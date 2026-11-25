@@ -75,7 +75,7 @@ public class SkuaSimDiagnostic
         }
 
         var notes = new List<string>();
-        var reportedScript = (Bot.Config!.Get<string>("ReportedScript") ?? "").Trim().Replace('\\', '/');
+        var reportedScript = ResolveReportedScript((Bot.Config!.Get<string>("ReportedScript") ?? "").Trim().Replace('\\', '/'), notes);
         var captured = DateTime.UtcNow;
         captured = new DateTime(captured.Ticks - captured.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
 
@@ -235,6 +235,35 @@ public class SkuaSimDiagnostic
             Bot.Log($"[SkuaSim Diagnostic] Note: {note}");
     }
 
+    /// <summary>
+    /// The reported script as a path relative to the Scripts folder. A bare name ("GrimGaol", "grimgaol.cs") or a wrong
+    /// folder is looked up by file name (case-insensitive); with one match its real path is used.
+    /// </summary>
+    private static string ResolveReportedScript(string given, List<string> notes)
+    {
+        if (given.Length == 0 || Path.IsPathRooted(given))
+            return given;
+        var scriptsDir = ClientFileSources.SkuaScriptsDIR;
+        if (File.Exists(Path.Combine(scriptsDir, given)))
+            return given;
+        var fileName = Path.GetFileName(given);
+        if (!fileName.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+            fileName += ".cs";
+        if (!Directory.Exists(scriptsDir))
+            return given;
+        var matches = Directory.EnumerateFiles(scriptsDir, "*.cs", SearchOption.AllDirectories)
+            .Where(f => string.Equals(Path.GetFileName(f), fileName, StringComparison.OrdinalIgnoreCase))
+            .Select(f => Path.GetRelativePath(scriptsDir, f).Replace('\\', '/'))
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (matches.Count == 1)
+            return matches[0];
+        notes.Add(matches.Count == 0
+            ? $"Reported script \"{given}\" was not found in the Scripts folder."
+            : $"Reported script \"{given}\" matches {matches.Count} files ({string.Join(", ", matches)}): give its folder.");
+        return given;
+    }
+
     private static JArray Items(IEnumerable<InventoryItem> items) => new(items
         .OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ThenBy(i => i.ID)
         .Select(i =>
@@ -248,6 +277,7 @@ public class SkuaSimDiagnostic
             if (i.EnhancementLevel > 0) o["enhancementLevel"] = i.EnhancementLevel;
             if (i.EnhancementPatternID > 0) o["enhancementPatternID"] = i.EnhancementPatternID;
             if (i.ProcID > 0) o["procID"] = i.ProcID;
+            if (!string.IsNullOrWhiteSpace(i.Meta)) o["meta"] = i.Meta;
             return o;
         }));
 
@@ -274,10 +304,7 @@ public class SkuaSimDiagnostic
                 return;
             var scriptPath = Path.IsPathRooted(reportedScript) ? reportedScript : Path.Combine(ClientFileSources.SkuaScriptsDIR, reportedScript);
             if (!File.Exists(scriptPath))
-            {
-                notes.Add($"Reported script not found ({reportedScript}): its options were not included.");
-                return;
-            }
+                return; // already noted by ResolveReportedScript
             var storage = Regex.Match(File.ReadAllText(scriptPath), @"OptionsStorage\s*(?:=|=>)\s*""([^""]+)""");
             if (!storage.Success)
                 return; // the script has no saved options

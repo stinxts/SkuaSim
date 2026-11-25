@@ -1183,7 +1183,7 @@ internal static class CoreTests
             Inventory = new()
             {
                 new() { Name = "Rogue", Category = "Class", Equipped = true, EnhancementPatternID = 1, EnhancementLevel = 70 },
-                new() { Name = "Zz Diag Blade", Category = "Sword", Equipped = true, EnhancementPatternID = 10, EnhancementLevel = 70, ProcID = 1 },
+                new() { Name = "Zz Diag Blade", Category = "Sword", Equipped = true, EnhancementPatternID = 10, EnhancementLevel = 70, ProcID = 1, Meta = "gold:0.1" },
                 new() { Name = "Zz Diag Helm", Category = "Helm", Equipped = true, EnhancementPatternID = 1, EnhancementLevel = 70 },
                 new() { Name = "Zz Diag Cape", Category = "Cape", Equipped = true, EnhancementPatternID = 1, EnhancementLevel = 70 },
                 new() { Name = "Dragon Scale", Quantity = 7, MaxStack = 10 }
@@ -1226,7 +1226,7 @@ internal static class CoreTests
         Assert(first.Location.Map == "greenguardwest" && first.Location.Cell == "West3" && first.Location.Pad == "Left", "Location must be captured");
         Assert(first.StartDate == source.StartDate, $"startDate must be the capture time, got {first.StartDate:o}");
         Assert(first.Inventory.Any(i => i.Name == "Rogue" && i.Equipped && i.EnhancementLevel == 70 && i.EnhancementPatternID == 1) &&
-               first.Inventory.Any(i => i.Name == "Zz Diag Blade" && i.Equipped && i.EnhancementPatternID == 10 && i.ProcID == 1) &&
+               first.Inventory.Any(i => i.Name == "Zz Diag Blade" && i.Equipped && i.EnhancementPatternID == 10 && i.ProcID == 1 && i.Meta == "gold:0.1") &&
                first.Inventory.Any(i => i.Name == "Dragon Scale" && i.Quantity == 7) && first.Inventory.Count == 5,
             $"Inventory must be captured as it is, got [{string.Join(", ", first.Inventory.Select(i => i.Name))}]");
         Assert(first.Bank.Count == 1 && first.Bank[0].Name == "Ancient Relic" && first.Bank[0].Quantity == 3, "Bank must be captured");
@@ -1287,6 +1287,45 @@ internal static class CoreTests
                      "## How much to trust this reproduction", "## Regression test (after the fix)", "skuasim run --scenario" })
             Assert(md.Contains(expected, StringComparison.Ordinal), $"The bug report must contain '{expected}'");
         Assert(!md.Contains("SecretName", StringComparison.OrdinalIgnoreCase), "The bug report must not contain the character name");
+        Assert(!bugRun.SynthesizedData.Any(s => s.Key.StartsWith("item:zz diag", StringComparison.Ordinal)),
+            "Items given in full by a diagnostic (ID, category, max stack) are real data, never reported as invented");
+
+        // AC items take no bank space (CoreBots banks them with no free slot; seen on a real diagnostic: 187 non-AC items
+        // in 210 slots next to 4,074 AC items).
+        var bankScript = Path.Combine(dir, "BankSlotsBot.cs");
+        File.WriteAllText(bankScript, """
+        using Skua.Core.Interfaces;
+
+        public class BankSlotsBot
+        {
+            public void ScriptMain(IScriptInterface bot)
+            {
+                bot.Log($"used={bot.Bank.UsedSlots} free={bot.Bank.FreeSlots}");
+                bot.Log($"ac={bot.Inventory.ToBank("Zz AC Trinket")} plain={bot.Inventory.ToBank("Zz Plain Rock")}");
+            }
+        }
+        """);
+        var bankRun = runner.Run(new SimulationRunOptions
+        {
+            ScriptPath = bankScript,
+            Scenario = new Scenario
+            {
+                Player = new PlayerSetup { Username = "Tester", BankSlots = 1, CompleteEquipment = false },
+                Inventory = new()
+                {
+                    new() { Name = "Zz AC Trinket", Id = 990401, Category = "Item", MaxStack = 1, Coins = true },
+                    new() { Name = "Zz Plain Rock", Id = 990402, Category = "Item", MaxStack = 10 }
+                },
+                Bank = new()
+                {
+                    new() { Name = "Zz Banked Rock", Id = 990403, Category = "Item", MaxStack = 10 },
+                    new() { Name = "Zz Banked AC", Id = 990404, Category = "Item", MaxStack = 1, Coins = true }
+                }
+            }
+        });
+        var bankLogs = string.Join(" | ", bankRun.ScriptLogs.Select(l => l.Text));
+        Assert(bankLogs.Contains("used=1 free=0") && bankLogs.Contains("ac=True plain=False"),
+            $"AC items must not use bank slots: {bankLogs}");
         Console.WriteLine($"   OK: diagnostic round trip ({first.Inventory.Count} inv / {first.Bank.Count} bank, {first.Quests.SlotProgress.Count} slots, " +
                           $"{first.Quests.DailiesCompleted.Count} dailies, {first.Options.Count} options, 3 private values left out), bug report filled");
     }

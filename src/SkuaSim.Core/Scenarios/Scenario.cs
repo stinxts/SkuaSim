@@ -212,6 +212,8 @@ public sealed class ItemSetup
     public int? EnhancementLevel { get; set; }
     public int? EnhancementPatternID { get; set; }
     public int? ProcID { get; set; }
+    /// <summary>AQW item meta (boosts such as "dmgAll:0.51,gold:0.1"), as the client reports it.</summary>
+    public string? Meta { get; set; }
 }
 
 public sealed class QuestSetup

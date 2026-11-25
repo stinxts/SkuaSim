@@ -409,7 +409,22 @@ public sealed partial class SimWorld
 
     private void AddScenarioItem(List<InventoryItem> container, ItemSetup setup)
     {
-        var info = ResolveItem(setup.Name, setup.Id, setup.Temp, setup.Category);
+        // An item given in full by the scenario (ID, name, category and max stack, e.g. from a diagnostic or an export)
+        // is real game data, not invented, even when the collector never saw it.
+        var known = (setup.Id is > 0 ? _ctx.Catalog.FindItem(setup.Id.Value) : null) ?? _ctx.Catalog.FindItem(setup.Name);
+        var info = known == null && setup.Id is > 0 && !string.IsNullOrWhiteSpace(setup.Name) &&
+                   !string.IsNullOrWhiteSpace(setup.Category) && setup.MaxStack is > 0
+            ? new ItemInfo
+            {
+                ID = setup.Id.Value,
+                Name = setup.Name.Trim(),
+                MaxStack = setup.MaxStack.Value,
+                Temp = setup.Temp ?? false,
+                Category = setup.Category,
+                ItemGroup = InferDefaultItemGroup(setup.Category),
+                Source = DataSource.Scenario
+            }
+            : ResolveItem(setup.Name, setup.Id, setup.Temp, setup.Category);
         if (setup.MaxStack.HasValue)
             info.MaxStack = setup.MaxStack.Value;
         if (setup.Coins.HasValue)
@@ -423,6 +438,8 @@ public sealed partial class SimWorld
             item.EnhancementLevel = Math.Max(0, setup.EnhancementLevel.Value);
         if (setup.ProcID.HasValue)
             item.ProcID = Math.Max(0, setup.ProcID.Value);
+        if (!string.IsNullOrWhiteSpace(setup.Meta))
+            item.Meta = setup.Meta;
         container.Add(item);
         if (setup.Equipped && container == Inventory)
             EquipInternal(item, log: false);
@@ -751,9 +768,9 @@ public sealed partial class SimWorld
                 return false;
             }
             var existing = Bank.FirstOrDefault(i => i.ID == id);
-            if (existing == null && Bank.Count >= _ctx.Scenario.Player.BankSlots)
+            if (existing == null && !inv.Coins && BankUsedSlots >= _ctx.Scenario.Player.BankSlots)
             {
-                Trace.Warn($"Bank full: could not bank {inv.Name}.");
+                Trace.Warn($"Bank full ({BankUsedSlots}/{_ctx.Scenario.Player.BankSlots}): could not bank {inv.Name}.");
                 return false;
             }
             Inventory.Remove(inv);
@@ -764,6 +781,15 @@ public sealed partial class SimWorld
             Trace.World($"Banked {inv.Name} x{inv.Quantity}.");
             return true;
         }
+    }
+
+    /// <summary>
+    /// Bank slots in use: AC items do not take bank space (CoreBots banks them even with no free slot; a real diagnostic
+    /// showed 187 non-AC items in 210 slots next to 4,074 AC items).
+    /// </summary>
+    public int BankUsedSlots
+    {
+        get { lock (Sync) return Bank.Count(i => !i.Coins); }
     }
 
     public bool ToInventory(int id)

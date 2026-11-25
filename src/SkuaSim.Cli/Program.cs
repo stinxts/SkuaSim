@@ -706,6 +706,24 @@ internal static class CliEntry
         if (File.Exists(candidate2))
             return Path.GetFullPath(candidate2);
 
+        // A bare script name ("GrimGaol", as typed in a diagnostic): the one file with that name under Scripts\.
+        if (!Path.IsPathRooted(input) && Directory.Exists(installation.ScriptsDirectory))
+        {
+            var fileName = Path.GetFileName(input);
+            if (!fileName.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+                fileName += ".cs";
+            var matches = Directory.EnumerateFiles(installation.ScriptsDirectory, "*.cs", SearchOption.AllDirectories)
+                .Where(f => string.Equals(Path.GetFileName(f), fileName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (matches.Count == 1)
+            {
+                Console.WriteLine($"Script '{input}' resolved to {matches[0]}");
+                return matches[0];
+            }
+            if (matches.Count > 1)
+                Console.Error.WriteLine($"Script '{input}' matches {matches.Count} files under Scripts\\ ({string.Join(", ", matches.Select(m => Path.GetRelativePath(installation.ScriptsDirectory, m)))}); give its folder.");
+        }
+
         return Path.GetFullPath(input);
     }
 

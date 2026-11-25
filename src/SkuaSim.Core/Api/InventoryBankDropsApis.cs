@@ -164,7 +164,7 @@ public sealed class BankApi : ApiBase
     }
 
     public int Slots => Ctx.Scenario.Player.BankSlots;
-    public int UsedSlots => Items.Count;
+    public int UsedSlots => World.BankUsedSlots;
     public int FreeSlots => Math.Max(0, Slots - UsedSlots);
 
     public void Open() => World.BankLoaded = true;

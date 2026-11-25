@@ -679,7 +679,7 @@ public sealed class StatsApi : ApiBase
     public int InventoryFilledSpace => World.Inventory.Count;
     public int InventoryFreeSpace => Math.Max(0, InventorySpace - InventoryFilledSpace);
     public int BankSpace => Ctx.Scenario.Player.BankSlots;
-    public int BankFilledSpace => World.Bank.Count;
+    public int BankFilledSpace => World.BankUsedSlots;
     public int BankFreeSpace => Math.Max(0, BankSpace - BankFilledSpace);
     public TimeSpan Time => TimeSpan.FromMilliseconds(Ctx.Clock.NowMs);
     public TimeSpan SessionTime => Time;
