@@ -1161,6 +1161,9 @@ internal static class CoreTests
             {
                 Core.Join("ZzHarvestA-1e9");
                 Core.KillMonster("zzharvesta", "r1", "Left", "Harvest Slime");
+                Core.KillMonster("zzharvesta", "r1", "Left", "Harvest Slime", "Slime Gel", 5, false);
+                Core.HuntMonster("zzharvesta", "Harvest Bat", "Bat Fang");
+                Core.HuntMonster("zzharvesta", "*", "Anything");
                 Core.BuyItem("zzharvesta", 990201, "Harvest Token");
                 Bot.Shops.Load(990202);
                 Core.EnsureAccept(2);
@@ -1185,6 +1188,9 @@ internal static class CoreTests
         Assert(usage.Shops.Keys.OrderBy(k => k).SequenceEqual(new[] { 990201, 990202 }) && usage.ShopMaps[990201].ContainsKey("zzharvesta"),
             "Shops 990201 (bought on zzharvesta) and 990202 (Shops.Load) must be found");
         Assert(usage.Quests.Keys.OrderBy(k => k).SequenceEqual(new[] { 2, 187, 328 }), $"Quests must be 2, 187, 328, got [{string.Join(", ", usage.Quests.Keys)}]");
+        Assert(usage.Farms.Count == 2 && usage.Farms["zzharvesta|Harvest Slime"].Items.ContainsKey("Slime Gel") &&
+               usage.Farms["zzharvesta|Harvest Bat"].Items.ContainsKey("Bat Fang"),
+            $"Farmed (map, monster, item) must be read from KillMonster/HuntMonster, '*' left out, got [{string.Join(", ", usage.Farms.Keys)}]");
 
         var known = new SkuaSim.Collector.Models.GameDatabase();
         known.Maps["zzdone"] = new SkuaSim.Collector.Models.CapturedMap
@@ -1261,7 +1267,122 @@ internal static class CoreTests
         Assert(second.Outcome == SimulationOutcome.Completed, $"The second run must complete ({second.Outcome})");
         Assert(second.ScriptLogs.Any(l => l.Text.Contains("This client did 0 stop(s)")), "A finished plan must not be visited again");
         Assert(File.ReadAllText(progressPath) == progressText, "Nothing to do must leave the progress file as it was");
-        Console.WriteLine($"   OK: {plan.Stops.Count} stops planned from 2 scripts; harvester visited, requested drop lists once per monster type and resumed");
+        Assert(plan.Stops.All(s => s.Kind == HarvestStop.VisitKind) && plan.Totals.FarmsWaitingForVisit == 2,
+            "Farmed monsters on an uncaptured map must wait for a visit, not be sampled");
+
+        // Layer B: once the map and the official drop lists are captured, normal drops are sampled; quest items are not.
+        var visited = new SkuaSim.Collector.Models.GameDatabase();
+        visited.Maps["zzharvesta"] = new SkuaSim.Collector.Models.CapturedMap
+        {
+            Name = "zzharvesta",
+            Monsters =
+            {
+                [1] = new SkuaSim.Collector.Models.CapturedMapMonsterSpawn { MapID = 1, MonsterID = 990101, Name = "Harvest Slime", Cell = "r1", Level = 1 },
+                [3] = new SkuaSim.Collector.Models.CapturedMapMonsterSpawn { MapID = 3, MonsterID = 990102, Name = "Harvest Bat", Cell = "r2", Level = 1 }
+            }
+        };
+        var listed = new DateTime(2026, 11, 25, 0, 0, 0, DateTimeKind.Utc);
+        var slime = new SkuaSim.Collector.Models.CapturedMonster { Key = "id:990101", ID = 990101, Name = "Harvest Slime", OfficialDropsObservedUtc = listed, CreditedKills = 40 };
+        slime.Drops[990401] = new SkuaSim.Collector.Models.CapturedDropStat { ItemID = 990401, ItemName = "Slime Gel", IsOfficialDrop = true, CreditedEligibleKills = 40, CreditedDropEvents = 2 };
+        var bat = new SkuaSim.Collector.Models.CapturedMonster { Key = "id:990102", ID = 990102, Name = "Harvest Bat", OfficialDropsObservedUtc = listed };
+        bat.Drops[990402] = new SkuaSim.Collector.Models.CapturedDropStat { ItemID = 990402, ItemName = "Bat Fang", IsOfficialDrop = true, QuestGated = true };
+        visited.Monsters["id:990101"] = slime;
+        visited.Monsters["id:990102"] = bat;
+        var samplePlan = HarvestPlan.Build(usage, visited, listed);
+        var samples = samplePlan.Stops.Where(s => s.Kind == HarvestStop.SampleKind).ToList();
+        Assert(samples.Count == 1 && samples[0].Key == "sample:zzharvesta:990101:40" && samples[0].Items.SequenceEqual(new[] { "Slime Gel" }) &&
+               samples[0].Kills == 260 && samples[0].Cell == "r1" && samplePlan.Totals.FarmedItemsQuestGated == 1,
+            $"Only Slime Gel must be sampled (260 kills to 300, measured count in the key), the quest-gated Bat Fang left out; got " +
+            $"[{string.Join(", ", samples.Select(s => $"{s.Key} {string.Join("/", s.Items)} {s.Kills}"))}], quest-gated {samplePlan.Totals.FarmedItemsQuestGated}");
+        var samplePlanPath = Path.Combine(dir, "sampleplan", HarvestPlan.DefaultFileName);
+        Directory.CreateDirectory(Path.GetDirectoryName(samplePlanPath)!);
+        File.WriteAllText(samplePlanPath, samplePlan.ToJson());
+
+        var sampled = runner.Run(new SimulationRunOptions
+        {
+            ScriptPath = harvester,
+            GameDataPath = gameDataPath,
+            Scenario = new Scenario
+            {
+                Name = "Harvester sampling",
+                Player = new PlayerSetup { Username = "SecretHarvester", Level = 100, MaxHealth = 10_000, DamagePerSecond = 8_000 },
+                Options = new(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["SkipOption"] = System.Text.Json.JsonSerializer.SerializeToElement(true),
+                    ["PlanFile"] = System.Text.Json.JsonSerializer.SerializeToElement(samplePlanPath),
+                    ["SampleDrops"] = System.Text.Json.JsonSerializer.SerializeToElement(true),
+                    ["KillsPerStop"] = System.Text.Json.JsonSerializer.SerializeToElement(5)
+                },
+                Limits = new LimitsSetup { MaxVirtualMinutes = 30 }
+            }
+        });
+        Assert(sampled.Outcome == SimulationOutcome.Completed, $"Sampling must complete ({sampled.Outcome}: {sampled.StopReason} {sampled.ExceptionText})");
+        Assert(sampled.UnimplementedCalls.Count == 0, $"Sampling must only use simulated API members, touched: {string.Join(", ", sampled.UnimplementedCalls.Keys)}");
+        var sampleProgressText = File.ReadAllText(Path.Combine(Path.GetDirectoryName(samplePlanPath)!, "harvest_progress.json"));
+        var sampleProgress = System.Text.Json.JsonDocument.Parse(sampleProgressText).RootElement;
+        var sampleEntry = sampleProgress.GetProperty("sample:zzharvesta:990101:40");
+        Assert(sampleEntry.GetProperty("status").GetString() == "done" && sampleEntry.GetProperty("note").GetString()!.Contains("5/5 kill(s) of Harvest Slime"),
+            $"The sample stop must kill 5 Harvest Slimes (KillsPerStop): {sampleProgressText}");
+        Assert(!sampleProgressText.Contains("\"map:", StringComparison.Ordinal), "Sampling must leave the visit stops alone");
+        Assert(sampled.Kills == 5, $"Exactly 5 kills expected, got {sampled.Kills}");
+        Assert(sampled.ScriptLogs.Any(l => l.Text.Contains("Skills: ") && l.Text.Contains("CoreBots Solo class")),
+            "Sampling must fight with the CBO Solo class through CoreBots.EquipClass (AdvancedSkills.json), never a made-up rotation");
+
+        // --all revisits what is captured; blocked joins are classified by the stored server message; reset / retry.
+        visited.Shops[990201] = new SkuaSim.Collector.Models.CapturedShop { ID = 990201, Name = "Harvest Shop" };
+        visited.Shops[990202] = new SkuaSim.Collector.Models.CapturedShop { ID = 990202, Name = "Loose Shop" };
+        Assert(!HarvestPlan.Build(usage, visited, listed).Stops.Any(s => s.Key == "map:zzharvesta"), "A fully captured map is not visited without --all");
+        var revisit = HarvestPlan.Build(usage, visited, listed, revisitAll: true);
+        Assert(revisit.Stops.Any(s => s.Key == "map:zzharvesta" && s.Reasons.SequenceEqual(new[] { "1 shop(s) to load" })) &&
+               revisit.Stops.Any(s => s.Key == "sample:zzharvesta:990101:40" && s.Kills == (int)HarvestPlan.SampleKillGoal) &&
+               revisit.Stops.Where(s => s.Key.StartsWith("quests:")).Sum(s => s.Quests.Count) == 3,
+            "--all must revisit captured maps, sample measured monsters again and load every used quest");
+
+        var blockUsage = new ScriptUsage();
+        ScriptUsageScanner.ScanSource("Story/Locked1.cs", "class X { void M() { Core.Join(\"zzlocked\"); Core.Join(\"zzlocked2\"); } }", blockUsage);
+        ScriptUsageScanner.ScanSource("Story/Locked2.cs", "class X { void M() { Core.Join(\"zzlocked2\"); } }", blockUsage);
+        ScriptUsageScanner.ScanSource("Farm/Member.cs", "class X { void M() { Core.Join(\"zzmember\"); } }", blockUsage);
+        var blockDb = new SkuaSim.Collector.Models.GameDatabase();
+        blockDb.ServerMessages["m1"] = new SkuaSim.Collector.Models.CapturedServerMessage
+        {
+            Kind = "warning", Text = "\"<Q>\" is an Membership-Only Map.", TargetMaps = { ["zzmember"] = 2 }
+        };
+        var progressDir = Path.Combine(dir, "progress");
+        Directory.CreateDirectory(progressDir);
+        var blockProgressPath = Path.Combine(progressDir, HarvestProgress.FileName);
+        File.WriteAllText(blockProgressPath, """
+        {
+          "map:zzlocked": { "status": "failed", "note": "could not join zzlocked (member-only, locked, seasonal or story-gated?)" },
+          "map:zzlocked2": { "status": "failed", "note": "could not join zzlocked2 (member-only, locked, seasonal or story-gated?)" },
+          "map:zzmember": { "status": "failed", "note": "could not join zzmember (member-only, locked, seasonal or story-gated?)" },
+          "sample:zzboss:1:0": { "status": "failed", "note": "too strong: died 5 times (level 30)" },
+          "map:zzdone": { "status": "done", "note": "ok" },
+          "map:zzbusy": { "status": "claimed", "by": "client-1", "at": "2026-11-25T12:00:00.0000000Z" }
+        }
+        """);
+        var blockProgress = HarvestProgress.Load(blockProgressPath);
+        var blockers = HarvestBlockers.Analyze(blockProgress, blockUsage, blockDb);
+        Assert(blockers.Maps.Single(m => m.Map == "zzmember").Reason == HarvestBlockers.MemberOnly &&
+               blockers.Maps.Single(m => m.Map == "zzlocked").Reason == HarvestBlockers.Locked && blockers.TooStrong.Count == 1,
+            $"Joins must be classified (member-only from the server message, locked without one), got " +
+            $"[{string.Join(", ", blockers.Maps.Select(m => $"{m.Map}={m.Reason}"))}], too strong {blockers.TooStrong.Count}");
+        Assert(blockers.StoryOrder.Count == 1 && blockers.StoryOrder[0].Script == "Story/Locked1.cs" &&
+               blockers.StoryOrder[0].Maps.SequenceEqual(new[] { "zzlocked", "zzlocked2" }),
+            $"One story script opens both locked maps, got [{string.Join("; ", blockers.StoryOrder.Select(s => $"{s.Script}: {string.Join(",", s.Maps)}"))}]");
+        Assert(blockers.ToMarkdown(listed).Contains("1. `Story/Locked1.cs` — opens zzlocked, zzlocked2"), "The report must list the story scripts in order");
+        var claimTime = new DateTime(2026, 11, 25, 12, 0, 0, DateTimeKind.Utc);
+        Assert(HarvestProgress.ActiveClaims(blockProgress, claimTime.AddMinutes(5)).SequenceEqual(new[] { "map:zzbusy" }) &&
+               HarvestProgress.ActiveClaims(blockProgress, claimTime.AddMinutes(30)).Count == 0,
+            "A claim is active for 20 minutes (reset/retry refuse while clients run)");
+        Assert(HarvestProgress.RemoveFailed(blockProgressPath, claimTime) == 4 &&
+               HarvestProgress.Load(blockProgressPath).Select(p => p.Key).OrderBy(k => k).SequenceEqual(new[] { "map:zzbusy", "map:zzdone" }) &&
+               File.Exists(Path.Combine(progressDir, "harvest_progress.20261125-120000.json")),
+            "--retry-failed must clear the 4 failed stops and keep a dated copy");
+        var archived = HarvestProgress.Archive(blockProgressPath, claimTime.AddHours(1));
+        Assert(archived != null && !File.Exists(blockProgressPath) && File.Exists(archived) && HarvestProgress.Load(blockProgressPath).Count == 0,
+            "--reset must move the progress aside so the next run starts from zero");
+        Console.WriteLine($"   OK: {plan.Stops.Count} stops planned from 2 scripts; harvester visited, requested drop lists once per monster type and resumed; " +
+                          "sampling plan kept only the normal drop and the sampler killed 5 in a private room");
     }
 
     private static void TestFarmTargetsWithCarriedOverQuests(SimulationRunner runner, string tempDir)

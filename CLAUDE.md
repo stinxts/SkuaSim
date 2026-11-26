@@ -33,7 +33,9 @@ dotnet run --project src\SkuaSim.UI
   or name-like script options.
 - `skuasim harvest-plan` (`Data/HarvestPlan.cs`) writes the work list of `tools\skua\SkuaSim_Harvester.cs` (maps/shops/quests the
   scripts use that the data lacks); Core test 28 runs the harvester in the simulator. The harvester, not the Collector, sends
-  the requests; it must never fight on purpose, accept/complete quests, buy, or write the character name.
+  the requests; it fights only to clear rooms that open in order and in drop-sampling mode, always through CoreBots
+  (`SetOptions`, `EquipClass(ClassType.Solo)`: the CBO class and AdvancedSkills.json, never a made-up rotation), and must
+  never accept/complete quests, buy, or write the character name.
 
 ## Layout
 

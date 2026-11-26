@@ -378,6 +378,10 @@ public sealed class SkillsApi : ApiBase
         TimerRunning = true;
     }
     public void LoadAdvanced(string className, string mode, bool autoEquip) => LoadAdvanced(className, autoEquip, ClassUseMode.Base);
+    // Skua: StartAdvanced = LoadAdvanced + Start (the skill thread). CoreBots.EquipClass uses the class form.
+    public void StartAdvanced(string skills, int skillTimeout, SkillUseMode skillMode) => LoadAdvanced(skills, skillTimeout, skillMode);
+    public void StartAdvanced(string className, bool autoEquip, ClassUseMode useMode) => LoadAdvanced(className, autoEquip, useMode);
+    public void StartAdvanced(string className, string mode, bool autoEquip) => LoadAdvanced(className, mode, autoEquip);
     public void Start() => TimerRunning = true;
     public void Stop() => TimerRunning = false;
     public void UseBaseProvider() { }

@@ -44,7 +44,7 @@ internal static class CliEntry
 
     /// <summary>
     /// Work list for tools\skua\SkuaSim_Harvester.cs: the maps, shops and quests the Skua scripts use that the collected
-    /// data (gamedata.json + shared data) is still missing, ordered by priority. Default: Documents\SkuaSim Harvest\harvest_plan.json,
+    /// data (gamedata.json + shared data) is still missing, ordered by priority. Default: %LOCALAPPDATA%\SkuaSim Harvest\harvest_plan.json,
     /// where the Skua script looks for it.
     /// </summary>
     private static int RunHarvestPlan(string[] args, SkuaInstallation installation)
@@ -61,12 +61,35 @@ internal static class CliEntry
             return 1;
         }
 
+        bool Flag(string name) => args.Any(a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase));
+        var revisitAll = Flag("--all");
+        var reset = Flag("--reset");
+        var retryFailed = Flag("--retry-failed");
+        var now = DateTime.UtcNow;
+        var progressPath = HarvestProgress.PathFor(outPath);
+        var progress = HarvestProgress.Load(progressPath);
+        if ((reset || retryFailed) && !Flag("--force") && HarvestProgress.ActiveClaims(progress, now) is { Count: > 0 } active)
+        {
+            Console.Error.WriteLine($"Error: {active.Count} stop(s) were claimed in the last {HarvestProgress.StaleClaim.TotalMinutes:0} minutes " +
+                                    $"({string.Join(", ", active.Take(5))}): stop the harvester on every client first, or add --force.");
+            return 1;
+        }
+
         Console.WriteLine($"Scanning scripts in {scriptsDir} ...");
         var usage = ScriptUsageScanner.Scan(scriptsDir);
         var catalog = GameDataCatalog.Load(gameDataPath, installation.QuestDataFile);
-        var plan = HarvestPlan.Build(usage, catalog.Captured, DateTime.UtcNow, maxStops);
 
+        // The report reads the progress as it was (before a reset), so nothing learned about blocked maps is lost.
         Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+        var blockers = HarvestBlockers.Analyze(progress, usage, catalog.Captured);
+        var reportPath = Path.Combine(Path.GetDirectoryName(outPath)!, HarvestBlockers.ReportFileName);
+        File.WriteAllText(reportPath, blockers.ToMarkdown(now));
+        if (reset && HarvestProgress.Archive(progressPath, now) is { } archived)
+            Console.WriteLine($"Progress reset: the old progress was moved to {archived}");
+        else if (retryFailed)
+            Console.WriteLine($"Retry: {HarvestProgress.RemoveFailed(progressPath, now)} failed stop(s) cleared (a dated copy of the progress was kept).");
+
+        var plan = HarvestPlan.Build(usage, catalog.Captured, now, maxStops, HarvestPlan.QuestTempItemNames(catalog), revisitAll);
         File.WriteAllText(outPath, plan.ToJson());
 
         var t = plan.Totals;
@@ -74,12 +97,28 @@ internal static class CliEntry
         Console.WriteLine($"Maps            : {t.MapsUsed:N0} used, {t.MapsNotCaptured:N0} never captured, {t.MapsWithDropGaps:N0} with monsters missing an official drop list");
         Console.WriteLine($"Shops           : {t.ShopsUsed:N0} used, {t.ShopsNotCaptured:N0} not captured");
         Console.WriteLine($"Quests          : {t.QuestsUsed:N0} used, {t.QuestsNotCaptured:N0} not captured");
-        Console.WriteLine($"Stops           : {plan.Stops.Count:N0} ({plan.Stops.Count(s => s.Map != null):N0} maps){(maxStops > 0 ? $", capped at {maxStops}" : "")}");
-        foreach (var s in plan.Stops.Take(15))
+        Console.WriteLine($"Drop sampling   : {t.SampleStops:N0} monster(s) to farm; farmed items skipped: {t.FarmedItemsMeasured:N0} already measured, " +
+                          $"{t.FarmedItemsQuestGated:N0} quest-gated, {t.FarmedItemsNotOfficialDrops:N0} not on the monster's official drop list; " +
+                          $"{t.FarmsWaitingForVisit:N0} farmed monster(s) wait for a visit (map, spawn or official drop list not captured)");
+        var visits = plan.Stops.Where(s => s.Kind == HarvestStop.VisitKind).ToList();
+        var samples = plan.Stops.Where(s => s.Kind == HarvestStop.SampleKind).ToList();
+        Console.WriteLine($"Visit stops     : {visits.Count:N0} ({visits.Count(s => s.Map != null):N0} maps){(maxStops > 0 ? $", capped at {maxStops}" : "")}");
+        foreach (var s in visits.Take(10))
             Console.WriteLine($"  {s.Key,-28} {s.Scripts,4} script(s)  {string.Join("; ", s.Reasons)}");
-        if (plan.Stops.Count > 15)
-            Console.WriteLine($"  ... and {plan.Stops.Count - 15:N0} more");
-        Console.WriteLine($"Plan saved to: {outPath}");
+        if (visits.Count > 10)
+            Console.WriteLine($"  ... and {visits.Count - 10:N0} more");
+        Console.WriteLine($"Sample stops    : {samples.Count:N0}");
+        foreach (var s in samples.Take(10))
+            Console.WriteLine($"  {s.Key,-28} {s.Scripts,4} script(s)  {s.Monster} (lv {s.Level}) in {s.Map}/{s.Cell}, {s.Kills} kill(s) to go: {string.Join(", ", s.Items)}");
+        if (samples.Count > 10)
+            Console.WriteLine($"  ... and {samples.Count - 10:N0} more");
+        Console.WriteLine($"Blocked         : {blockers.Maps.Count:N0} map(s) could not be joined " +
+                          $"({string.Join(", ", blockers.Maps.GroupBy(b => b.Reason).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Count()} {g.Key}"))}), " +
+                          $"{blockers.TooStrong.Count:N0} too strong, {blockers.Other.Count:N0} other failure(s); {blockers.StoryOrder.Count:N0} story script(s) to run");
+        foreach (var (script, maps) in blockers.StoryOrder.Take(10))
+            Console.WriteLine($"  {script} — opens {string.Join(", ", maps)}");
+        Console.WriteLine($"Report saved to: {reportPath}");
+        Console.WriteLine($"Plan saved to: {outPath}{(revisitAll ? " (--all: everything the scripts use, also what is already captured)" : "")}");
         Console.WriteLine("Run tools\\skua\\SkuaSim_Harvester.cs in Skua on each army client (with the Collector plugin installed).");
         return 0;
     }
@@ -821,7 +860,9 @@ internal static class CliEntry
         Console.WriteLine("                                 tools\\skua\\SkuaSim_Diagnostic.cs and write the filled bug report (default: <diagnostic>.bugreport.md)");
         Console.WriteLine("  skuasim harvest-plan [--out <file.json>] [--max-stops <n>] [--scripts <dir>] [--gamedata <path>]   List the maps, shops and");
         Console.WriteLine("                                 quests the scripts use that the data still lacks, for tools\\skua\\SkuaSim_Harvester.cs");
-        Console.WriteLine("                                 (default: Documents\\SkuaSim Harvest\\harvest_plan.json)");
+        Console.WriteLine("                                 (default: %LOCALAPPDATA%\\SkuaSim Harvest\\harvest_plan.json) and harvest_blocked.md (blocked maps,");
+        Console.WriteLine("                                 story scripts to run). --all: also what is already captured; --reset: archive the progress and");
+        Console.WriteLine("                                 start from zero; --retry-failed: try failed stops again (both refuse while clients run; --force)");
         Console.WriteLine();
         Console.WriteLine("Run Options:");
         Console.WriteLine("  --scenario, -s <file.json>     Scenario JSON file describing player/world state");
