@@ -60,6 +60,7 @@ internal static class CoreTests
             TestQuestGateNamesResolved(runner, tempDir);
             TestDiagnosticGeneratorAndBugReport(runner, tempDir);
             TestFarmTargetsWithCarriedOverQuests(runner, tempDir);
+            TestHarvestPlanAndHarvester(runner, tempDir);
 
             Console.WriteLine("All SkuaSim.Core tests passed successfully!");
             return 0;
@@ -1139,6 +1140,130 @@ internal static class CoreTests
     /// Champion's Seal), and an uncaptured map item gives what the quest the script accepted last needs, not what an
     /// older scenario quest needs.
     /// </summary>
+    /// <summary>
+    /// skuasim harvest-plan and tools/skua/SkuaSim_Harvester.cs: the scanner reads maps/shops/quests from literal
+    /// arguments (room suffixes dropped, string.Join and Cached-Scripts ignored, EnsureComplete's item ID not a quest),
+    /// the plan keeps only what the data lacks, and the harvester, run inside the simulator, visits the map's cells,
+    /// requests each monster type's drop list once, loads shops and quests, writes no character name and resumes from
+    /// its progress file.
+    /// </summary>
+    private static void TestHarvestPlanAndHarvester(SimulationRunner runner, string tempDir)
+    {
+        Console.WriteLine("28. Testing the harvest plan and the Skua harvester...");
+        var dir = Path.Combine(tempDir, "harvest");
+        var scripts = Path.Combine(dir, "Scripts");
+        Directory.CreateDirectory(Path.Combine(scripts, "Story"));
+        Directory.CreateDirectory(Path.Combine(scripts, "Cached-Scripts"));
+        File.WriteAllText(Path.Combine(scripts, "Story", "A.cs"), """
+        public class A
+        {
+            public void ScriptMain(object bot)
+            {
+                Core.Join("ZzHarvestA-1e9");
+                Core.KillMonster("zzharvesta", "r1", "Left", "Harvest Slime");
+                Core.BuyItem("zzharvesta", 990201, "Harvest Token");
+                Bot.Shops.Load(990202);
+                Core.EnsureAccept(2);
+                Core.RegisterQuests(187, 328);
+                Story.KillQuest(2, "zzdone", "Thing");
+                var s = string.Join("and", new[] { "x" });
+            }
+        }
+        """);
+        File.WriteAllText(Path.Combine(scripts, "B.cs"), """
+        public class B { public void M() { Core.HuntMonster("zzharvesta", "Harvest Bat"); Core.EnsureComplete(187, 5); } }
+        """);
+        File.WriteAllText(Path.Combine(scripts, "Cached-Scripts", "C.cs"), """
+        public class C { public void M() { Core.Join("zzcached"); } }
+        """);
+
+        var usage = ScriptUsageScanner.Scan(scripts);
+        Assert(usage.FilesScanned == 2, $"Cached-Scripts must be skipped (scanned {usage.FilesScanned})");
+        Assert(usage.Maps.Keys.OrderBy(k => k, StringComparer.Ordinal).SequenceEqual(new[] { "zzdone", "zzharvesta" }),
+            $"Maps must be zzdone and zzharvesta, got [{string.Join(", ", usage.Maps.Keys)}]");
+        Assert(usage.Maps["zzharvesta"].Count == 2, "zzharvesta is used by two scripts");
+        Assert(usage.Shops.Keys.OrderBy(k => k).SequenceEqual(new[] { 990201, 990202 }) && usage.ShopMaps[990201].ContainsKey("zzharvesta"),
+            "Shops 990201 (bought on zzharvesta) and 990202 (Shops.Load) must be found");
+        Assert(usage.Quests.Keys.OrderBy(k => k).SequenceEqual(new[] { 2, 187, 328 }), $"Quests must be 2, 187, 328, got [{string.Join(", ", usage.Quests.Keys)}]");
+
+        var known = new SkuaSim.Collector.Models.GameDatabase();
+        known.Maps["zzdone"] = new SkuaSim.Collector.Models.CapturedMap
+        {
+            Name = "zzdone",
+            Monsters = { [1] = new SkuaSim.Collector.Models.CapturedMapMonsterSpawn { MapID = 1, MonsterID = 990150, Name = "Thing", Cell = "r1" } }
+        };
+        known.Monsters["id:990150"] = new SkuaSim.Collector.Models.CapturedMonster { Key = "id:990150", ID = 990150, Name = "Thing", OfficialDropsObservedUtc = new DateTime(2026, 11, 1) };
+        known.Quests[328] = new SkuaSim.Collector.Models.CapturedQuest { ID = 328, Name = "Known" };
+        var plan = HarvestPlan.Build(usage, known, new DateTime(2026, 11, 25, 0, 0, 0, DateTimeKind.Utc));
+        Assert(plan.Stops.Select(s => s.Key).SequenceEqual(new[] { "map:zzharvesta", "shops:1", "quests:1" }),
+            $"Plan stops must be map:zzharvesta, shops:1, quests:1, got [{string.Join(", ", plan.Stops.Select(s => s.Key))}]");
+        Assert(plan.Stops[0].Shops.SequenceEqual(new[] { 990201 }) && plan.Stops[0].Reasons.Contains("map not captured"),
+            "The shop bought on zzharvesta must ride on its map stop");
+        Assert(plan.Stops[1].Shops.SequenceEqual(new[] { 990202 }) && plan.Stops[2].Quests.SequenceEqual(new[] { 2, 187 }),
+            "Loose shops and uncaptured quests must get map-less stops");
+        Assert(HarvestPlan.FromJson(plan.ToJson()).ToJson() == plan.ToJson(), "The plan must round-trip through JSON");
+        var planPath = Path.Combine(dir, "plan", HarvestPlan.DefaultFileName);
+        Directory.CreateDirectory(Path.GetDirectoryName(planPath)!);
+        File.WriteAllText(planPath, plan.ToJson());
+
+        var gameDataPath = Path.Combine(dir, "gamedata_harvest.json");
+        File.WriteAllText(gameDataPath, """
+        {
+          "SchemaVersion": 2,
+          "Maps": { "zzharvesta": { "Name": "zzharvesta", "Cells": { "Enter": ["Spawn"], "r1": ["Left"], "r2": ["Left"], "Cutscene": ["Spawn"] },
+            "Monsters": {
+              "1": { "MapID": 1, "MonsterID": 990101, "Name": "Harvest Slime", "Cell": "r1", "Level": 1, "MaxHP": 100 },
+              "2": { "MapID": 2, "MonsterID": 990101, "Name": "Harvest Slime", "Cell": "r1", "Level": 1, "MaxHP": 100 },
+              "3": { "MapID": 3, "MonsterID": 990102, "Name": "Harvest Bat", "Cell": "r2", "Level": 1, "MaxHP": 100 } } } },
+          "Shops": {
+            "990201": { "ID": 990201, "Name": "Harvest Shop", "Items": [ { "ShopItemID": 1, "ID": 990301, "Name": "Harvest Token", "Cost": 10 } ] },
+            "990202": { "ID": 990202, "Name": "Loose Shop", "Items": [ { "ShopItemID": 2, "ID": 990302, "Name": "Loose Token", "Cost": 10 } ] }
+          }
+        }
+        """);
+        var harvester = RepoFile("tools", "skua", "SkuaSim_Harvester.cs");
+        SimulationReport Run() => runner.Run(new SimulationRunOptions
+        {
+            ScriptPath = harvester,
+            GameDataPath = gameDataPath,
+            Scenario = new Scenario
+            {
+                Name = "Harvester",
+                Player = new PlayerSetup { Username = "SecretHarvester", Level = 100 },
+                Options = new(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["PlanFile"] = System.Text.Json.JsonSerializer.SerializeToElement(planPath),
+                    ["CellDwellMs"] = System.Text.Json.JsonSerializer.SerializeToElement(500),
+                    ["RequestGapMs"] = System.Text.Json.JsonSerializer.SerializeToElement(500),
+                    ["MaxCellsPerMap"] = System.Text.Json.JsonSerializer.SerializeToElement(40)
+                },
+                Limits = new LimitsSetup { MaxVirtualMinutes = 30 }
+            }
+        });
+
+        var first = Run();
+        Assert(first.Outcome == SimulationOutcome.Completed, $"The harvester must complete ({first.Outcome}: {first.StopReason} {first.ExceptionText})");
+        Assert(first.UnimplementedCalls.Count == 0, $"The harvester must only use simulated API members, touched: {string.Join(", ", first.UnimplementedCalls.Keys)}");
+        var progressPath = Path.Combine(Path.GetDirectoryName(planPath)!, "harvest_progress.json");
+        var progressText = File.ReadAllText(progressPath);
+        Assert(!progressText.Contains("SecretHarvester", StringComparison.OrdinalIgnoreCase), "The progress file must never contain the character name");
+        var progress = System.Text.Json.JsonDocument.Parse(progressText).RootElement;
+        string Status(string key) => progress.GetProperty(key).GetProperty("status").GetString()!;
+        string Note(string key) => progress.GetProperty(key).GetProperty("note").GetString()!;
+        Assert(Status("map:zzharvesta") == "done" && Status("shops:1") == "done" && Status("quests:1") == "done",
+            $"Every stop must be done, progress: {progressText}");
+        Assert(Note("map:zzharvesta").Contains("3/3 cell(s), 2 drop list(s) requested") && Note("map:zzharvesta").Contains("1/1 shop(s) loaded"),
+            $"The map stop must visit Enter/r1/r2 (not the cutscene) and ask each monster type once: {Note("map:zzharvesta")}");
+        Assert(Note("shops:1").Contains("1/1 shop(s) loaded") && Note("quests:1").Contains("2/2 quest(s) loaded"),
+            $"Shops and quests must load: {Note("shops:1")} | {Note("quests:1")}");
+
+        var second = Run();
+        Assert(second.Outcome == SimulationOutcome.Completed, $"The second run must complete ({second.Outcome})");
+        Assert(second.ScriptLogs.Any(l => l.Text.Contains("This client did 0 stop(s)")), "A finished plan must not be visited again");
+        Assert(File.ReadAllText(progressPath) == progressText, "Nothing to do must leave the progress file as it was");
+        Console.WriteLine($"   OK: {plan.Stops.Count} stops planned from 2 scripts; harvester visited, requested drop lists once per monster type and resumed");
+    }
+
     private static void TestFarmTargetsWithCarriedOverQuests(SimulationRunner runner, string tempDir)
     {
         Console.WriteLine("27. Testing farm targets: carried-over quests do not hide hunted items or steal map items...");

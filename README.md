@@ -162,6 +162,8 @@ Terminal interface for scripting and automated regression runs: `db-stats`, `com
 
 `bug-report <diagnostic.json> [<script.cs>] [--out <file.md>] [--report <full.md>] [--data <snapshot>]` turns a bug report into a reproduction. The reporter runs `toolsskuaSkuaSim_Diagnostic.cs` in Skua on the character that hit the bug; it saves that character as a scenario (level, class/rank/CP, gold/ACs, location, inventory/bank/house/temp items with enhancements, story slots, dailies done, reputation, running boosts, Awe/Forge unlocks, client options and the reported script's saved options; never the character name, guild, password or server, and no option that may hold an account or player name). `bug-report` runs the reported script on it and writes the filled [bug report template](docs/BUG_REPORT_TEMPLATE.md) (`<diagnostic>.bugreport.md`): character, outcome, exception, script log, how much to trust the run (uncollected maps, invented data, unimplemented API members) and asserts to start the regression test from.
 
+`harvest-plan [--out <file.json>] [--max-stops <n>] [--scripts <dir>]` lists what the scripts use that the collected data still lacks — maps never captured, monsters without an official drop list, shops and quests never seen — ordered by how many scripts need them, in `Documents\SkuaSim Harvest\harvest_plan.json`. Run `tools\skua\SkuaSim_Harvester.cs` in Skua (Collector plugin installed) on one or more clients at the same time: they share a progress file, split the stops, and visit each map's cells, request each monster's official drop list (the Weekly/Merge generators' request, one per second), and load the shops and quests. It never fights on purpose, accepts or completes quests, or buys, and it resumes where it stopped.
+
 Exit codes (`run`): `0` completed/stopped, `2` compile error or script exception, `3` stalled. When the scenario has `asserts`, they decide instead (the expected outcome is one of them): `0` all passed, `4` an assert failed; a compile error stays `2`. `test`: `0` all passed, `4` a scenario failed, `1` nothing to run.
 
 ---
@@ -192,8 +194,9 @@ SkuaSim/
 │   └── SkuaSim.Cli/                # Headless CLI executable (skuasim)
 ├── tests/
 │   ├── SkuaSim.Collector.Tests/    # Parsing (incl. real anonymized packets), privacy, merge, schema v2 (9 suites)
-│   └── SkuaSim.Core.Tests/         # Compilation, determinism (incl. cross-process), stats, boosts, stall detector, drops (26 suites)
-├── tools/skua/                     # Skua scripts to run in Skua/VibeSkua (SkuaSim_Diagnostic.cs: bug-report diagnostic file)
+│   └── SkuaSim.Core.Tests/         # Compilation, determinism (incl. cross-process), stats, boosts, stall detector, drops (28 suites)
+├── tools/skua/                     # Skua scripts to run in Skua/VibeSkua (SkuaSim_Diagnostic.cs: bug-report diagnostic file;
+│                                   #   SkuaSim_Harvester.cs: visits the harvest plan's maps/shops/quests for the Collector)
 ├── docs/                           # BUG_REPORT_TEMPLATE.md, COLLECTOR_TESTERS.md
 ├── scenarios/                      # Ready-to-use JSON scenarios (starter, leveling, dailies, VHL farm, Forge unlocks, ...)
 ├── data/                           # Local gamedata.json mirror, packet_schemas.json & sample reports (git-ignored)

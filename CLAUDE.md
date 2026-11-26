@@ -31,6 +31,9 @@ dotnet run --project src\SkuaSim.UI
   filled `docs\BUG_REPORT_TEMPLATE.md` (`Runtime/BugReportWriter.cs`). Core test 26 runs that Skua script inside the
   simulator, so a change to it must keep compiling against the real Skua DLLs and must never write the character name
   or name-like script options.
+- `skuasim harvest-plan` (`Data/HarvestPlan.cs`) writes the work list of `tools\skua\SkuaSim_Harvester.cs` (maps/shops/quests the
+  scripts use that the data lacks); Core test 28 runs the harvester in the simulator. The harvester, not the Collector, sends
+  the requests; it must never fight on purpose, accept/complete quests, buy, or write the character name.
 
 ## Layout
 
@@ -47,7 +50,7 @@ dotnet run --project src\SkuaSim.UI
   - `World/` — `SimWorld` (all game state and mechanics), `StatEngine` (AQW stat formulas).
   - `Scenarios/` — scenario JSON model + real AQW boost-gear and enhancement-unlock catalogs.
 - `src/SkuaSim.Cli`, `src/SkuaSim.UI` (Avalonia 12 + CommunityToolkit.Mvvm) — thin front-ends over Core.
-- `tools/skua/` — Skua scripts the user runs in Skua/VibeSkua (`SkuaSim_Diagnostic.cs`); `docs/` — bug report template, tester guide.
+- `tools/skua/` — Skua scripts the user runs in Skua/VibeSkua (`SkuaSim_Diagnostic.cs`, `SkuaSim_Harvester.cs`); `docs/` — bug report template, tester guide.
 - `scenarios/` — sample scenarios. `data/` — local collected DB and reports (git-ignored, not backed up by git).
 
 ## Invariants — do not break these

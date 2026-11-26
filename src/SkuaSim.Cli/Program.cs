@@ -37,8 +37,51 @@ internal static class CliEntry
             "import-data" => RunImportData(rest, installation),
             "snapshot" => RunSnapshot(rest, installation),
             "bug-report" => RunBugReport(rest, installation),
+            "harvest-plan" => RunHarvestPlan(rest, installation),
             _ => RunUnknown(cmd, installation)
         };
+    }
+
+    /// <summary>
+    /// Work list for tools\skua\SkuaSim_Harvester.cs: the maps, shops and quests the Skua scripts use that the collected
+    /// data (gamedata.json + shared data) is still missing, ordered by priority. Default: Documents\SkuaSim Harvest\harvest_plan.json,
+    /// where the Skua script looks for it.
+    /// </summary>
+    private static int RunHarvestPlan(string[] args, SkuaInstallation installation)
+    {
+        var runner = new SimulationRunner(installation);
+        var gameDataPath = GetOption(args, "--gamedata") ?? runner.FindDefaultGameDataPath();
+        var scriptsDir = GetOption(args, "--scripts") ?? installation.ScriptsDirectory;
+        var maxStops = GetOption(args, "--max-stops") is { } ms && int.TryParse(ms, out var m) ? m : 0;
+        var outPath = Path.GetFullPath(GetOption(args, "--out") ?? GetOption(args, "-o")
+                                       ?? Path.Combine(HarvestPlan.DefaultFolder, HarvestPlan.DefaultFileName));
+        if (!Directory.Exists(scriptsDir))
+        {
+            Console.Error.WriteLine($"Error: Scripts folder not found: {scriptsDir} (use --scripts <dir>).");
+            return 1;
+        }
+
+        Console.WriteLine($"Scanning scripts in {scriptsDir} ...");
+        var usage = ScriptUsageScanner.Scan(scriptsDir);
+        var catalog = GameDataCatalog.Load(gameDataPath, installation.QuestDataFile);
+        var plan = HarvestPlan.Build(usage, catalog.Captured, DateTime.UtcNow, maxStops);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+        File.WriteAllText(outPath, plan.ToJson());
+
+        var t = plan.Totals;
+        Console.WriteLine($"Scripts scanned : {plan.ScriptsScanned:N0}");
+        Console.WriteLine($"Maps            : {t.MapsUsed:N0} used, {t.MapsNotCaptured:N0} never captured, {t.MapsWithDropGaps:N0} with monsters missing an official drop list");
+        Console.WriteLine($"Shops           : {t.ShopsUsed:N0} used, {t.ShopsNotCaptured:N0} not captured");
+        Console.WriteLine($"Quests          : {t.QuestsUsed:N0} used, {t.QuestsNotCaptured:N0} not captured");
+        Console.WriteLine($"Stops           : {plan.Stops.Count:N0} ({plan.Stops.Count(s => s.Map != null):N0} maps){(maxStops > 0 ? $", capped at {maxStops}" : "")}");
+        foreach (var s in plan.Stops.Take(15))
+            Console.WriteLine($"  {s.Key,-28} {s.Scripts,4} script(s)  {string.Join("; ", s.Reasons)}");
+        if (plan.Stops.Count > 15)
+            Console.WriteLine($"  ... and {plan.Stops.Count - 15:N0} more");
+        Console.WriteLine($"Plan saved to: {outPath}");
+        Console.WriteLine("Run tools\\skua\\SkuaSim_Harvester.cs in Skua on each army client (with the Collector plugin installed).");
+        return 0;
     }
 
     /// <summary>
@@ -776,6 +819,9 @@ internal static class CliEntry
         Console.WriteLine("  skuasim snapshot list [--gamedata <path>]   List snapshots and check their files");
         Console.WriteLine("  skuasim bug-report <diagnostic.json> [<script.cs>] [--out <file.md>] [--data <snapshot>]   Run a diagnostic made in Skua by");
         Console.WriteLine("                                 tools\\skua\\SkuaSim_Diagnostic.cs and write the filled bug report (default: <diagnostic>.bugreport.md)");
+        Console.WriteLine("  skuasim harvest-plan [--out <file.json>] [--max-stops <n>] [--scripts <dir>] [--gamedata <path>]   List the maps, shops and");
+        Console.WriteLine("                                 quests the scripts use that the data still lacks, for tools\\skua\\SkuaSim_Harvester.cs");
+        Console.WriteLine("                                 (default: Documents\\SkuaSim Harvest\\harvest_plan.json)");
         Console.WriteLine();
         Console.WriteLine("Run Options:");
         Console.WriteLine("  --scenario, -s <file.json>     Scenario JSON file describing player/world state");
