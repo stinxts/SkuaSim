@@ -862,7 +862,7 @@ internal static class CliEntry
         Console.WriteLine("                                 tools\\skua\\SkuaSim_Diagnostic.cs and write the filled bug report (default: <diagnostic>.bugreport.md)");
         Console.WriteLine("  skuasim harvest-plan [--out <file.json>] [--max-stops <n>] [--scripts <dir>] [--gamedata <path>]   List the maps, shops and");
         Console.WriteLine("                                 quests the scripts use that the data still lacks, for tools\\skua\\SkuaSim_Harvester.cs");
-        Console.WriteLine("                                 (default: %LOCALAPPDATA%\\SkuaSim Harvest\\harvest_plan.json), harvest_blocked.md (blocked maps,");
+        Console.WriteLine("                                 (default: %LOCALAPPDATA%\\SkuaSim Harvest\\harvest_plan.json), harvest_blocked.txt (blocked maps,");
         Console.WriteLine("                                 story scripts to run) and harvest_story_playlist.json (those story scripts as a Skua playlist");
         Console.WriteLine("                                 for the VibeSkua Scheduler). --all: also what is already captured; --reset: archive the progress and");
         Console.WriteLine("                                 start from zero; --retry-failed: try failed stops again (both refuse while clients run; --force)");

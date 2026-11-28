@@ -65,7 +65,7 @@ public sealed record HarvestFailure(string Key, string Note);
 
 public sealed class HarvestBlockers
 {
-    public const string ReportFileName = "harvest_blocked.md";
+    public const string ReportFileName = "harvest_blocked.txt";
     public const string PlaylistFileName = "harvest_story_playlist.json";
 
     public const string MemberOnly = "member-only";
