@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -65,6 +66,7 @@ public sealed record HarvestFailure(string Key, string Note);
 public sealed class HarvestBlockers
 {
     public const string ReportFileName = "harvest_blocked.md";
+    public const string PlaylistFileName = "harvest_story_playlist.json";
 
     public const string MemberOnly = "member-only";
     public const string EventLocked = "event-locked";
@@ -83,18 +85,21 @@ public sealed class HarvestBlockers
     /// Sorts the progress file's failed stops: joins refused (classified by the server message the Collector stored for
     /// that map: member-only, event, seasonal, full; none = story/quest progress or another requirement), monsters too
     /// strong for the account, and other failures. Locked maps get the scripts that use them (Story/ first).
+    /// A join refused on a visit stop ("map:lair") or a drop-sampling stop ("sample:lair:123:0") counts once per map.
     /// </summary>
     public static HarvestBlockers Analyze(JsonObject progress, ScriptUsage usage, GameDatabase db)
     {
         var result = new HarvestBlockers();
+        var seenMaps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (key, entry) in progress.OrderBy(p => p.Key, StringComparer.Ordinal))
         {
             if (HarvestProgress.Status(entry) != "failed")
                 continue;
             var note = HarvestProgress.Note(entry);
-            if (key.StartsWith("map:", StringComparison.Ordinal) && note.StartsWith("could not join", StringComparison.Ordinal))
+            if (note.StartsWith("could not join", StringComparison.Ordinal) && MapOfStop(key) is { } map)
             {
-                var map = key[4..];
+                if (!seenMaps.Add(map))
+                    continue;
                 var (reason, detail) = Classify(map, db);
                 var users = usage.Maps.TryGetValue(map, out var s) ? s.ToList() : new List<string>();
                 var story = users.Where(u => u.StartsWith("Story/", StringComparison.OrdinalIgnoreCase)).ToList();
@@ -119,6 +124,19 @@ public sealed class HarvestBlockers
         return result;
     }
 
+    /// <summary>The map a stop joins: "map:&lt;map&gt;" or "sample:&lt;map&gt;:&lt;monsterId&gt;:&lt;kills&gt;" (see HarvestPlan); null for other stops.</summary>
+    private static string? MapOfStop(string key)
+    {
+        if (key.StartsWith("map:", StringComparison.Ordinal))
+            return key[4..];
+        if (key.StartsWith("sample:", StringComparison.Ordinal))
+        {
+            var parts = key.Split(':');
+            return parts.Length >= 4 && parts[1].Length > 0 ? parts[1] : null;
+        }
+        return null;
+    }
+
     private static (string Reason, string Detail) Classify(string map, GameDatabase db)
     {
         var messages = db.ServerMessages.Values.Where(m => m.TargetMaps.ContainsKey(map)).Select(m => m.Text).ToList();
@@ -141,7 +159,8 @@ public sealed class HarvestBlockers
             sb.AppendLine("None: no map is locked behind story or quest progress.");
         else
         {
-            sb.AppendLine("Run these on the army (e.g. VibeSkua Army Scheduler), then `skuasim harvest-plan --retry-failed` and start the harvester again.");
+            sb.AppendLine($"Run these on the army (e.g. VibeSkua Army Scheduler: load {PlaylistFileName} from this folder as the playlist), " +
+                          "then `skuasim harvest-plan --retry-failed` and start the harvester again.");
             sb.AppendLine();
             for (var i = 0; i < StoryOrder.Count; i++)
                 sb.AppendLine($"{i + 1}. `{StoryOrder[i].Script}` — opens {string.Join(", ", StoryOrder[i].Maps)}");
@@ -165,4 +184,28 @@ public sealed class HarvestBlockers
         sb.AppendLine(Other.Count == 0 ? "None." : string.Join(Environment.NewLine, Other.Select(f => $"- `{f.Key}`: {f.Note}")));
         return sb.ToString();
     }
+
+    /// <summary>
+    /// The story scripts as a Skua script-queue playlist (the format the client's Save Playlist writes and the VibeSkua
+    /// Scheduler loads: [{ Path, Id, Name }]), in <see cref="StoryOrder"/>. The Id is derived from the script path, so the same
+    /// report always gives the same file. Empty list when nothing is locked behind story progress.
+    /// </summary>
+    public string ToSkuaPlaylistJson(string scriptsDirectory)
+    {
+        var entries = StoryOrder.Select(s =>
+        {
+            var path = Path.GetFullPath(Path.Combine(scriptsDirectory, s.Script.Replace('/', Path.DirectorySeparatorChar)));
+            var id = new Guid(MD5.HashData(Encoding.UTF8.GetBytes("skuasim-playlist:" + s.Script.Replace('\\', '/').ToLowerInvariant())));
+            return new PlaylistEntry(path, id.ToString(), Path.GetFileName(path));
+        }).ToList();
+        return JsonSerializer.Serialize(entries, PlaylistJson);
+    }
+
+    private sealed record PlaylistEntry(string Path, string Id, string Name);
+
+    private static readonly JsonSerializerOptions PlaylistJson = new()
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
 }

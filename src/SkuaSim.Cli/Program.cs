@@ -84,6 +84,8 @@ internal static class CliEntry
         var blockers = HarvestBlockers.Analyze(progress, usage, catalog.Captured);
         var reportPath = Path.Combine(Path.GetDirectoryName(outPath)!, HarvestBlockers.ReportFileName);
         File.WriteAllText(reportPath, blockers.ToMarkdown(now));
+        var playlistPath = Path.Combine(Path.GetDirectoryName(outPath)!, HarvestBlockers.PlaylistFileName);
+        File.WriteAllText(playlistPath, blockers.ToSkuaPlaylistJson(scriptsDir));
         if (reset && HarvestProgress.Archive(progressPath, now) is { } archived)
             Console.WriteLine($"Progress reset: the old progress was moved to {archived}");
         else if (retryFailed)
@@ -860,8 +862,9 @@ internal static class CliEntry
         Console.WriteLine("                                 tools\\skua\\SkuaSim_Diagnostic.cs and write the filled bug report (default: <diagnostic>.bugreport.md)");
         Console.WriteLine("  skuasim harvest-plan [--out <file.json>] [--max-stops <n>] [--scripts <dir>] [--gamedata <path>]   List the maps, shops and");
         Console.WriteLine("                                 quests the scripts use that the data still lacks, for tools\\skua\\SkuaSim_Harvester.cs");
-        Console.WriteLine("                                 (default: %LOCALAPPDATA%\\SkuaSim Harvest\\harvest_plan.json) and harvest_blocked.md (blocked maps,");
-        Console.WriteLine("                                 story scripts to run). --all: also what is already captured; --reset: archive the progress and");
+        Console.WriteLine("                                 (default: %LOCALAPPDATA%\\SkuaSim Harvest\\harvest_plan.json), harvest_blocked.md (blocked maps,");
+        Console.WriteLine("                                 story scripts to run) and harvest_story_playlist.json (those story scripts as a Skua playlist");
+        Console.WriteLine("                                 for the VibeSkua Scheduler). --all: also what is already captured; --reset: archive the progress and");
         Console.WriteLine("                                 start from zero; --retry-failed: try failed stops again (both refuse while clients run; --force)");
         Console.WriteLine();
         Console.WriteLine("Run Options:");

@@ -1340,7 +1340,7 @@ internal static class CoreTests
 
         var blockUsage = new ScriptUsage();
         ScriptUsageScanner.ScanSource("Story/Locked1.cs", "class X { void M() { Core.Join(\"zzlocked\"); Core.Join(\"zzlocked2\"); } }", blockUsage);
-        ScriptUsageScanner.ScanSource("Story/Locked2.cs", "class X { void M() { Core.Join(\"zzlocked2\"); } }", blockUsage);
+        ScriptUsageScanner.ScanSource("Story/Locked2.cs", "class X { void M() { Core.Join(\"zzlocked2\"); Core.Join(\"zzsampled\"); } }", blockUsage);
         ScriptUsageScanner.ScanSource("Farm/Member.cs", "class X { void M() { Core.Join(\"zzmember\"); } }", blockUsage);
         var blockDb = new SkuaSim.Collector.Models.GameDatabase();
         blockDb.ServerMessages["m1"] = new SkuaSim.Collector.Models.CapturedServerMessage
@@ -1356,6 +1356,8 @@ internal static class CoreTests
           "map:zzlocked2": { "status": "failed", "note": "could not join zzlocked2 (member-only, locked, seasonal or story-gated?)" },
           "map:zzmember": { "status": "failed", "note": "could not join zzmember (member-only, locked, seasonal or story-gated?)" },
           "sample:zzboss:1:0": { "status": "failed", "note": "too strong: died 5 times (level 30)" },
+          "sample:zzsampled:2:0": { "status": "failed", "note": "could not join zzsampled" },
+          "sample:zzlocked:3:40": { "status": "failed", "note": "could not join zzlocked" },
           "map:zzdone": { "status": "done", "note": "ok" },
           "map:zzbusy": { "status": "claimed", "by": "client-1", "at": "2026-11-25T12:00:00.0000000Z" }
         }
@@ -1363,21 +1365,44 @@ internal static class CoreTests
         var blockProgress = HarvestProgress.Load(blockProgressPath);
         var blockers = HarvestBlockers.Analyze(blockProgress, blockUsage, blockDb);
         Assert(blockers.Maps.Single(m => m.Map == "zzmember").Reason == HarvestBlockers.MemberOnly &&
-               blockers.Maps.Single(m => m.Map == "zzlocked").Reason == HarvestBlockers.Locked && blockers.TooStrong.Count == 1,
-            $"Joins must be classified (member-only from the server message, locked without one), got " +
-            $"[{string.Join(", ", blockers.Maps.Select(m => $"{m.Map}={m.Reason}"))}], too strong {blockers.TooStrong.Count}");
-        Assert(blockers.StoryOrder.Count == 1 && blockers.StoryOrder[0].Script == "Story/Locked1.cs" &&
-               blockers.StoryOrder[0].Maps.SequenceEqual(new[] { "zzlocked", "zzlocked2" }),
-            $"One story script opens both locked maps, got [{string.Join("; ", blockers.StoryOrder.Select(s => $"{s.Script}: {string.Join(",", s.Maps)}"))}]");
-        Assert(blockers.ToMarkdown(listed).Contains("1. `Story/Locked1.cs` — opens zzlocked, zzlocked2"), "The report must list the story scripts in order");
+               blockers.Maps.Single(m => m.Map == "zzlocked").Reason == HarvestBlockers.Locked &&
+               blockers.Maps.Single(m => m.Map == "zzsampled").Reason == HarvestBlockers.Locked &&
+               blockers.Maps.Count == 4 && blockers.TooStrong.Count == 1 && blockers.Other.Count == 0,
+            $"Joins must be classified (member-only from the server message, locked without one; a sampling stop's refused join counts " +
+            $"once per map), got [{string.Join(", ", blockers.Maps.Select(m => $"{m.Map}={m.Reason}"))}], too strong {blockers.TooStrong.Count}, " +
+            $"other {blockers.Other.Count}");
+        Assert(blockers.StoryOrder.Count == 2 && blockers.StoryOrder[0].Script == "Story/Locked1.cs" &&
+               blockers.StoryOrder[0].Maps.SequenceEqual(new[] { "zzlocked", "zzlocked2" }) &&
+               blockers.StoryOrder[1].Script == "Story/Locked2.cs" && blockers.StoryOrder[1].Maps.SequenceEqual(new[] { "zzsampled" }),
+            $"Story/Locked1 opens both locked maps, then Story/Locked2 the sampled one, got " +
+            $"[{string.Join("; ", blockers.StoryOrder.Select(s => $"{s.Script}: {string.Join(",", s.Maps)}"))}]");
+        Assert(blockers.ToMarkdown(listed).Contains("1. `Story/Locked1.cs` — opens zzlocked, zzlocked2") &&
+               blockers.ToMarkdown(listed).Contains("2. `Story/Locked2.cs` — opens zzsampled"), "The report must list the story scripts in order");
+        // Same shape as a playlist saved by the Skua client's script queue ([{ Path, Id, Name }], absolute path, file name).
+        var playlistJson = blockers.ToSkuaPlaylistJson(Path.Combine(dir, "Scripts"));
+        using (var playlist = System.Text.Json.JsonDocument.Parse(playlistJson))
+        {
+            var entries = playlist.RootElement.EnumerateArray().ToList();
+            Assert(entries.Count == 2 &&
+                   entries[0].EnumerateObject().Select(p => p.Name).SequenceEqual(new[] { "Path", "Id", "Name" }) &&
+                   entries[0].GetProperty("Path").GetString() == Path.Combine(dir, "Scripts", "Story", "Locked1.cs") &&
+                   entries[0].GetProperty("Name").GetString() == "Locked1.cs" &&
+                   entries[1].GetProperty("Name").GetString() == "Locked2.cs" &&
+                   Guid.TryParse(entries[0].GetProperty("Id").GetString(), out _) &&
+                   entries[0].GetProperty("Id").GetString() != entries[1].GetProperty("Id").GetString(),
+                $"The story playlist must list the scripts in order as Skua playlist entries, got {playlistJson}");
+        }
+        Assert(playlistJson == blockers.ToSkuaPlaylistJson(Path.Combine(dir, "Scripts")) &&
+               new HarvestBlockers().ToSkuaPlaylistJson(dir).Trim() == "[]",
+            "The playlist must be the same on every run (stable Ids) and empty when nothing is story-locked");
         var claimTime = new DateTime(2026, 11, 25, 12, 0, 0, DateTimeKind.Utc);
         Assert(HarvestProgress.ActiveClaims(blockProgress, claimTime.AddMinutes(5)).SequenceEqual(new[] { "map:zzbusy" }) &&
                HarvestProgress.ActiveClaims(blockProgress, claimTime.AddMinutes(30)).Count == 0,
             "A claim is active for 20 minutes (reset/retry refuse while clients run)");
-        Assert(HarvestProgress.RemoveFailed(blockProgressPath, claimTime) == 4 &&
+        Assert(HarvestProgress.RemoveFailed(blockProgressPath, claimTime) == 6 &&
                HarvestProgress.Load(blockProgressPath).Select(p => p.Key).OrderBy(k => k).SequenceEqual(new[] { "map:zzbusy", "map:zzdone" }) &&
                File.Exists(Path.Combine(progressDir, "harvest_progress.20261125-120000.json")),
-            "--retry-failed must clear the 4 failed stops and keep a dated copy");
+            "--retry-failed must clear the 6 failed stops and keep a dated copy");
         var archived = HarvestProgress.Archive(blockProgressPath, claimTime.AddHours(1));
         Assert(archived != null && !File.Exists(blockProgressPath) && File.Exists(archived) && HarvestProgress.Load(blockProgressPath).Count == 0,
             "--reset must move the progress aside so the next run starts from zero");

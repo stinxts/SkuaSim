@@ -106,7 +106,9 @@ public class SkuaSimHarvester
                 }
                 if (stop == null)
                 {
-                    Log("Nothing left to claim: every stop is done, failed or being visited by another client.");
+                    Log("Nothing left to claim: every stop of this plan is done, failed or being worked on by another client. " +
+                        "This is the end of the plan, not an error: run HarvestPlan.bat for the next round (sample stops that still " +
+                        "need kills come back with new keys; maps visited since then add new sample targets), then start again.");
                     break;
                 }
                 var key = (string)stop["key"]!;
@@ -220,13 +222,15 @@ public class SkuaSimHarvester
                 if (!Bot.Player.Alive)
                 {
                     if (++deaths >= 5) { gaveUp = $"too strong: died {deaths} times (level {Bot.Player.Level})"; break; }
-                    Bot.Wait.ForTrue(() => Bot.Player.Alive, 40);
+                    if (!RespawnAndResume(cell, "Left")) { gaveUp = "died and could not get back to the cell"; break; }
                 }
                 if (!string.Equals(Bot.Player.Cell, cell, StringComparison.OrdinalIgnoreCase))
                 {
                     Bot.Map.Jump(cell, "Left");
                     Bot.Wait.ForCellChange(cell);
                 }
+                if (!Bot.Skills.TimerRunning)
+                    StartClassSkills();
                 if (!Bot.Monsters.CurrentAvailableMonsters.Any(m => string.Equals(m.Name, monster, StringComparison.OrdinalIgnoreCase)) &&
                     !Bot.Wait.ForMonsterSpawn(monster, 30))
                 {
@@ -350,16 +354,15 @@ public class SkuaSimHarvester
                 var target = Bot.Monsters.CurrentAvailableMonsters.FirstOrDefault();
                 if (target == null)
                     return null;
+                if (!Bot.Skills.TimerRunning)
+                    StartClassSkills();
                 using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(120));
                 Bot.Kill.Monster(target.Name, limit.Token);
                 if (!Bot.Player.Alive)
                 {
                     if (++deaths >= 5)
                         return $"too strong: died {deaths} times (level {Bot.Player.Level})";
-                    Bot.Wait.ForTrue(() => Bot.Player.Alive, 40);
-                    Bot.Map.Jump(cell, "Spawn");
-                    Bot.Wait.ForCellChange(cell);
-                    if (!string.Equals(Bot.Player.Cell, cell, StringComparison.OrdinalIgnoreCase))
+                    if (!RespawnAndResume(cell, "Spawn"))
                         return "died and could not get back to the room";
                 }
                 else if (limit.IsCancellationRequested)
@@ -409,7 +412,34 @@ public class SkuaSimHarvester
         if (Bot.Player.Alive)
             return;
         Log("Died while visiting; waiting to respawn.");
-        Bot.Wait.ForTrue(() => Bot.Player.Alive, 40);
+        WaitForRespawn();
+    }
+
+    /// <summary>
+    /// Waits until the character is really alive again (Wait.ForTrue's timeout counts tries, not seconds, and gave up
+    /// before AQW's respawn: the loop then went on dead, counting one death per pass), up to 60 s like CoreBots' respawn loop.
+    /// </summary>
+    private bool WaitForRespawn()
+    {
+        for (var waited = 0; waited < 60_000 && !Bot.ShouldExit && !Bot.Player.Alive; waited += 500)
+            Bot.Sleep(500);
+        return Bot.Player.Alive;
+    }
+
+    /// <summary>
+    /// After a death: wait for the respawn, restart the class skills from scratch through CoreBots (a death left the
+    /// skill thread not using skills), and go back to the cell. False when it could not get back.
+    /// </summary>
+    private bool RespawnAndResume(string cell, string pad)
+    {
+        if (!WaitForRespawn())
+            return false;
+        Bot.Skills.Stop();
+        StartClassSkills();
+        Log($"Respawned; skills restarted ({Bot.Player.CurrentClass?.Name}), back to {cell}.");
+        Bot.Map.Jump(cell, pad);
+        Bot.Wait.ForCellChange(cell);
+        return string.Equals(Bot.Player.Cell, cell, StringComparison.OrdinalIgnoreCase);
     }
 
     private void Gap() => Bot.Sleep(Math.Max(300, Bot.Config!.Get<int>("RequestGapMs")));
