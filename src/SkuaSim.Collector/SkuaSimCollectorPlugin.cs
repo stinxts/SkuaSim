@@ -71,6 +71,9 @@ public sealed class SkuaSimCollectorPlugin : ISkuaPlugin
         _engine.SchemaSampler.Enabled = GetBoolOption(OptPacketSchemas, true);
 
         _store = CreateStore();
+        // Collectors of the same PC count a kill they all saw once (shared drops: one roll per kill, see SharedKill).
+        _engine.KillJournal = new FileKillJournal(Path.Combine(
+            Path.GetDirectoryName(_store.PrimaryFilePath) ?? GetPrimaryDataDirectory(), FileKillJournal.FileName));
 
         _workChannel = Channel.CreateUnbounded<Action>(new UnboundedChannelOptions
         {

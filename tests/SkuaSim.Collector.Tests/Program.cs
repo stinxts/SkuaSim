@@ -1378,6 +1378,108 @@ try
     Assert(refusedNewer && File.ReadAllText(futurePath).Contains("99"), "A newer-schema file must not be overwritten");
     Console.WriteLine($"   OK: credited kills camel {camel.CreditedKills} (+{camel.AmbiguousCreditedKills} ambiguous), doc rate {doc.EstimatedDropChance:P0}, legacy/credited/absent sources, newer schema refused");
 
+    Console.WriteLine("12. Testing shared kills across the clients of one PC (one kill, union of drops and quests, respawn, rooms, file journal)...");
+    // Real moveToArea shape (chaoscrypt, test 8) with the room instance in "areaName"; MonMapID 3 is a second monster type.
+    string CryptRoom(string room) => """
+        { "params": { "type": "json", "dataObj": {"cmd":"moveToArea","areaId":185480,"areaName":"ROOM","strMapName":"chaoscrypt",
+          "mondef":[{"sRace":"Chaos","strMonName":"Chaorrupted Knight","intLevel":4,"MonID":170},{"sRace":"Chaos","strMonName":"Chaorrupted Armor","intLevel":5,"MonID":171}],
+          "monmap":[{"MonID":170,"strFrame":"Crypt","MonMapID":1},{"MonID":170,"strFrame":"Basement","MonMapID":2},{"MonID":171,"strFrame":"Basement","MonMapID":3}],
+          "monBranch":[{"intHP":670,"intHPMax":670,"iLvl":4,"wDPS":9,"MonMapID":1,"MonID":170},{"intHP":670,"intHPMax":670,"iLvl":4,"wDPS":9,"MonMapID":2,"MonID":170},
+                       {"intHP":900,"intHPMax":900,"iLvl":5,"wDPS":10,"MonMapID":3,"MonID":171}]} } }
+        """.Replace("ROOM", room);
+    const string GroveRoom = """{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","areaName":"arcangrove-12345","strMapName":"arcangrove","mondef":[{"sRace":"Beast","strMonName":"Gorillaphant","intLevel":10,"MonID":250}],"monmap":[{"MonID":250,"strFrame":"Enter","MonMapID":1}],"monBranch":[{"intHP":900,"intHPMax":900,"iLvl":10,"wDPS":20,"MonMapID":1,"MonID":250}]} } }""";
+    const string ArmetDrop = """{ "params": { "type": "json", "dataObj": {"cmd":"dropItem","items":{"898":{"ItemID":898,"sName":"Corrupted Armet","sType":"Helm","bTemp":false,"iQty":1,"iStk":1,"sReqQuests":""}}} } }""";
+    const string MedalDrop = """{ "params": { "type": "json", "dataObj": {"cmd":"dropItem","items":{"24528":{"ItemID":24528,"sName":"Chaos War Medal","sType":"Resource","bTemp":false,"iQty":1,"iStk":1000}}} } }""";
+    const string SlainAdd = """{ "params": { "type": "json", "dataObj": {"cmd":"addItems","items":{"5574":{"ItemID":5574,"sName":"Slain Gorillaphant","bTemp":true,"sType":"Quest Item","iStk":57,"iQty":1,"sReqQuests":"795,802"}}} } }""";
+    void Respawn(PacketCollectorEngine e, int monMapId) => e.ProcessExtensionPacketJson("{ \"params\": { \"type\": \"str\", \"dataObj\": [ \"respawnMon\", \"-1\", \"" + monMapId + "\" ] } }");
+    PacketCollectorEngine Client(IKillJournal journal, string joinPacket)
+    {
+        var e = new PacketCollectorEngine { KillJournal = journal };
+        e.ProcessExtensionPacketJson(joinPacket);
+        return e;
+    }
+
+    var journal = new InMemoryKillJournal();
+    var a = Enumerable.Range(0, 3).Select(_ => Client(journal, CryptRoom("chaoscrypt-95964"))).ToArray(); // one army room
+    var other = Client(journal, CryptRoom("chaoscrypt-95965"));     // same map, another room
+    var again = Client(journal, CryptRoom("chaoscrypt-95967"));     // credited twice without a respawn between
+    var aoeX = Client(journal, CryptRoom("chaoscrypt-95966"));
+    var aoeY = Client(journal, CryptRoom("chaoscrypt-95966"));
+    var noRoom = Client(journal, """{ "params": { "type": "json", "dataObj": {"cmd":"moveToArea","strMapName":"chaoscrypt","mondef":[{"sRace":"Chaos","strMonName":"Chaorrupted Knight","intLevel":4,"MonID":170}],"monmap":[{"MonID":170,"strFrame":"Crypt","MonMapID":1}],"monBranch":[{"intHP":670,"intHPMax":670,"iLvl":4,"MonMapID":1,"MonID":170}]} } }""");
+    var questA = Client(journal, GroveRoom);
+    var questB = Client(journal, GroveRoom);
+    var questC = Client(journal, GroveRoom);
+    questA.SyncActiveQuests(new[] { 802 });
+    questB.SyncActiveQuests(Array.Empty<int>()); // C never syncs: its active quests are unknown
+    var journalPath = Path.Combine(tempDir, "journal", FileKillJournal.FileName);
+    var f1 = Client(new FileKillJournal(journalPath), CryptRoom("chaoscrypt-95968"));
+    var f2 = Client(new FileKillJournal(journalPath), CryptRoom("chaoscrypt-95968"));
+
+    foreach (var e in a) CreditKill(e, 1);
+    a[0].ProcessExtensionPacketJson(ArmetDrop); // two clients get the same shared drop, the third is at full stack
+    a[1].ProcessExtensionPacketJson(ArmetDrop);
+    CreditKill(other, 1);
+    CreditKill(again, 2);
+    CreditKill(aoeX, 1);
+    CreditKill(aoeY, 1);
+    CreditKill(aoeY, 3); // a different monster within the ambiguity window on one client: the shared kill is ambiguous
+    CreditKill(noRoom, 1);
+    CreditKill(questA, 1);
+    CreditKill(questB, 1);
+    questA.ProcessExtensionPacketJson(SlainAdd);
+    CreditKill(f1, 1);
+    CreditKill(f2, 1);
+    f1.ProcessExtensionPacketJson(ArmetDrop);
+    var journalMidway = File.ReadAllText(journalPath);
+    Thread.Sleep(PendingKillWaitMs);
+
+    a[2].ProcessExtensionPacketJson(MedalDrop); // late drop (after its own window) still joins the shared kill
+    foreach (var e in a.Take(2).Concat(new[] { questA, questB, questC })) Respawn(e, 1);
+    foreach (var e in a.Take(2)) CreditKill(e, 1);  // after respawnMon: a new death, shared by two clients
+    CreditKill(again, 2);                           // same client again without respawnMon: a new death too
+    CreditKill(questA, 1);
+    CreditKill(questC, 1);                          // one client with unknown quests: no quest-set entry
+    Thread.Sleep(PendingKillWaitMs);
+
+    var crypt = a.Concat(new[] { other, again, aoeX, aoeY, noRoom }).ToList();
+    var grove = new[] { questA, questB, questC };
+    var later = DateTime.UtcNow.AddSeconds(10);
+    foreach (var e in crypt.Concat(grove).Concat(new[] { f1, f2 })) e.CommitDueSharedKills(later);
+    var cryptDeltas = crypt.Select(e => e.TakeDeltaSnapshot()).ToList();
+    var groveDeltas = grove.Select(e => e.TakeDeltaSnapshot()).ToList();
+    var fileDeltas = new[] { f1, f2 }.Select(e => e.TakeDeltaSnapshot()).ToList();
+    long Sum(IEnumerable<GameDatabase> ds, Func<GameDatabase, long> f) => ds.Sum(f);
+    long Mon(GameDatabase d, string key, Func<CapturedMonster, long> f) => d.Monsters.TryGetValue(key, out var m) ? f(m) : 0;
+    long Drop(GameDatabase d, string key, int item, Func<CapturedDropStat, long> f) =>
+        d.Monsters.TryGetValue(key, out var m) && m.Drops.TryGetValue(item, out var s) ? f(s) : 0;
+
+    var knightKills = Sum(cryptDeltas, d => Mon(d, "id:170", m => m.CreditedKills));
+    Assert(knightKills == 6,
+        $"Kills: army room 2 (3 clients, then 2 after respawnMon), other room 1, no-respawn client 2, no room 1 = 6, got {knightKills} " +
+        $"[{string.Join("; ", cryptDeltas.Select(d => $"{Mon(d, "id:170", m => m.CreditedKills)}/{string.Join(",", d.DropAttribution.Where(p => p.Key.StartsWith("kills")))}"))}]");
+    Assert(Sum(cryptDeltas, d => Mon(d, "id:170", m => m.AmbiguousCreditedKills)) == 1 && Sum(cryptDeltas, d => Mon(d, "id:171", m => m.AmbiguousCreditedKills)) == 1 &&
+           Sum(cryptDeltas, d => Mon(d, "id:171", m => m.CreditedKills)) == 0,
+        "A kill one client saw as ambiguous is ambiguous for all");
+    Assert(Sum(cryptDeltas, d => Drop(d, "id:170", 898, s => s.CreditedDropEvents)) == 1 && Sum(cryptDeltas, d => Drop(d, "id:170", 24528, s => s.CreditedDropEvents)) == 1,
+        "A drop received by several clients counts once; a late drop of one client joins the kill");
+    // Counted over every client of the journal: crypt 3 + 2 (ambiguous) + 2 (after respawn), grove 2 + 2, single credits 4.
+    long Attr(string key) => Sum(cryptDeltas.Concat(groveDeltas), d => d.DropAttribution.GetValueOrDefault(key));
+    Assert(Attr("kills:shared_clients:3") == 1 && Attr("kills:shared_clients:2") == 4 && Attr("kills:shared_clients:1") == 4 && journal.OpenKills == 0,
+        $"Shared-kill counters: 3 clients {Attr("kills:shared_clients:3")}, 2 clients {Attr("kills:shared_clients:2")}, 1 client {Attr("kills:shared_clients:1")}, open {journal.OpenKills}");
+
+    var journalDeltas = cryptDeltas.Concat(groveDeltas).ToList(); // any client of the journal may commit any room's kill
+    var gorillaKills = Sum(journalDeltas, d => Mon(d, "id:250", m => m.CreditedKills));
+    var sets = journalDeltas.SelectMany(d => d.Monsters.TryGetValue("id:250", out var m) ? m.CreditedKillsByActiveQuestSet : new Dictionary<string, long>()).ToList();
+    Assert(gorillaKills == 2 && sets.Count == 1 && sets[0].Key == "802" && sets[0].Value == 1 &&
+           Sum(journalDeltas, d => Drop(d, "id:250", 5574, s => s.CreditedTrackedDropEvents)) == 1,
+        $"Active quests are the union of the clients' (802 + none = 802); one unknown list leaves the kill out of the quest sets (kills {gorillaKills}, sets {string.Join(";", sets)})");
+
+    Assert(Sum(fileDeltas, d => Mon(d, "id:170", m => m.CreditedKills)) == 1 && Sum(fileDeltas, d => Drop(d, "id:170", 898, s => s.CreditedDropEvents)) == 1,
+        "Two collectors sharing the journal file count one kill");
+    Assert(journalMidway.Contains("chaoscrypt-95968") && journalMidway.Contains(f1.ClientToken) && !File.ReadAllText(journalPath).Contains("chaoscrypt-95968"),
+        "The journal file holds the open kill (room + anonymous tokens) and is emptied once it is counted");
+    Console.WriteLine($"   OK: {knightKills} knight kills from 12 credits, shared drop counted once, quest union, file journal");
+
     Console.WriteLine("   OK: All Collector tests passed successfully!");
 }
 finally

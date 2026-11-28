@@ -40,7 +40,9 @@ dotnet run --project src\SkuaSim.UI
 ## Layout
 
 - `src/SkuaSim.Collector` — Skua plugin. Parses game packets into anonymized `gamedata.json` (+ `packet_schemas.json`).
-  Merges across sessions/clients under a global Mutex. Installed copies live in the VibeSkua/Skua `plugins\` folders
+  Merges across sessions/clients under a global Mutex. The PC's collectors share `kill_journal.json`
+  (`Storage/SharedKillJournal.cs`) so a kill several clients saw (room `areaName` + MonMapID, until `respawnMon`) counts once
+  with the union of its drops and active quests: group drops are rolled once and shared. Installed copies live in the VibeSkua/Skua `plugins\` folders
   listed in CONTEXT.md; rebuilding does not update them.
 - `src/SkuaSim.Core`
   - `Compilation/` — `//cs_include` resolution, Roslyn compile, `TimeHookRewriter` (time APIs → virtual clock),

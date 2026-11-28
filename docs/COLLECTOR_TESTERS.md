@@ -16,7 +16,7 @@ Thanks for helping. The SkuaSim Collector is a Skua/VibeSkua plugin that writes 
    - Skua: `%APPDATA%\Skua\plugins\`
 
    Paste the path into the File Explorer address bar to open it.
-3. Start the client. The **SkuaSim Collector** button in the plugins menu shows the status and the collector version, which should be 1.4.0 or newer. If you run several clients, update all of them at the same time: an older collector rewriting the file made by 1.4.0 erases its new drop counters.
+3. Start the client. The **SkuaSim Collector** button in the plugins menu shows the status and the collector version, which should be 1.5.0 or newer. If you run several clients, update all of them at the same time: an older collector rewriting the file made by 1.4.0 erases its new drop counters, and only 1.5.0 counts a kill that several of your clients saw once.
 
 The collector was built and tested on VibeSkua. It should also work on official Skua, but that has not been fully verified yet. If you use Skua, please report any errors you see.
 
@@ -26,7 +26,7 @@ Play or run bots normally; the collector saves every 30 seconds. To help most:
 
 - Visit maps and fight monsters that scripts use, especially maps nobody has covered yet.
 - Turn in quests, buy and sell in shops, and rank up classes. Every class and level band counts.
-- Running several clients at once is fine. Each client merges its data into the same file safely.
+- Running several clients at once is fine. Each client merges its data into the same file safely, and when several of them fight in the same room, each kill and its drops are counted once (drops are shared in a group), not once per client.
 
 ## Send your data
 

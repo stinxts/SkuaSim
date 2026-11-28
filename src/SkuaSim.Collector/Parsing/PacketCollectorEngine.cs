@@ -4,6 +4,7 @@ using Skua.Core.Models.Monsters;
 using Skua.Core.Models.Quests;
 using Skua.Core.Models.Shops;
 using SkuaSim.Collector.Models;
+using SkuaSim.Collector.Storage;
 
 namespace SkuaSim.Collector.Parsing;
 
@@ -42,7 +43,22 @@ public sealed partial class PacketCollectorEngine
         public bool Ambiguous { get; set; }
         public bool Finalized { get; set; }
         public List<PendingDrop> Drops { get; } = new();
+
+        /// <summary>The kill in the shared journal (null: counted by this client alone, as before 1.5.0).</summary>
+        public string? SharedId { get; set; }
     }
+
+    /// <summary>
+    /// Journal shared by the collectors of this PC (see <see cref="SharedKill"/>): a kill seen by several clients of an
+    /// army counts once, with the union of their drops and active quests. Null = every kill is counted by this client.
+    /// </summary>
+    public IKillJournal? KillJournal { get; set; }
+
+    /// <summary>This client's anonymous token in the journal (random per session, never a name).</summary>
+    public string ClientToken { get; } = Guid.NewGuid().ToString("N")[..12];
+
+    // Room instance from moveToArea "areaName" ("lair-95962"): lowercased, empty when the packet had none (no sharing).
+    private string _currentRoom = string.Empty;
 
     private sealed record PendingDrop(int ItemId, string ItemName, bool IsTemp, int? MeasuredQuantity, int[] RequiredQuestIds);
 
@@ -103,6 +119,7 @@ public sealed partial class PacketCollectorEngine
         {
             CommitEndedPvpMatchIfDueLocked();
             FinalizeDueCreditedKillsLocked(DateTime.UtcNow);
+            CommitDueSharedKillsLocked(DateTime.UtcNow);
             var snapshot = _delta;
             _delta = new GameDatabase();
             snapshot.CollectorVersions[CollectorInfo.Version] = 1; // one flush by this build
@@ -116,6 +133,7 @@ public sealed partial class PacketCollectorEngine
         {
             CommitEndedPvpMatchIfDueLocked();
             FinalizeDueCreditedKillsLocked(DateTime.UtcNow);
+            CommitDueSharedKillsLocked(DateTime.UtcNow);
             return _delta.Maps.Count > 0
                 || _delta.DropAttribution.Count > 0
                 || _delta.Monsters.Count > 0
@@ -676,6 +694,8 @@ public sealed partial class PacketCollectorEngine
         if (!string.IsNullOrEmpty(_pvpMap) && !string.Equals(_pvpMap, normMap, StringComparison.OrdinalIgnoreCase))
             EndPvpMatchLocked();
         _currentMapName = normMap;
+        // A house room ("house-<id>") belongs to one player: it never goes into the shared journal.
+        _currentRoom = normMap == "house" ? string.Empty : (dataObj["areaName"]?.ToString() ?? string.Empty).Trim().ToLowerInvariant();
         _currentCell = "Enter";
         _currentPad = "Spawn";
         _mapMonsters.Clear();
@@ -1507,6 +1527,7 @@ public sealed partial class PacketCollectorEngine
             QuestsKnown = _activeQuestsKnown,
             QuestSetKey = _activeQuestsKnown ? DropRates.QuestSetKey(_activeQuestIds) : string.Empty
         };
+        var nowAmbiguous = new List<CreditedKill>();
         foreach (var other in _pendingCreditedKills)
         {
             if (!string.Equals(other.MonsterKey, kill.MonsterKey, StringComparison.OrdinalIgnoreCase) &&
@@ -1514,12 +1535,103 @@ public sealed partial class PacketCollectorEngine
             {
                 other.Ambiguous = true;
                 kill.Ambiguous = true;
+                nowAmbiguous.Add(other);
             }
         }
+        if (kill.Ambiguous)
+            nowAmbiguous.Add(kill);
+        kill.SharedId = ContributeSharedKillLocked(active, kill, now, nowAmbiguous);
         _pendingCreditedKills.Add(kill);
         _lastCreditedKill = kill;
         _lastKillTimeUtc = now;
         SessionKillsRecorded++;
+    }
+
+    /// <summary>
+    /// Puts the credit into the PC's shared journal right away (all clients get "addGoldExp" within milliseconds, well
+    /// before the "respawnMon" that closes the kill), together with the ambiguity it causes: everything a client learns
+    /// about a shared kill goes to the journal when the packet arrives, so a client that then stays idle loses nothing.
+    /// Null when there is no journal or room, or the journal fails: the kill is then counted by this client alone.
+    /// </summary>
+    private string? ContributeSharedKillLocked(ActiveMonsterState active, CreditedKill kill, DateTime now, List<CreditedKill> nowAmbiguous)
+    {
+        if (KillJournal == null || string.IsNullOrEmpty(_currentRoom))
+            return null;
+        var room = _currentRoom;
+        var quests = kill.QuestsKnown ? _activeQuestIds.ToArray() : Array.Empty<int>();
+        try
+        {
+            return KillJournal.Update(s =>
+            {
+                var shared = s.Contribute(room, active.MapID, ClientToken, now, kill.MonsterId, kill.Name, kill.QuestsKnown, quests);
+                if (kill.Ambiguous)
+                    s.MarkAmbiguous(shared.Id);
+                foreach (var other in nowAmbiguous.Where(k => k.SharedId != null))
+                    s.MarkAmbiguous(other.SharedId!);
+                return shared.Id;
+            });
+        }
+        catch
+        {
+            CountDropAttribution("journal:unavailable");
+            return null;
+        }
+    }
+
+    private static SharedDrop ToSharedDrop(PendingDrop d) => new()
+    {
+        ItemId = d.ItemId,
+        ItemName = d.ItemName,
+        IsTemp = d.IsTemp,
+        MeasuredQuantity = d.MeasuredQuantity,
+        RequiredQuestIds = d.RequiredQuestIds
+    };
+
+    /// <summary>Counts the shared kills due at <paramref name="now"/> (from every client of this PC) into this delta.</summary>
+    private void CommitDueSharedKillsLocked(DateTime now)
+    {
+        if (KillJournal == null)
+            return;
+        List<SharedKill> due;
+        try { due = KillJournal.Update(s => s.TakeDue(now)); }
+        catch { return; }
+        foreach (var shared in due)
+            CommitSharedKillLocked(shared);
+    }
+
+    /// <summary>Counts the shared kills that are due as of <paramref name="asOfUtc"/> (tests and diagnostics).</summary>
+    public void CommitDueSharedKills(DateTime asOfUtc)
+    {
+        lock (_sync)
+        {
+            FinalizeDueCreditedKillsLocked(DateTime.UtcNow);
+            CommitDueSharedKillsLocked(asOfUtc);
+        }
+    }
+
+    private void CommitSharedKillLocked(SharedKill shared)
+    {
+        var mon = GetOrCreateMonster(shared.MonsterId, shared.Name);
+        CountDropAttribution("kills:shared_clients:" + Math.Min(shared.Clients.Count, 20));
+        if (shared.Ambiguous)
+        {
+            mon.AmbiguousCreditedKills++;
+            CountDropAttribution("kills:ambiguous");
+            if (shared.Drops.Count > 0)
+                CountDropAttribution("drops:ambiguous_discarded", shared.Drops.Count);
+            return;
+        }
+
+        mon.CreditedKills++;
+        if (shared.QuestsKnown)
+        {
+            var key = DropRates.QuestSetKey(shared.Quests);
+            mon.CreditedKillsByActiveQuestSet[key] = mon.CreditedKillsByActiveQuestSet.GetValueOrDefault(key) + 1;
+        }
+        CountDropAttribution("kills:credited");
+        foreach (var d in shared.Drops)
+            RecordCreditedDropLocked(mon, new PendingDrop(d.ItemId, d.ItemName, d.IsTemp, d.MeasuredQuantity, d.RequiredQuestIds), shared.QuestsKnown);
+        DropRates.Recompute(mon);
     }
 
     /// <summary>Commits the credited kills whose ambiguity window has passed (all of them when <paramref name="all"/>).</summary>
@@ -1545,6 +1657,8 @@ public sealed partial class PacketCollectorEngine
     private void CommitCreditedKillLocked(CreditedKill kill)
     {
         kill.Finalized = true;
+        if (kill.SharedId != null)
+            return; // in the shared journal already (with its ambiguity and drops): counted once, by whichever client commits it
         var mon = GetOrCreateMonster(kill.MonsterId, kill.Name);
         if (kill.Ambiguous)
         {
@@ -1647,8 +1761,16 @@ public sealed partial class PacketCollectorEngine
     /// </summary>
     private void HandleRespawnMon(JArray parts, DateTime nowUtc)
     {
-        if (parts.Count < 3 || !int.TryParse(parts[2]?.ToString(), out var monMapId) ||
-            !_mapMonsters.TryGetValue(monMapId, out var active))
+        if (parts.Count < 3 || !int.TryParse(parts[2]?.ToString(), out var monMapId))
+            return;
+        // The monster is back: a later credit for this MonMapID in this room is a new death, not the shared one.
+        if (KillJournal != null && !string.IsNullOrEmpty(_currentRoom))
+        {
+            var room = _currentRoom;
+            try { KillJournal.Update(s => { s.CloseJoin(room, monMapId); return 0; }); }
+            catch { }
+        }
+        if (!_mapMonsters.TryGetValue(monMapId, out var active))
             return;
 
         var since = active.PendingRespawnSinceUtc;
@@ -1767,7 +1889,17 @@ public sealed partial class PacketCollectorEngine
         CountDropAttribution("delay_ms:" + DelayBucket((now - kill.At).TotalMilliseconds));
         var requiredBy = _delta.Items.TryGetValue(itemId, out var itemInfo) ? itemInfo.RequiredByQuestIds.ToArray() : Array.Empty<int>();
         var drop = new PendingDrop(itemId, itemName, isTemp, measuredQuantity, requiredBy);
-        if (!kill.Finalized)
+        if (kill.SharedId != null)
+        {
+            // A drop of a shared kill joins it in the journal at once (the kill is counted CommitDelay after it opened,
+            // past this window); the same item from another client is one drop.
+            bool added;
+            try { added = KillJournal!.Update(s => s.AddDrop(kill.SharedId, ToSharedDrop(drop))); }
+            catch { added = false; }
+            if (!added)
+                CountDropAttribution("drops:shared_late");
+        }
+        else if (!kill.Finalized)
         {
             kill.Drops.Add(drop);
         }
